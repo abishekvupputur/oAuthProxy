@@ -5,6 +5,14 @@ endpoints. It exposes routes under `http://127.0.0.1:<port>/app/...`, injects a 
 per route, and refreshes tokens automatically before they expire — so tools like an MCP
 client can talk to an OAuth-protected API without handling auth themselves.
 
+## Screenshots
+
+| Credentials | Routes | Settings |
+|---|---|---|
+| [![Credentials tab](media/credentialsScreen.png)](media/credentialsScreen.png) | [![Routes tab](media/routesScreen.png)](media/routesScreen.png) | [![Settings tab](media/settingsScreen.png)](media/settingsScreen.png) |
+
+*(Credential/upstream names blacked out — that's redaction, not a UI bug.)*
+
 ## Why
 
 MCP servers and REST APIs are often behind OAuth2, but most MCP clients expect a bare HTTP
@@ -21,13 +29,18 @@ already-authenticated requests to whatever's actually behind the route.
     redirect port so it can be registered in Google Cloud Console if needed
   - **Nextcloud / any custom OAuth2 provider** — via `IdentityModel.OidcClient`, works with
     plain OAuth2 (no OIDC discovery, no `userinfo` endpoint required)
+- **Full credential lifecycle** — Connect, Refresh, Disconnect (clears the local token
+  without revoking the grant at the provider), Edit, Delete
 - **Tokens auto-refresh** 10 minutes before expiry, in the background
+- **Live status per credential** — a colored dot plus expiry time, refreshed every 15s
 - **DPAPI-encrypted** credential store — nothing is ever written in plaintext
 - **Activity log** with 2-day rotation, viewable from the Settings tab (every proxied
   request, token refresh, and route reload is logged)
 - **Single-instance guard** — a second launch refuses to start rather than fighting the first
   over ports
 - Survives provider/network errors without crashing — this is meant to run unattended
+- **CI**: pushing a version tag runs the test suite, and only on success builds and publishes
+  a downloadable release — see [Releases](#releases)
 
 ## Requirements
 
@@ -47,6 +60,13 @@ menu (Open Settings / Start with Windows / Exit).
 
 The app listens on **`http://127.0.0.1:5559`** by default (changeable in Settings; requires a
 restart to take effect).
+
+## Releases
+
+Prebuilt, self-contained `OAuthProxy.exe` — no .NET install needed — is published on the
+[Releases page](../../releases) whenever a version tag (`v*`) is pushed. `.github/workflows/release.yml`
+runs the test suite first and only builds/publishes if it passes; nothing is released off a
+failing build. Download the zip, extract, run `OAuthProxy.exe`.
 
 ## Setting up a credential
 
