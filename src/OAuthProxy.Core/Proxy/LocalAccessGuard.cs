@@ -120,6 +120,20 @@ public static class LocalAccessGuard
             return "request carries an Origin header, so it came from a web page";
         }
 
+        // Defense in depth, not a live hole. Kestrel percent-decodes the target and *then*
+        // removes dot segments, so "%2e%2e%2f" is already resolved by the time routing runs —
+        // verified end to end in ProxyForwardingTests over a raw socket, since System.Uri
+        // normalizes this away client-side before HttpClient can even send it.
+        //
+        // Kept because the confinement of a caller to one upstream area rests entirely on that
+        // normalization order, and nothing else in this pipeline would notice if it changed:
+        // a surviving "../" would let a caller climb above an upstream's base path with the
+        // user's access token attached. Costs one string scan per request.
+        if (HasDotSegment(request.Path))
+        {
+            return "path contains a '..' segment";
+        }
+
         var expected = configStoreCache.Current.Settings.LocalApiKey;
         if (string.IsNullOrEmpty(expected))
         {
@@ -136,6 +150,22 @@ public static class LocalAccessGuard
         }
 
         return FixedTimeEquals(presented, expected) ? null : "missing or incorrect local API key";
+    }
+
+    /// <summary>
+    /// Whole-segment match only. A file legitimately named "notes..txt" is not traversal, and
+    /// rejecting every path that merely contains two dots would break real upstream URLs.
+    /// </summary>
+    private static bool HasDotSegment(PathString path)
+    {
+        if (path.Value is not { } value || !value.Contains("..", StringComparison.Ordinal)) return false;
+
+        foreach (var segment in value.Split('/'))
+        {
+            if (segment == "..") return true;
+        }
+
+        return false;
     }
 
     /// <summary>Length-independent, content-constant-time comparison — no early exit to time against.</summary>

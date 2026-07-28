@@ -27,6 +27,14 @@ public static class ProxyConfigBuilder
             var upstream = upstreams.FirstOrDefault(u => u.Id == mapping.UpstreamId);
             if (upstream is null) continue;
 
+            // Skipped here rather than handed to YARP: an unparseable route template makes YARP
+            // reject the whole config update and keep the previous one, so a single bad prefix
+            // would take every *other* route's pending edit down with it. Dropping it means the
+            // rest still apply and the count this method returns is the count that took effect.
+            // Newly created prefixes are already blocked in the UI; this catches stores written
+            // before that check existed.
+            if (!RouteValidation.IsValidPathPrefix(mapping.PathPrefix)) continue;
+
             var routeId = mapping.Id.ToString();
             var prefix = mapping.PathPrefix.TrimEnd('/');
 

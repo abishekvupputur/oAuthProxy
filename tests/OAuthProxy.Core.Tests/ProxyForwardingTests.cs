@@ -177,4 +177,80 @@ public class ProxyForwardingTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.Empty(Received);
     }
+
+    [Fact]
+    public async Task EncodedDotSegments_CannotClimbOutOfTheRoutePrefix()
+    {
+        // Sent over a raw socket on purpose: System.Uri decodes "%2e" to "." and removes the
+        // dot segments client-side, so HttpClient physically cannot put this on the wire.
+        // Anything speaking HTTP directly (curl --path-as-is, a socket) has no such difficulty.
+        //
+        // Kestrel percent-decodes and *then* removes dot segments, so this arrives at routing
+        // as "/escaped", matches no route, and never reaches an upstream. Pinned as a test
+        // because the whole confinement story rests on it: if that normalization order ever
+        // changed, a caller could climb above an upstream's base path with the user's token
+        // attached and nothing else in the pipeline would notice.
+        var statusLine = await SendRawAsync("GET /app/echo/%2e%2e/%2e%2e/escaped HTTP/1.1");
+
+        Assert.DoesNotContain("200", statusLine);
+        Assert.Empty(Received);
+    }
+
+    [Fact]
+    public async Task EncodedDotSegments_AreResolvedBeforeTheRequestIsForwarded()
+    {
+        // The other half of the same behavior, and the part that proves it is normalization
+        // rather than a coincidental 404: a ".." that resolves back inside the prefix is
+        // forwarded, with the upstream seeing the already-collapsed path.
+        var statusLine = await SendRawAsync("GET /app/echo/sub/%2e%2e/resource HTTP/1.1");
+
+        Assert.Contains("200", statusLine);
+        Assert.Equal("/resource", Assert.Single(Received).Path);
+    }
+
+    [Fact]
+    public async Task RawRequestWithoutDotSegments_StillWorks()
+    {
+        // Guards against the raw-socket helper above passing for the wrong reason.
+        var statusLine = await SendRawAsync("GET /app/echo/resource HTTP/1.1");
+
+        Assert.Contains("200", statusLine);
+        Assert.Equal("/resource", Assert.Single(Received).Path);
+    }
+
+    /// <summary>
+    /// Sends a request line verbatim, with no client-side URI normalization, and returns the
+    /// response's status line.
+    /// </summary>
+    private async Task<string> SendRawAsync(string requestLine)
+    {
+        var address = _client.BaseAddress!;
+
+        using var tcp = new System.Net.Sockets.TcpClient();
+        await tcp.ConnectAsync(address.Host, address.Port);
+
+        await using var stream = tcp.GetStream();
+        var raw = $"{requestLine}\r\n"
+                  + $"Host: {address.Host}:{address.Port}\r\n"
+                  + $"{LocalAccessGuard.ApiKeyHeaderName}: {ApiKey}\r\n"
+                  + "Connection: close\r\n\r\n";
+        await stream.WriteAsync(System.Text.Encoding.ASCII.GetBytes(raw));
+
+        using var reader = new StreamReader(stream, System.Text.Encoding.ASCII);
+        return await reader.ReadLineAsync() ?? "";
+    }
+
+    [Fact]
+    public async Task TwoDotsInsideASegment_AreStillForwarded()
+    {
+        // Only whole ".." segments are traversal. A file legitimately named "a..b" is not, and
+        // rejecting it would break real upstream URLs.
+        var request = new HttpRequestMessage(HttpMethod.Get, "/app/echo/files/a..b");
+        request.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, ApiKey);
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("/files/a..b", Assert.Single(Received).Path);
+    }
 }

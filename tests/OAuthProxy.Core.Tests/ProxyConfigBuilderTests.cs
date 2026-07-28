@@ -66,4 +66,33 @@ public class ProxyConfigBuilderTests
         Assert.Empty(routes);
         Assert.Empty(clusters);
     }
+
+    [Fact]
+    public void Build_RouteWithUnparseablePrefix_IsExcludedWithoutTakingOtherRoutesDown()
+    {
+        // A prefix containing '{' produces a template RoutePatternFactory cannot parse. Handed
+        // to YARP it makes the whole config update fail, so the good route's pending edit would
+        // be discarded too. Dropping just the bad one keeps the rest applying.
+        var upstream = new UpstreamRecord { Name = "echo", BaseUrl = "https://api.test" };
+
+        var good = new RouteMapping { PathPrefix = "/good", UpstreamId = upstream.Id, CredentialId = Guid.NewGuid() };
+        var bad = new RouteMapping { PathPrefix = "/bad{x}", UpstreamId = upstream.Id, CredentialId = Guid.NewGuid() };
+
+        var (routes, clusters) = ProxyConfigBuilder.Build([good, bad], [upstream]);
+
+        Assert.Single(routes);
+        Assert.Single(clusters);
+        Assert.Equal("/good/{**catch-all}", routes[0].Match.Path);
+    }
+
+    [Fact]
+    public void Build_RouteWithDotSegmentPrefix_IsExcluded()
+    {
+        var upstream = new UpstreamRecord { Name = "echo", BaseUrl = "https://api.test" };
+        var route = new RouteMapping { PathPrefix = "/api/../admin", UpstreamId = upstream.Id, CredentialId = Guid.NewGuid() };
+
+        var (routes, _) = ProxyConfigBuilder.Build([route], [upstream]);
+
+        Assert.Empty(routes);
+    }
 }

@@ -1,4 +1,5 @@
 using OAuthProxy.Core.Diagnostics;
+using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Storage;
 using Yarp.ReverseProxy.Configuration;
 
@@ -22,6 +23,21 @@ public sealed class ProxyConfigChangeNotifier(
         foreach (var route in routes)
         {
             activityLog.Log($"  {route.Match.Path} -> {clusters.First(c => c.ClusterId == route.ClusterId).Destinations!["d1"].Address}");
+        }
+
+        // The log used to report only what was built, so a route dropped by the builder looked
+        // identical to one that was never configured — the user saw a healthy "reloaded" line
+        // and a route that silently did nothing. Name each one and why it went.
+        foreach (var mapping in store.Routes.Where(r => r.Enabled))
+        {
+            if (RouteValidation.ValidatePathPrefix(mapping.PathPrefix) is { } prefixError)
+            {
+                activityLog.Log($"  SKIPPED '{mapping.PathPrefix}' — {prefixError}");
+            }
+            else if (store.Upstreams.All(u => u.Id != mapping.UpstreamId))
+            {
+                activityLog.Log($"  SKIPPED '{mapping.PathPrefix}' — its upstream no longer exists");
+            }
         }
     }
 }

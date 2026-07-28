@@ -68,19 +68,81 @@ public sealed class ConfigStoreCache
     /// Applies a mutation and persists it as one atomic unit. Every write path should use this
     /// rather than mutating <see cref="Current"/> and then calling <see cref="SaveAsync"/>
     /// separately — that leaves a window where another thread serializes a half-applied edit.
+    ///
+    /// If the write fails the mutation is undone, so memory never claims something disk does
+    /// not have. Previously a failed save (full disk, file locked by antivirus) left the edit
+    /// applied in memory: the UI showed the new credential, the proxy routed to it, and it
+    /// vanished at the next restart — silent data loss the user only discovered hours later.
     /// </summary>
     public async Task MutateAsync(Action<ConfigStore> mutate, CancellationToken ct = default)
     {
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            var rollback = Snapshot(_current);
             mutate(_current);
-            await _secureStore.SaveAsync(_current, ct).ConfigureAwait(false);
+
+            try
+            {
+                await _secureStore.SaveAsync(_current, ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                RestoreInto(_current, rollback);
+                throw;
+            }
         }
         finally
         {
             _writeLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Membership of the three lists plus the settings scalars — which is exactly what callers
+    /// change through <see cref="MutateAsync"/> (add/remove a credential, upstream, or route;
+    /// set a port or key).
+    ///
+    /// Deliberately shallow, and restored *into* the existing instances rather than by swapping
+    /// <see cref="Current"/> for a clone. The view models hold direct references to individual
+    /// <see cref="CredentialRecord"/>/<see cref="RouteMapping"/> objects and to the store
+    /// itself; handing back a fresh object graph would leave every one of those bindings
+    /// pointing at an orphan, so a rollback meant to protect data would quietly detach the UI
+    /// from it. The trade-off: an in-place field edit of a record that was already in the store
+    /// is not undone — that reverts on next load instead, which is visible and recoverable,
+    /// unlike a vanished credential.
+    /// </summary>
+    private sealed record StoreSnapshot(
+        List<CredentialRecord> Credentials,
+        List<UpstreamRecord> Upstreams,
+        List<RouteMapping> Routes,
+        int ListenPort,
+        bool StartWithWindows,
+        string LocalApiKey);
+
+    private static StoreSnapshot Snapshot(ConfigStore store) => new(
+        [.. store.Credentials],
+        [.. store.Upstreams],
+        [.. store.Routes],
+        store.Settings.ListenPort,
+        store.Settings.StartWithWindows,
+        store.Settings.LocalApiKey);
+
+    private static void RestoreInto(ConfigStore store, StoreSnapshot snapshot)
+    {
+        ReplaceAll(store.Credentials, snapshot.Credentials);
+        ReplaceAll(store.Upstreams, snapshot.Upstreams);
+        ReplaceAll(store.Routes, snapshot.Routes);
+
+        store.Settings.ListenPort = snapshot.ListenPort;
+        store.Settings.StartWithWindows = snapshot.StartWithWindows;
+        store.Settings.LocalApiKey = snapshot.LocalApiKey;
+    }
+
+    private static void ReplaceAll<T>(List<T> target, List<T> source)
+    {
+        target.Clear();
+        target.AddRange(source);
     }
 
     /// <summary>

@@ -213,13 +213,22 @@ Everything lives under `%AppData%\OAuthProxy\`:
 
 Settings tab has buttons to open either log, open the folder, or prune old logs. Activity
 logs record request **paths** and query parameter **names**; parameter values are redacted,
-and tokens are never logged.
+and tokens are never logged. Control characters in a logged value are escaped (`\n`, `\x1b`)
+so that one event can only ever produce one line — request paths reach the log percent-decoded,
+so without this a caller could write whole fabricated entries.
+
+At startup the log also flags any stored upstream or token endpoint that uses plain `http`
+off-machine, as `STARTUP WARNING`. New entries are rejected at the point they are added, but
+anything saved by an older build was never re-checked, and those put access tokens and client
+secrets on the wire in cleartext.
 
 If `store.dat` cannot be read — a truncated file after a hard power loss, or a profile copied
 to another machine or user account, which DPAPI cannot decrypt — it is renamed aside as
 `store.dat.corrupt-<timestamp>` and the app starts with empty config rather than failing to
 start. The old file is kept, not deleted, in case it can still be recovered by the account
-that wrote it.
+that wrote it. This is reported both in the activity log and in a dialog on launch: it means
+every credential, upstream, and route is gone and a **new local API key** has been generated,
+so every configured client will get 403 until it is updated.
 
 ### Encryption scope
 

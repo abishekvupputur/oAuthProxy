@@ -10,6 +10,7 @@ namespace OAuthProxy.Core.Tests;
 public class ConfigStoreResilienceTests : IDisposable
 {
     private readonly string _tempFile = Path.Combine(Path.GetTempPath(), $"oauthproxy-test-{Guid.NewGuid()}.dat");
+    private readonly string _blockerFile = Path.Combine(Path.GetTempPath(), $"oauthproxy-test-blocker-{Guid.NewGuid()}");
 
     [Fact]
     public async Task Load_UnreadableFile_QuarantinesItAndReturnsEmptyStore()
@@ -117,8 +118,75 @@ public class ConfigStoreResilienceTests : IDisposable
         Assert.Equal(25, reloaded.Credentials.Count);
     }
 
+    [Fact]
+    public async Task MutateAsync_WhenTheSaveFails_UndoesTheMutation()
+    {
+        // The original failure: a failed write (full disk, file locked by antivirus) left the
+        // edit applied in memory. The UI showed the new credential and the proxy routed to it,
+        // then it vanished at the next restart - silent data loss discovered hours later.
+        var cache = new ConfigStoreCache(UnwritableStore());
+
+        var existing = new CredentialRecord { Name = "keep", ClientId = "id", ClientSecret = "secret" };
+        cache.Current.Credentials.Add(existing);
+
+        await Assert.ThrowsAnyAsync<Exception>(() => cache.MutateAsync(store =>
+            store.Credentials.Add(new CredentialRecord { Name = "doomed", ClientId = "id", ClientSecret = "secret" })));
+
+        var survivor = Assert.Single(cache.Current.Credentials);
+        Assert.Equal("keep", survivor.Name);
+
+        // Restored in place rather than by swapping in a clone: the view models hold direct
+        // references to these records, so a fresh object graph would leave every binding
+        // pointing at an orphan.
+        Assert.Same(existing, survivor);
+    }
+
+    [Fact]
+    public async Task MutateAsync_WhenTheSaveFails_UndoesSettingsChangesToo()
+    {
+        var cache = new ConfigStoreCache(UnwritableStore());
+        cache.Current.Settings.LocalApiKey = "original-key";
+        var originalPort = cache.Current.Settings.ListenPort;
+
+        await Assert.ThrowsAnyAsync<Exception>(() => cache.MutateAsync(store =>
+        {
+            store.Settings.ListenPort = 9999;
+            store.Settings.LocalApiKey = "regenerated-key";
+        }));
+
+        // A half-applied key rotation is the worst case here: every client would be locked out
+        // by a key that was never written down anywhere.
+        Assert.Equal(originalPort, cache.Current.Settings.ListenPort);
+        Assert.Equal("original-key", cache.Current.Settings.LocalApiKey);
+    }
+
+    [Fact]
+    public async Task MutateAsync_WhenTheSaveSucceeds_KeepsTheMutation()
+    {
+        var cache = new ConfigStoreCache(new SecureStore(_tempFile));
+        await cache.InitializeAsync();
+
+        await cache.MutateAsync(store =>
+            store.Credentials.Add(new CredentialRecord { Name = "kept", ClientId = "id", ClientSecret = "secret" }));
+
+        Assert.Single(cache.Current.Credentials);
+        Assert.Single((await new SecureStore(_tempFile).LoadAsync()).Credentials);
+    }
+
+    /// <summary>
+    /// A store whose parent "directory" is really a file, so Directory.CreateDirectory throws
+    /// and every save fails - without needing to mock a sealed dependency.
+    /// </summary>
+    private SecureStore UnwritableStore()
+    {
+        File.WriteAllText(_blockerFile, "not a directory");
+        return new SecureStore(Path.Combine(_blockerFile, "store.dat"));
+    }
+
     public void Dispose()
     {
+        try { File.Delete(_blockerFile); } catch { /* best effort */ }
+
         foreach (var file in Directory.EnumerateFiles(
                      Path.GetDirectoryName(_tempFile)!,
                      Path.GetFileName(_tempFile) + "*"))

@@ -61,7 +61,7 @@ public sealed class ActivityLog
 
     public void Log(string message)
     {
-        var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {message}";
+        var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {Sanitize(message)}";
 
         lock (_gate)
         {
@@ -87,8 +87,11 @@ public sealed class ActivityLog
         {
             try
             {
+                // Only the caller-supplied message is sanitized. The exception's own rendering
+                // is deliberately left intact — errors.log is an explicitly multi-line format
+                // and a stack trace is worthless collapsed onto one line.
                 File.AppendAllText(ErrorLogPath,
-                    $"{DateTime.Now:O} {message}{Environment.NewLine}{ex}{Environment.NewLine}{Environment.NewLine}",
+                    $"{DateTime.Now:O} {Sanitize(message)}{Environment.NewLine}{ex}{Environment.NewLine}{Environment.NewLine}",
                     Encoding.UTF8);
             }
             catch
@@ -96,6 +99,39 @@ public sealed class ActivityLog
                 // ignored
             }
         }
+    }
+
+    /// <summary>
+    /// Collapses control characters so one logged event can only ever produce one line.
+    ///
+    /// This log is line-oriented, and much of what it records is attacker-controlled: request
+    /// paths and query keys arrive here percent-*decoded* (Kestrel turns "%0A" into a real
+    /// newline), and credential names are free text. Without this, anyone who can send the
+    /// proxy a request could write whole fabricated entries — including convincing "PROXY ...
+    /// [token: ...]" lines. It does not even take a valid API key: the DENIED line is written
+    /// on the rejection path, so a web page's blocked request forges log content just as well.
+    ///
+    /// Escapes rather than strips, so evidence of the attempt survives instead of being
+    /// quietly erased. ESC and friends go too — these files get opened in a terminal.
+    /// </summary>
+    private static string Sanitize(string message)
+    {
+        if (!message.Any(char.IsControl)) return message;
+
+        var builder = new StringBuilder(message.Length);
+        foreach (var character in message)
+        {
+            builder.Append(character switch
+            {
+                '\r' => "\\r",
+                '\n' => "\\n",
+                '\t' => "\\t",
+                _ when char.IsControl(character) => $"\\x{(int)character:x2}",
+                _ => character.ToString(),
+            });
+        }
+
+        return builder.ToString();
     }
 
     /// <summary>Most recent lines, oldest first.</summary>

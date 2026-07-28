@@ -137,22 +137,30 @@ public sealed partial class CredentialsViewModel : ObservableObject
         if (_editingItem is { } editing)
         {
             var record = editing.Record;
-            record.Name = NewName.Trim();
-            record.ClientId = NewClientId.Trim();
-            if (!string.IsNullOrWhiteSpace(NewClientSecret))
-            {
-                // Blank means "keep the existing secret" — we never redisplay stored secrets.
-                record.ClientSecret = NewClientSecret.Trim();
-            }
-            record.Scopes = scopes;
-            record.Authority = authority;
-            record.AuthorizationEndpoint = authorizationEndpoint;
-            record.TokenEndpoint = tokenEndpoint;
-            record.RequiresIdToken = SelectedPreset.RequiresIdToken;
-            record.UsesPkce = NewUsesPkce;
-            record.IsGoogleProvider = isGoogle;
 
-            await _configStoreCache.SaveAsync();
+            // Inside MutateAsync rather than mutate-then-SaveAsync. These nine assignments are
+            // not atomic together, and the refresh loop serializes the same store on a
+            // background thread — landing mid-edit persisted a record that was half old and
+            // half new (a new authority against an old client id, say), which then fails to
+            // authorize in a way that looks nothing like a save race.
+            await _configStoreCache.MutateAsync(_ =>
+            {
+                record.Name = NewName.Trim();
+                record.ClientId = NewClientId.Trim();
+                if (!string.IsNullOrWhiteSpace(NewClientSecret))
+                {
+                    // Blank means "keep the existing secret" — we never redisplay stored secrets.
+                    record.ClientSecret = NewClientSecret.Trim();
+                }
+                record.Scopes = scopes;
+                record.Authority = authority;
+                record.AuthorizationEndpoint = authorizationEndpoint;
+                record.TokenEndpoint = tokenEndpoint;
+                record.RequiresIdToken = SelectedPreset.RequiresIdToken;
+                record.UsesPkce = NewUsesPkce;
+                record.IsGoogleProvider = isGoogle;
+            });
+
             editing.Refresh();
             StatusMessage = $"Saved changes to '{record.Name}'.";
             CancelEdit();
@@ -248,6 +256,11 @@ public sealed partial class CredentialsViewModel : ObservableObject
 
         try
         {
+            // Not wrapped in MutateAsync, unlike the other write paths: the record is mutated
+            // inside the service, and the browser consent flow it waits on can take minutes.
+            // Holding the store's write lock for that would stall the refresh loop and every
+            // other save. Safe because the only field written is Token, and a single reference
+            // assignment cannot be observed half-applied by a concurrent serialization.
             var outcome = await _oAuth2Service.StartAuthorizationAsync(item.Record);
             if (outcome.Success)
             {
@@ -278,9 +291,11 @@ public sealed partial class CredentialsViewModel : ObservableObject
 
         // Clears the locally stored token only — it does not revoke the grant at the
         // provider, so Connect re-authorizes without a fresh consent screen in most cases.
-        item.Record.Token = null;
-        item.Record.NeedsReconnect = false;
-        await _configStoreCache.SaveAsync();
+        await _configStoreCache.MutateAsync(_ =>
+        {
+            item.Record.Token = null;
+            item.Record.NeedsReconnect = false;
+        });
         item.Refresh();
         StatusMessage = $"'{item.Name}' disconnected — stored token cleared (not revoked at the provider).";
         _activityLog.Log($"DISCONNECT '{item.Name}' — stored token cleared");

@@ -149,18 +149,12 @@ public sealed partial class RoutesViewModel : ObservableObject
         var prefix = NewRoutePathPrefix.Trim();
         if (!prefix.StartsWith('/')) prefix = "/" + prefix;
 
-        // A bare "/" builds the pattern "/{**catch-all}", which swallows every request to the
-        // proxy and points all of it at one upstream with one credential attached — almost
-        // certainly not what someone typing a single slash intended.
-        if (prefix.TrimEnd('/').Length == 0)
+        // Shared with ProxyConfigBuilder so the UI cannot accept a prefix the config builder
+        // would go on to skip. Covers '/' alone, '..' segments, and the route-template
+        // metacharacters that would stop the route loading at all.
+        if (RouteValidation.ValidatePathPrefix(prefix) is { } prefixError)
         {
-            StatusMessage = "'/' would capture every request to the proxy. Use a specific prefix such as '/gmail'.";
-            return;
-        }
-
-        if (prefix.Contains("..") || prefix.Contains('\\'))
-        {
-            StatusMessage = "Path prefix may not contain '..' or backslashes.";
+            StatusMessage = prefixError;
             return;
         }
 

@@ -96,6 +96,14 @@ public partial class App : Application
         });
 
         builder.Services.AddOAuthProxy();
+
+        // Registered after AddOAuthProxy so this instance wins (last registration is what
+        // GetRequiredService resolves). Two reasons it has to be the same object: the store is
+        // otherwise loaded and decrypted twice at every launch, and — the one that mattered —
+        // a quarantine detected during the bootstrap load was recorded on an instance that was
+        // then thrown away, so nothing downstream could report it.
+        builder.Services.AddSingleton(bootstrapStore);
+
         builder.Services.AddSingleton<AutostartService>();
 
         builder.Services.AddSingleton<CredentialsViewModel>();
@@ -131,6 +139,34 @@ public partial class App : Application
         _trayIconManager.Initialize(
             mainWindow,
             onAutostartChanged: () => Dispatcher.Invoke(settingsViewModel.Reload));
+
+        // Deliberately last: this is modal, and showing it earlier would stall startup with no
+        // tray icon on screen to explain what the user is looking at.
+        if (bootstrapStore.QuarantinedFilePath is { } quarantinedPath)
+        {
+            ReportQuarantinedStore(quarantinedPath);
+        }
+    }
+
+    /// <summary>
+    /// An unreadable store means every credential, upstream, and route is gone and a new local
+    /// API key has been issued, so every configured client is about to start failing with 403.
+    /// The app used to recover from this silently, which left the user debugging a working
+    /// proxy that had simply forgotten everything.
+    /// </summary>
+    private static void ReportQuarantinedStore(string quarantinedPath)
+    {
+        MessageBox.Show(
+            "OAuthProxy could not read its saved configuration, so it started with an empty one."
+            + $"{Environment.NewLine}{Environment.NewLine}"
+            + $"The unreadable file was kept as:{Environment.NewLine}{quarantinedPath}"
+            + $"{Environment.NewLine}{Environment.NewLine}"
+            + "Credentials, upstreams, and routes need to be set up again. A new local API key "
+            + "has been generated, so any client using the old key will get 403 until updated."
+            + $"{Environment.NewLine}{Environment.NewLine}"
+            + "This usually means the profile was copied from another machine or user account "
+            + "(DPAPI cannot decrypt it there), or the file was truncated by a hard power loss.",
+            "OAuthProxy", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
     private static void ReportStartupFailure(Exception ex)
