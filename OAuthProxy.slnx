@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/OAuthProxy.App/OAuthProxy.App.csproj" />
+    <Project Path="src/OAuthProxy.Core/OAuthProxy.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/OAuthProxy.Core.Tests/OAuthProxy.Core.Tests.csproj" />
+  </Folder>
+</Solution>

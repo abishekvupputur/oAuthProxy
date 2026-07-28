@@ -1,0 +1,61 @@
+<UserControl x:Class="OAuthProxy.App.Views.SettingsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d" d:DesignWidth="480"
+             Background="{StaticResource BgBrush}">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="16">
+            <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14">
+                <StackPanel>
+                    <TextBlock Text="Listen port" Style="{StaticResource SectionHeaderStyle}"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                        <TextBox Width="100" Text="{Binding ListenPort, UpdateSourceTrigger=PropertyChanged}"/>
+                        <Button Content="Save" Margin="8,0,0,0" Width="70" Command="{Binding SavePortCommand}"/>
+                    </StackPanel>
+                    <TextBlock Text="Changing the port requires restarting OAuthProxy." Style="{StaticResource HintTextStyle}"/>
+                </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14">
+                <CheckBox Content="Start with Windows" IsChecked="{Binding StartWithWindows}"/>
+            </Border>
+
+            <Border Style="{StaticResource SectionCardStyle}">
+                <StackPanel>
+                    <TextBlock Text="Recent activity" Style="{StaticResource SectionHeaderStyle}"/>
+                    <TextBlock Text="Last 20 lines — proxied requests, token refreshes, route reloads. Updates every 2s."
+                               Style="{StaticResource HintTextStyle}" Margin="0,0,0,8"/>
+
+                    <Border Background="#151515" BorderBrush="{StaticResource BorderBrush0}" BorderThickness="1"
+                            CornerRadius="4" Padding="8" Margin="0,0,0,10">
+                        <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" MaxHeight="220">
+                            <TextBox Text="{Binding RecentActivity, Mode=OneWay}" IsReadOnly="True"
+                                     FontFamily="Cascadia Code, Consolas" FontSize="11"
+                                     Background="Transparent" BorderThickness="0" Padding="0"
+                                     Foreground="{StaticResource TextBrush}"
+                                     TextWrapping="NoWrap" VerticalScrollBarVisibility="Disabled"/>
+                        </ScrollViewer>
+                    </Border>
+
+                    <WrapPanel>
+                        <Button Content="Open activity log" Margin="0,0,8,6" Style="{StaticResource GhostButtonStyle}"
+                                Command="{Binding OpenActivityLogCommand}"/>
+                        <Button Content="Open error log" Margin="0,0,8,6" Style="{StaticResource GhostButtonStyle}"
+                                Command="{Binding OpenErrorLogCommand}"/>
+                        <Button Content="Open log folder" Margin="0,0,8,6" Style="{StaticResource GhostButtonStyle}"
+                                Command="{Binding OpenLogFolderCommand}"/>
+                        <Button Content="Prune old logs" Margin="0,0,0,6" Style="{StaticResource GhostButtonStyle}"
+                                Command="{Binding PruneLogsCommand}"/>
+                    </WrapPanel>
+
+                    <TextBlock Text="Logs rotate automatically every 2 days; files older than ~10 days are deleted. Prune removes all rotated logs and the error log, keeping the current one."
+                               Style="{StaticResource HintTextStyle}" Margin="0,4,0,0"/>
+                </StackPanel>
+            </Border>
+
+            <TextBlock Text="{Binding StatusMessage}" Style="{StaticResource HintTextStyle}" Margin="0,16,0,0"/>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

@@ -1,0 +1,149 @@
+using System.Windows;
+using Application = System.Windows.Application;
+using MessageBox = System.Windows.MessageBox;
+using OAuthProxy.Core.Diagnostics;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using OAuthProxy.App.Tray;
+using OAuthProxy.App.ViewModels;
+using OAuthProxy.Core.Platform;
+using OAuthProxy.Core.Proxy;
+using OAuthProxy.Core.Storage;
+
+namespace OAuthProxy.App;
+
+/// <summary>
+/// WPF Application drives the process lifetime; it owns a Generic Host (Kestrel + YARP)
+/// started here and stopped on exit. Both the web pipeline and the WPF UI share one DI
+/// container. The app is always tray-resident — no window is shown on launch.
+/// </summary>
+public partial class App : Application
+{
+    private static Mutex? _singleInstanceMutex;
+
+    private WebApplication? _webApp;
+    private TrayIconManager? _trayIconManager;
+
+    protected override void OnStartup(StartupEventArgs e)
+    {
+        base.OnStartup(e);
+
+        // Only one instance may run. A second one would fight the first over the fixed
+        // ports — the proxy port and, more subtly, the fixed OAuth loopback ports, where
+        // the loser fails with "conflicts with an existing registration on the machine".
+        var mutex = new Mutex(initiallyOwned: true, "OAuthProxy_SingleInstance", out var isNewInstance);
+        if (!isNewInstance)
+        {
+            // Not the owner, so it must never be released here — only disposed. The field is
+            // left null so OnExit can tell "we own it" from "we're the duplicate".
+            mutex.Dispose();
+            MessageBox.Show(
+                "OAuthProxy is already running — look for the padlock icon in the system tray.",
+                "OAuthProxy", MessageBoxButton.OK, MessageBoxImage.Information);
+            Shutdown();
+            return;
+        }
+
+        _singleInstanceMutex = mutex;
+
+        // Safety net: this is an always-on tray app, so an unhandled exception anywhere must
+        // not terminate the process (a Nextcloud login error used to kill it outright). Errors
+        // are surfaced to the user and swallowed so the proxy and tray icon stay alive.
+        DispatcherUnhandledException += (_, args) =>
+        {
+            ReportError("Unexpected error", args.Exception);
+            args.Handled = true;
+        };
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            ReportError("Unexpected background error", args.Exception);
+            args.SetObserved();
+        };
+
+        // Read the configured listen port before Kestrel binds — the port can't be changed
+        // once bound, so this one synchronous read happens before host build. The "real"
+        // config load into ConfigStoreCache still happens via ConfigStoreInitializerHostedService.
+        var bootstrapStore = new SecureStore();
+        var initialSettings = bootstrapStore.LoadAsync().GetAwaiter().GetResult().Settings;
+
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls($"http://127.0.0.1:{initialSettings.ListenPort}");
+        builder.WebHost.ConfigureKestrel(options =>
+        {
+            // Long-lived MCP SSE/streamable-HTTP sessions shouldn't be dropped by Kestrel.
+            options.Limits.KeepAliveTimeout = TimeSpan.FromHours(2);
+        });
+
+        builder.Services.AddOAuthProxy();
+        builder.Services.AddSingleton<AutostartService>();
+
+        builder.Services.AddSingleton<CredentialsViewModel>();
+        builder.Services.AddSingleton<RoutesViewModel>();
+        builder.Services.AddSingleton<SettingsViewModel>();
+        builder.Services.AddSingleton<MainWindow>();
+        builder.Services.AddSingleton<TrayIconManager>();
+
+        // Build + start the host on a thread-pool thread (via Task.Run) rather than inline
+        // on the WPF Dispatcher thread. Hosted-service startup (ConfigStoreInitializerHostedService)
+        // awaits async I/O; if that ran with the Dispatcher's SynchronizationContext still
+        // ambient, its continuation would try to post back onto this very thread, which is
+        // blocked waiting for it — a deadlock. Task.Run runs the delegate with no
+        // SynchronizationContext, so nothing in that call graph captures it.
+        _webApp = Task.Run(() =>
+        {
+            var app = builder.Build();
+            app.MapReverseProxy();
+            app.Start();
+            return app;
+        }).GetAwaiter().GetResult();
+
+        var mainWindow = _webApp.Services.GetRequiredService<MainWindow>();
+        _trayIconManager = _webApp.Services.GetRequiredService<TrayIconManager>();
+        _trayIconManager.Initialize(mainWindow);
+    }
+
+    private void ReportError(string title, Exception ex)
+    {
+        try
+        {
+            // Route through ActivityLog so it lands in the same folder the Settings tab
+            // exposes, rather than a stray file in %TEMP%.
+            _webApp?.Services.GetService<ActivityLog>()?.LogError(title, ex);
+        }
+        catch
+        {
+            // Logging must never itself take the app down.
+        }
+
+        MessageBox.Show($"{title}:{Environment.NewLine}{Environment.NewLine}{ex.Message}",
+            "OAuthProxy", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        _trayIconManager?.Dispose();
+        _webApp?.StopAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+        _webApp?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+
+        // Non-null only in the instance that actually owns the mutex; the duplicate disposed
+        // its handle at startup and left this null, so it never reaches ReleaseMutex.
+        if (_singleInstanceMutex is not null)
+        {
+            try
+            {
+                _singleInstanceMutex.ReleaseMutex();
+            }
+            catch (ApplicationException)
+            {
+                // Not the owner (shouldn't happen given the guard above) — nothing to release.
+            }
+
+            _singleInstanceMutex.Dispose();
+            _singleInstanceMutex = null;
+        }
+
+        base.OnExit(e);
+    }
+}

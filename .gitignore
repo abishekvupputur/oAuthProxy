@@ -1,0 +1,44 @@
+# Build output
+bin/
+obj/
+publish/
+[Tt]est[Rr]esults/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.userprefs
+*.userosscache
+*.sln.docstates
+*.csproj.user
+*.VC.db
+*.iml
+
+# Build artefacts
+*.pdb
+*.cache
+*.nupkg
+*.snk
+
+# NuGet
+packages/
+.nuget/
+
+# Logs — the app writes to %AppData%\OAuthProxy\logs, but keep stray local ones out too
+*.log
+
+# Local secrets / state.
+# The real credential store is DPAPI-encrypted at %AppData%\OAuthProxy\store.dat and is
+# never inside the repo, but this guards against a copy ever being dropped here.
+*.dat
+local.settings.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors / tooling
+.vscode/
+.claude/
