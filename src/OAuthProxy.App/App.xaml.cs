@@ -124,8 +124,33 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         _trayIconManager?.Dispose();
-        _webApp?.StopAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
-        _webApp?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+
+        // Same reasoning as the Task.Run in OnStartup: StopAsync/DisposeAsync run on the
+        // WPF Dispatcher thread here. If anything in Kestrel/hosted-service shutdown awaits
+        // without ConfigureAwait(false) while the Dispatcher's SynchronizationContext is
+        // still ambient, its continuation tries to post back onto this exact thread — which
+        // is blocked waiting for it. That deadlock left OAuthProxy.exe running after "Exit"
+        // until force-killed. Task.Run drops the Dispatcher context for this whole shutdown
+        // sequence, so nothing in it can capture it.
+        if (_webApp is not null)
+        {
+            try
+            {
+                // Bounded overall wait too: StopAsync(5s) makes a best effort to respect that
+                // timeout internally, but nothing here should be able to hang OnExit forever —
+                // Wait() with its own timeout is the actual backstop.
+                Task.Run(async () =>
+                {
+                    await _webApp.StopAsync(TimeSpan.FromSeconds(5));
+                    await _webApp.DisposeAsync();
+                }).Wait(TimeSpan.FromSeconds(10));
+            }
+            catch
+            {
+                // Whatever went wrong, exiting is still non-negotiable — fall through to
+                // ReleaseMutex/Environment.Exit below rather than leaving the process stuck.
+            }
+        }
 
         // Non-null only in the instance that actually owns the mutex; the duplicate disposed
         // its handle at startup and left this null, so it never reaches ReleaseMutex.
@@ -145,5 +170,12 @@ public partial class App : Application
         }
 
         base.OnExit(e);
+
+        // Belt-and-suspenders: WPF exiting is supposed to let Main() return and the process
+        // die naturally, but that only happens if every thread in the process is a background
+        // thread. A stray foreground thread anywhere in the dependency graph — YARP, a Google
+        // auth library, anything — would otherwise leave OAuthProxy.exe running invisibly
+        // after "Exit", exactly what was reported. This makes shutdown unconditional.
+        Environment.Exit(0);
     }
 }
