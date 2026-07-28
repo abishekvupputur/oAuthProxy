@@ -101,13 +101,23 @@ public sealed partial class RoutesViewModel : ObservableObject
     {
         if (string.IsNullOrWhiteSpace(NewUpstreamName) || string.IsNullOrWhiteSpace(NewUpstreamBaseUrl)) return;
 
-        var upstream = new UpstreamRecord { Name = NewUpstreamName.Trim(), BaseUrl = NewUpstreamBaseUrl.Trim().TrimEnd('/') };
-        _configStoreCache.Current.Upstreams.Add(upstream);
-        await SaveAndRebuildAsync();
+        var baseUrl = NewUpstreamBaseUrl.Trim().TrimEnd('/');
+
+        // The access token is attached to every request forwarded here, so a plain-http
+        // upstream would put it on the wire in cleartext.
+        if (UrlValidation.ValidateEndpoint(baseUrl, "Upstream base URL") is { } error)
+        {
+            StatusMessage = error;
+            return;
+        }
+
+        var upstream = new UpstreamRecord { Name = NewUpstreamName.Trim(), BaseUrl = baseUrl };
+        await SaveAndRebuildAsync(store => store.Upstreams.Add(upstream));
         Upstreams.Add(upstream);
 
         NewUpstreamName = "";
         NewUpstreamBaseUrl = "";
+        StatusMessage = $"Upstream '{upstream.Name}' added.";
     }
 
     [RelayCommand]
@@ -117,8 +127,7 @@ public sealed partial class RoutesViewModel : ObservableObject
 
         var affected = _configStoreCache.Current.Routes.Count(r => r.UpstreamId == upstream.Id);
 
-        _configStoreCache.Current.Upstreams.Remove(upstream);
-        await SaveAndRebuildAsync();
+        await SaveAndRebuildAsync(store => store.Upstreams.Remove(upstream));
         // Reload so any route that pointed at this upstream immediately shows as broken
         // rather than silently continuing to display a name that no longer exists.
         Reload();
@@ -139,6 +148,21 @@ public sealed partial class RoutesViewModel : ObservableObject
 
         var prefix = NewRoutePathPrefix.Trim();
         if (!prefix.StartsWith('/')) prefix = "/" + prefix;
+
+        // A bare "/" builds the pattern "/{**catch-all}", which swallows every request to the
+        // proxy and points all of it at one upstream with one credential attached — almost
+        // certainly not what someone typing a single slash intended.
+        if (prefix.TrimEnd('/').Length == 0)
+        {
+            StatusMessage = "'/' would capture every request to the proxy. Use a specific prefix such as '/gmail'.";
+            return;
+        }
+
+        if (prefix.Contains("..") || prefix.Contains('\\'))
+        {
+            StatusMessage = "Path prefix may not contain '..' or backslashes.";
+            return;
+        }
 
         // Two routes with the same prefix produce two ASP.NET endpoints with identical match
         // patterns. That loads without complaint but throws AmbiguousMatchException on every
@@ -161,8 +185,7 @@ public sealed partial class RoutesViewModel : ObservableObject
             Enabled = true,
         };
 
-        _configStoreCache.Current.Routes.Add(route);
-        await SaveAndRebuildAsync();
+        await SaveAndRebuildAsync(store => store.Routes.Add(route));
         // Reload rather than Add: the row needs its upstream/credential names resolved.
         Reload();
 
@@ -174,8 +197,7 @@ public sealed partial class RoutesViewModel : ObservableObject
     private async Task DeleteRouteAsync(RouteItemViewModel? item)
     {
         if (item is null) return;
-        _configStoreCache.Current.Routes.Remove(item.Route);
-        await SaveAndRebuildAsync();
+        await SaveAndRebuildAsync(store => store.Routes.Remove(item.Route));
         Routes.Remove(item);
         StatusMessage = $"Route '{item.PathPrefix}' deleted.";
     }
@@ -205,9 +227,22 @@ public sealed partial class RoutesViewModel : ObservableObject
         }
     }
 
-    private async Task SaveAndRebuildAsync()
+    /// <summary>
+    /// Applies an edit and persists it under the store's write lock, then hot-reloads YARP.
+    /// The mutation has to happen inside the lock — the token refresh loop serializes the same
+    /// object on a background thread, and a list edit landing mid-serialization throws.
+    /// </summary>
+    private async Task SaveAndRebuildAsync(Action<ConfigStore>? mutate = null)
     {
-        await _configStoreCache.SaveAsync();
+        if (mutate is null)
+        {
+            await _configStoreCache.SaveAsync();
+        }
+        else
+        {
+            await _configStoreCache.MutateAsync(mutate);
+        }
+
         _proxyConfigChangeNotifier.Rebuild();
     }
 }

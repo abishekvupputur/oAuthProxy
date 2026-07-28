@@ -4,6 +4,7 @@ using System.Text;
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Auth.OAuth2.Requests;
 using Google.Apis.Auth.OAuth2.Responses;
+using OAuthProxy.Core.Models;
 
 namespace OAuthProxy.Core.Auth;
 
@@ -48,7 +49,16 @@ internal sealed class FixedPortGoogleCodeReceiver(int port) : ICodeReceiver
                     + "Another OAuthProxy instance or another program is using that port.", ex);
             }
 
-            Process.Start(new ProcessStartInfo(url.Build().ToString()) { UseShellExecute = true });
+            // Same shell-execute reasoning as LoopbackBrowser: verify it is really a web URL
+            // before letting Windows decide what to launch.
+            var authorizationUrl = url.Build().ToString();
+            if (!UrlValidation.IsSafeToOpenInBrowser(authorizationUrl))
+            {
+                throw new InvalidOperationException(
+                    "Refusing to open the authorization URL: it is not an http/https address.");
+            }
+
+            Process.Start(new ProcessStartInfo(authorizationUrl) { UseShellExecute = true });
 
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(taskCancellationToken, timeoutCts.Token);

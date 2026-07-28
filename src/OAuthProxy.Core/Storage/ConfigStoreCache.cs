@@ -11,7 +11,15 @@ public sealed class ConfigStoreCache
 {
     private readonly SecureStore _secureStore;
     private ConfigStore _current = new();
-    private readonly object _swapLock = new();
+
+    /// <summary>
+    /// Held across the whole serialize-and-write, and by callers while they mutate the store.
+    /// Three threads touch this object — the WPF dispatcher (UI edits), the token refresh
+    /// loop, and thread-pool threads serving proxied requests. Without this, a UI-thread
+    /// Credentials.Add() landing mid-serialization throws "Collection was modified" out of
+    /// SaveAsync, which used to escape the refresh loop and stop the entire host.
+    /// </summary>
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
 
     public ConfigStoreCache(SecureStore secureStore)
     {
@@ -22,30 +30,78 @@ public sealed class ConfigStoreCache
 
     public async Task InitializeAsync(CancellationToken ct = default)
     {
-        _current = await _secureStore.LoadAsync(ct);
+        var loaded = await _secureStore.LoadAsync(ct);
+
+        // Covers both a brand-new install and a store written before this key existed. The
+        // generated value must be persisted here and nowhere else — if it only ever lived in
+        // memory, every restart would produce a different key and clients would break at
+        // random.
+        if (string.IsNullOrEmpty(loaded.Settings.LocalApiKey))
+        {
+            loaded.Settings.LocalApiKey = AppSettings.GenerateApiKey();
+            _current = loaded;
+            await SaveAsync(ct);
+            return;
+        }
+
+        _current = loaded;
     }
 
+    /// <summary>
+    /// Persists the current store. Safe to call concurrently — writes are serialized, and the
+    /// snapshot is taken under the same lock callers use via <see cref="MutateAsync"/>.
+    /// </summary>
     public async Task SaveAsync(CancellationToken ct = default)
     {
-        await _secureStore.SaveAsync(_current, ct);
+        await _writeLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await _secureStore.SaveAsync(_current, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Applies a mutation and persists it as one atomic unit. Every write path should use this
+    /// rather than mutating <see cref="Current"/> and then calling <see cref="SaveAsync"/>
+    /// separately — that leaves a window where another thread serializes a half-applied edit.
+    /// </summary>
+    public async Task MutateAsync(Action<ConfigStore> mutate, CancellationToken ct = default)
+    {
+        await _writeLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            mutate(_current);
+            await _secureStore.SaveAsync(_current, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Waits for any in-flight write to finish. Some UI toggles start a save without awaiting
+    /// it (a checkbox setter is synchronous), and shutdown ends in Environment.Exit — which
+    /// would otherwise kill the process mid-write and silently drop the change.
+    /// </summary>
+    public async Task FlushAsync(TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        try
+        {
+            await _writeLock.WaitAsync(cts.Token).ConfigureAwait(false);
+            _writeLock.Release();
+        }
+        catch (OperationCanceledException)
+        {
+            // A stuck write must not be able to block exit.
+        }
     }
 
     public CredentialRecord? GetCredential(Guid id) =>
         _current.Credentials.FirstOrDefault(c => c.Id == id);
-
-    /// <summary>
-    /// Atomically swaps in a new TokenSet for a credential. TokenSet is immutable, so a
-    /// proxy request reading credential.Token concurrently sees either the fully-old or
-    /// fully-new value, never a torn one.
-    /// </summary>
-    public void ReplaceCredentialToken(Guid credentialId, TokenSet newToken)
-    {
-        lock (_swapLock)
-        {
-            var credential = _current.Credentials.FirstOrDefault(c => c.Id == credentialId);
-            if (credential is null) return;
-            credential.Token = newToken;
-            credential.NeedsReconnect = false;
-        }
-    }
 }

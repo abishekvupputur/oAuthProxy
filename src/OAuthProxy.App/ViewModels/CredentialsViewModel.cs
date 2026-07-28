@@ -13,6 +13,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
 {
     private readonly ConfigStoreCache _configStoreCache;
     private readonly OAuth2Service _oAuth2Service;
+    private readonly TokenRefreshService _tokenRefreshService;
     private readonly ActivityLog _activityLog;
     private readonly DispatcherTimer _statusTimer;
 
@@ -40,10 +41,25 @@ public sealed partial class CredentialsViewModel : ObservableObject
     public bool HasCredentials => Credentials.Count > 0;
     public bool HasNoCredentials => Credentials.Count == 0;
 
-    public CredentialsViewModel(ConfigStoreCache configStoreCache, OAuth2Service oAuth2Service, ActivityLog activityLog)
+    /// <summary>
+    /// Drives the PKCE checkbox's visibility. Only the Google flow actually honours the flag —
+    /// IdentityModel.OidcClient always uses PKCE and offers no way to disable it — so showing
+    /// the control for other providers advertised a setting that did nothing.
+    /// </summary>
+    public bool IsPkceOptionApplicable => ReferenceEquals(SelectedPreset, OAuthProviderPreset.Google);
+
+    /// <summary>Inverse of <see cref="IsPkceOptionApplicable"/>; WPF has no negating visibility converter built in.</summary>
+    public bool IsPkceAlwaysOn => !IsPkceOptionApplicable;
+
+    public CredentialsViewModel(
+        ConfigStoreCache configStoreCache,
+        OAuth2Service oAuth2Service,
+        TokenRefreshService tokenRefreshService,
+        ActivityLog activityLog)
     {
         _configStoreCache = configStoreCache;
         _oAuth2Service = oAuth2Service;
+        _tokenRefreshService = tokenRefreshService;
         _activityLog = activityLog;
         ApplyPresetDefaults(_selectedPreset);
 
@@ -65,7 +81,12 @@ public sealed partial class CredentialsViewModel : ObservableObject
         _statusTimer.Start();
     }
 
-    partial void OnSelectedPresetChanged(OAuthProviderPreset value) => ApplyPresetDefaults(value);
+    partial void OnSelectedPresetChanged(OAuthProviderPreset value)
+    {
+        ApplyPresetDefaults(value);
+        OnPropertyChanged(nameof(IsPkceOptionApplicable));
+        OnPropertyChanged(nameof(IsPkceAlwaysOn));
+    }
 
     private void ApplyPresetDefaults(OAuthProviderPreset preset)
     {
@@ -101,6 +122,17 @@ public sealed partial class CredentialsViewModel : ObservableObject
         var authorizationEndpoint = string.IsNullOrWhiteSpace(NewAuthorizationEndpoint) ? null : NewAuthorizationEndpoint.Trim();
         var tokenEndpoint = string.IsNullOrWhiteSpace(NewTokenEndpoint) ? null : NewTokenEndpoint.Trim();
         var isGoogle = ReferenceEquals(SelectedPreset, OAuthProviderPreset.Google);
+
+        // These endpoints receive the client secret and refresh token. A pasted or mistyped
+        // "http://" here put both on the wire in cleartext and nothing objected.
+        var validationError = UrlValidation.ValidateEndpoint(authority, "Authority")
+                              ?? UrlValidation.ValidateEndpoint(authorizationEndpoint, "Authorization endpoint")
+                              ?? UrlValidation.ValidateEndpoint(tokenEndpoint, "Token endpoint");
+        if (validationError is not null)
+        {
+            StatusMessage = validationError;
+            return;
+        }
 
         if (_editingItem is { } editing)
         {
@@ -141,8 +173,10 @@ public sealed partial class CredentialsViewModel : ObservableObject
                 IsGoogleProvider = isGoogle,
             };
 
-            _configStoreCache.Current.Credentials.Add(record);
-            await _configStoreCache.SaveAsync();
+            // MutateAsync rather than mutate-then-save: the refresh loop can be serializing the
+            // store on another thread, and a List.Add landing mid-serialization throws
+            // "Collection was modified" out of that loop.
+            await _configStoreCache.MutateAsync(store => store.Credentials.Add(record));
             Credentials.Add(new CredentialItemViewModel(record).Refresh());
 
             NewName = "";
@@ -197,8 +231,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
     {
         if (item is null) return;
         if (ReferenceEquals(item, _editingItem)) CancelEdit();
-        _configStoreCache.Current.Credentials.Remove(item.Record);
-        await _configStoreCache.SaveAsync();
+        await _configStoreCache.MutateAsync(store => store.Credentials.Remove(item.Record));
         Credentials.Remove(item);
     }
 
@@ -208,6 +241,11 @@ public sealed partial class CredentialsViewModel : ObservableObject
         if (item is null) return;
         StatusMessage = $"Opening browser to authorize '{item.Name}'…";
         _activityLog.Log($"CONNECT '{item.Name}' starting OAuth flow");
+
+        // A deliberate reconnect means the user believes the problem is fixed; don't make them
+        // sit out the automatic-retry backoff that earlier failures accumulated.
+        _tokenRefreshService.ResetBackoff(item.Record);
+
         try
         {
             var outcome = await _oAuth2Service.StartAuthorizationAsync(item.Record);
@@ -252,6 +290,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
     private async Task RefreshNowAsync(CredentialItemViewModel? item)
     {
         if (item is null) return;
+        _tokenRefreshService.ResetBackoff(item.Record);
         try
         {
             var token = await _oAuth2Service.RefreshAsync(item.Record);

@@ -153,6 +153,10 @@ public sealed class OAuth2Service(GoogleOAuthService googleOAuthService, Activit
             };
         }
 
+        // CredentialRecord.UsesPkce is deliberately not consulted here. IdentityModel.OidcClient 6
+        // always sends a code_challenge and exposes no switch to turn that off, so this path is
+        // unconditionally PKCE-protected. Only the Google flow honours the flag, and the UI now
+        // shows the checkbox only for Google rather than implying a setting that does nothing.
         if (!credential.RequiresIdToken)
         {
             // Plain-OAuth2 providers (e.g. Nextcloud) don't return an id_token at all —
@@ -163,14 +167,22 @@ public sealed class OAuth2Service(GoogleOAuthService googleOAuthService, Activit
         return options;
     }
 
+    /// <summary>
+    /// Parses the "a=1&amp;b=2" extra-parameters field. Values are percent-decoded, because a
+    /// user copying a parameter out of a provider's docs gets it in encoded form — leaving it
+    /// encoded meant it was encoded a second time on the wire and the provider saw a literal
+    /// "%2F" where a "/" was intended.
+    /// </summary>
     private static IEnumerable<KeyValuePair<string, string>> ParseExtraParams(string raw)
     {
         foreach (var segment in raw.Split('&', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             var parts = segment.Split('=', 2);
-            if (parts.Length == 2)
+            if (parts.Length == 2 && !string.IsNullOrWhiteSpace(parts[0]))
             {
-                yield return new KeyValuePair<string, string>(parts[0], parts[1]);
+                yield return new KeyValuePair<string, string>(
+                    Uri.UnescapeDataString(parts[0].Trim()),
+                    Uri.UnescapeDataString(parts[1].Trim()));
             }
         }
     }

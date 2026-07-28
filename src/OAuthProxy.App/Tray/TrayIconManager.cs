@@ -16,10 +16,16 @@ public sealed class TrayIconManager(AutostartService autostartService) : IDispos
 {
     private NotifyIcon? _notifyIcon;
     private MainWindow? _mainWindow;
+    private Action? _onAutostartChanged;
 
-    public void Initialize(MainWindow mainWindow)
+    /// <param name="onAutostartChanged">
+    /// Invoked after the tray menu changes the autostart setting, so the Settings tab can
+    /// re-read it rather than keep showing a stale checkbox.
+    /// </param>
+    public void Initialize(MainWindow mainWindow, Action? onAutostartChanged = null)
     {
         _mainWindow = mainWindow;
+        _onAutostartChanged = onAutostartChanged;
 
         var contextMenu = new ContextMenuStrip
         {
@@ -34,7 +40,16 @@ public sealed class TrayIconManager(AutostartService autostartService) : IDispos
         {
             if (startupItem.Checked) autostartService.Enable();
             else autostartService.Disable();
+
+            // This used to write the registry only, so the Settings tab's checkbox — read once
+            // at construction — kept showing the opposite until the app restarted. Notifying
+            // the view model keeps the two views of one setting in agreement.
+            _onAutostartChanged?.Invoke();
         };
+
+        // Re-read on open, so a change made in the Settings tab is reflected here too.
+        contextMenu.Opening += (_, _) => startupItem.Checked = autostartService.IsEnabled();
+
         contextMenu.Items.Add(startupItem);
 
         contextMenu.Items.Add(new ToolStripSeparator());

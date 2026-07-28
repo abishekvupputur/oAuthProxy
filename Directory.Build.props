@@ -1,0 +1,13 @@
+<Project>
+
+  <PropertyGroup>
+    <!--
+      Writes packages.lock.json next to each project, recording the exact resolved version and
+      content hash of every direct and transitive dependency. CI restores in locked mode, so a
+      dependency that silently changes underneath us fails the build instead of shipping.
+      Regenerate intentionally by restoring with the "force-evaluate" switch.
+    -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+</Project>

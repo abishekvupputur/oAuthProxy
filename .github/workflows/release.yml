@@ -11,22 +11,36 @@ on:
   push:
     tags: ["v*"]
 
+# Third-party actions are pinned to commit SHAs, not tags. A tag is mutable: whoever controls
+# the action's repo can repoint v4 at new code, which would then run inside a job that holds
+# contents:write on this repo and produces the binary users download. The trailing comment
+# records which version each SHA was, since the SHA alone is unreadable.
+#
+# Read-only by default; the one job that needs to publish opts in below, so any job added
+# later starts with no write access rather than inheriting it.
 permissions:
-  contents: write # needed to create the release and upload the asset
+  contents: read
 
 jobs:
   test-build-release:
     runs-on: windows-latest
+    permissions:
+      contents: write # create the release and upload the asset
+      id-token: write # OIDC token used to sign the build provenance attestation
+      attestations: write # publish that attestation to the repo
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: "8.0.x"
 
+      # --locked-mode fails the build if a resolved package does not match packages.lock.json,
+      # so a dependency (or a transitive one) changing content under a version we already
+      # shipped is caught here rather than ending up in a release binary.
       - name: Restore
-        run: dotnet restore OAuthProxy.slnx
+        run: dotnet restore OAuthProxy.slnx --locked-mode
 
       # A failing test step stops the job here (default GitHub Actions behavior) — later
       # steps simply never run, which is the "if tests succeed then build" requirement.
@@ -70,8 +84,21 @@ jobs:
           Copy-Item "$publishDir/OAuthProxy.exe" $exeName
           echo "exePath=$exeName" >> $env:GITHUB_OUTPUT
 
+      # Records which workflow, commit, and runner produced this exact exe, signed via the
+      # job's OIDC identity. The free stand-in for Authenticode signing: it does not stop
+      # SmartScreen warnings, but it does make the binary tamper-evident, so a downloaded exe
+      # can be checked against the build that claims to have produced it:
+      #
+      #   gh attestation verify OAuthProxy-<tag>.exe --repo ${{ github.repository }}
+      #
+      # Placed before the release step so an artifact never gets published unattested.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: ${{ steps.package.outputs.exePath }}
+
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
           name: ${{ steps.version.outputs.version }}

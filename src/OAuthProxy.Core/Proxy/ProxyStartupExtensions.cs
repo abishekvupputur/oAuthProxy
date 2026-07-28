@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using OAuthProxy.Core.Auth;
 using OAuthProxy.Core.Diagnostics;
 using OAuthProxy.Core.Storage;
@@ -23,7 +24,21 @@ public static class ProxyStartupExtensions
 
         services.AddSingleton<GoogleOAuthService>();
         services.AddSingleton<OAuth2Service>();
-        services.AddHostedService<TokenRefreshService>();
+        services.AddSingleton<AccessTokenProvider>();
+
+        // Registered as a singleton first, then handed to the hosting layer, so the UI can
+        // resolve the same instance and clear a credential's retry backoff after a manual
+        // reconnect. AddHostedService<T>() alone would create an instance the UI cannot reach.
+        services.AddSingleton<TokenRefreshService>();
+        services.AddHostedService(sp => sp.GetRequiredService<TokenRefreshService>());
+
+        // A crashing background service defaults to tearing down the entire host. For an
+        // always-on tray app that is the worst outcome: Kestrel stops, every proxied request
+        // starts failing, and the tray icon sits there looking healthy. The refresh loop now
+        // handles its own errors per tick, and this makes sure any gap in that cannot take
+        // the proxy with it.
+        services.Configure<HostOptions>(options =>
+            options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
 
         var configProvider = new InMemoryConfigProvider([], []);
         services.AddSingleton(configProvider);

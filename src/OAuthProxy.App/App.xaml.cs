@@ -62,6 +62,25 @@ public partial class App : Application
             args.SetObserved();
         };
 
+        // Everything below can fail in ways that used to leave a live process with no tray
+        // icon, no window, and no message: a listen port already in use throws out of
+        // app.Start(), and DispatcherUnhandledException then marked it handled, so the app
+        // "kept running" having never finished starting — while still holding the single-
+        // instance mutex, so no later launch could get in either. Startup failure now means
+        // an explanation and a real shutdown.
+        try
+        {
+            StartHost();
+        }
+        catch (Exception ex)
+        {
+            ReportStartupFailure(ex);
+            Shutdown();
+        }
+    }
+
+    private void StartHost()
+    {
         // Read the configured listen port before Kestrel binds — the port can't be changed
         // once bound, so this one synchronous read happens before host build. The "real"
         // config load into ConfigStoreCache still happens via ConfigStoreInitializerHostedService.
@@ -94,14 +113,44 @@ public partial class App : Application
         _webApp = Task.Run(() =>
         {
             var app = builder.Build();
+
+            // Must sit ahead of MapReverseProxy: it rejects callers that cannot present the
+            // local API key, and blocks DNS-rebinding and browser-originated requests. Without
+            // it, any process on this machine can spend the user's OAuth grant.
+            app.UseLocalAccessGuard();
+
             app.MapReverseProxy();
             app.Start();
             return app;
         }).GetAwaiter().GetResult();
 
         var mainWindow = _webApp.Services.GetRequiredService<MainWindow>();
+        var settingsViewModel = _webApp.Services.GetRequiredService<SettingsViewModel>();
+
         _trayIconManager = _webApp.Services.GetRequiredService<TrayIconManager>();
-        _trayIconManager.Initialize(mainWindow);
+        _trayIconManager.Initialize(
+            mainWindow,
+            onAutostartChanged: () => Dispatcher.Invoke(settingsViewModel.Reload));
+    }
+
+    private static void ReportStartupFailure(Exception ex)
+    {
+        // The host may be half-built, so don't count on resolving ActivityLog from it.
+        try
+        {
+            new ActivityLog().LogError("Startup failed", ex);
+        }
+        catch
+        {
+            // ignored
+        }
+
+        MessageBox.Show(
+            $"OAuthProxy could not start.{Environment.NewLine}{Environment.NewLine}{ex.Message}"
+            + $"{Environment.NewLine}{Environment.NewLine}"
+            + "If the listen port is already in use, change it in %APPDATA%\\OAuthProxy or close "
+            + "the other program using it.",
+            "OAuthProxy", MessageBoxButton.OK, MessageBoxImage.Error);
     }
 
     private void ReportError(string title, Exception ex)
@@ -141,6 +190,15 @@ public partial class App : Application
                 // Wait() with its own timeout is the actual backstop.
                 Task.Run(async () =>
                 {
+                    // Settings toggles kick off a save without awaiting it, and this method
+                    // ends in Environment.Exit — so without draining first, flipping a
+                    // checkbox and immediately choosing Exit lost the change.
+                    var configStoreCache = _webApp.Services.GetService<ConfigStoreCache>();
+                    if (configStoreCache is not null)
+                    {
+                        await configStoreCache.FlushAsync(TimeSpan.FromSeconds(3));
+                    }
+
                     await _webApp.StopAsync(TimeSpan.FromSeconds(5));
                     await _webApp.DisposeAsync();
                 }).Wait(TimeSpan.FromSeconds(10));

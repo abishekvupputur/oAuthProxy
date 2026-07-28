@@ -13,9 +13,13 @@ public sealed class ActivityLog
     private const int RetainedPeriods = 5;   // ~10 days of history
     private const int BufferSize = 300;
 
+    /// <summary>How often the retention sweep may run, rather than on every single write.</summary>
+    private static readonly TimeSpan PruneInterval = TimeSpan.FromMinutes(30);
+
     private readonly object _gate = new();
     private readonly Queue<string> _recent = new();
     private readonly string _logDirectory;
+    private DateTime _nextPruneUtc = DateTime.UtcNow;
 
     public ActivityLog(string? logDirectory = null)
     {
@@ -23,7 +27,18 @@ public sealed class ActivityLog
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "OAuthProxy",
             "logs");
-        Directory.CreateDirectory(_logDirectory);
+
+        try
+        {
+            Directory.CreateDirectory(_logDirectory);
+        }
+        catch
+        {
+            // This runs during DI construction, so throwing here failed the whole host build
+            // and took the app down before it could show anything. The in-memory ring buffer
+            // still works without a writable directory; every file write below is already
+            // best-effort, so degrade to memory-only logging instead.
+        }
     }
 
     public string LogDirectory => _logDirectory;
@@ -111,9 +126,19 @@ public sealed class ActivityLog
         }
     }
 
-    /// <summary>Drops rotated files older than the retention window. Called on every write.</summary>
+    /// <summary>
+    /// Drops rotated files older than the retention window. Rate-limited to twice an hour:
+    /// this used to enumerate the log directory on every single write, and with two lines
+    /// logged per proxied request — all under the same global lock — a busy MCP session was
+    /// paying a directory scan per request for a sweep that can only find something once
+    /// every two days.
+    /// </summary>
     private void PruneExpired()
     {
+        var now = DateTime.UtcNow;
+        if (now < _nextPruneUtc) return;
+        _nextPruneUtc = now + PruneInterval;
+
         var cutoff = CurrentPeriodStart().AddDays(-RotationDays * RetainedPeriods);
 
         foreach (var file in Directory.EnumerateFiles(_logDirectory, "activity-*.log"))

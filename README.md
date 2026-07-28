@@ -68,6 +68,18 @@ Prebuilt, self-contained `OAuthProxy.exe` — no .NET install needed — is publ
 runs the test suite first and only builds/publishes if it passes; nothing is released off a
 failing build. Download `OAuthProxy-<version>.exe` and run it — no extraction needed.
 
+Windows will warn that the exe is from an unknown publisher; it is not Authenticode-signed.
+Instead, every release carries a **build provenance attestation** recording the workflow,
+commit, and runner that produced that exact binary. Verify a download with the
+[GitHub CLI](https://cli.github.com/):
+
+```bash
+gh attestation verify OAuthProxy-v1.0.3.exe --repo abishekvupputur/oAuthProxy
+```
+
+A pass means the file is byte-for-byte what CI built from this repo. A failure means it was
+modified after the build, or did not come from here at all.
+
 ## Setting up a credential
 
 Credentials tab → pick a provider preset → fill in Client ID/Secret and scopes → **Add
@@ -109,6 +121,44 @@ a **path prefix** (e.g. `/app/my-service`), pick the upstream and credential →
 - A route can be turned off (**ENABLED** checkbox) without deleting it.
 - Path prefixes must be unique — two routes can't share one; the UI rejects the duplicate up
   front rather than letting every request to it fail at runtime.
+- Upstream base URLs must be `https`, except on localhost. The access token is attached to
+  every request forwarded there, so plain `http` would put it on the wire in cleartext.
+
+## Calling the proxy (local API key)
+
+Every proxied request must present the **local API key** shown in the Settings tab:
+
+```bash
+curl -H "X-Proxy-Key: <your-key>" http://127.0.0.1:5559/app/my-service/foo
+```
+
+For clients that cannot set headers (browser `EventSource`, used by some MCP SSE transports),
+the key may instead be passed as a query parameter:
+
+```
+http://127.0.0.1:5559/app/my-service?token=abc&proxy_key=<your-key>
+```
+
+The key is removed before the request is forwarded — in **both** forms, header and query
+parameter — so it never reaches the upstream's access log and never appears in the activity
+log. Your own headers and query parameters (`token=abc` above) are passed through untouched.
+
+Requests without a valid key get `403`.
+
+**Why this exists.** Listening on `127.0.0.1` keeps other machines out, but it is not an
+authorization boundary: every process on this computer, under any user account, can reach
+loopback. Since the proxy attaches your live OAuth token to whatever it forwards, an
+unguarded listener would hand your Google or Nextcloud session to any local program that
+knew the port. The key also blocks *DNS rebinding*, where a page on an attacker's domain
+re-resolves that name to `127.0.0.1` so the browser treats proxied responses as same-origin
+and lets its JavaScript read them.
+
+Alongside the key, the proxy refuses requests whose `Host` header is not loopback, refuses
+requests carrying an `Origin` header (only browsers send one), and strips `Access-Control-*`
+headers from upstream responses so a permissive upstream cannot re-open the same hole.
+
+Use **Regenerate key** in Settings if the key is ever exposed; every client still using the
+old one starts getting `403` immediately.
 
 ## Project layout
 
@@ -157,12 +207,27 @@ Everything lives under `%AppData%\OAuthProxy\`:
 | Path | Contents |
 |---|---|
 | `store.dat` | DPAPI-encrypted credentials, upstreams, routes, settings |
+| `store.dat.corrupt-<timestamp>` | Only if a store could not be decrypted or parsed at startup — see below |
 | `logs\activity-YYYYMMDD.log` | Every proxied request/response, connect/refresh/disconnect, route reloads. Rotates every 2 days, auto-deletes after ~10 |
 | `logs\errors.log` | Unhandled exceptions and provider errors, with full stack traces |
 
 Settings tab has buttons to open either log, open the folder, or prune old logs. Activity
-logs record request paths and query strings in plaintext — if an upstream ever passes a
-secret as a query parameter, it will appear in the log. Tokens themselves are never logged.
+logs record request **paths** and query parameter **names**; parameter values are redacted,
+and tokens are never logged.
+
+If `store.dat` cannot be read — a truncated file after a hard power loss, or a profile copied
+to another machine or user account, which DPAPI cannot decrypt — it is renamed aside as
+`store.dat.corrupt-<timestamp>` and the app starts with empty config rather than failing to
+start. The old file is kept, not deleted, in case it can still be recovered by the account
+that wrote it.
+
+### Encryption scope
+
+`store.dat` is encrypted with DPAPI at `CurrentUser` scope. That protects it from other user
+accounts, from backups, and from being read on another machine — but **not** from code running
+as you. Any program in your own Windows session can ask DPAPI to decrypt it. That is the
+ceiling for a desktop app with no master password; adding entropy would not raise it, since
+the entropy would have to live in the binary.
 
 ## Autostart
 

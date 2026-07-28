@@ -32,6 +32,12 @@ public partial class MainWindow : Window
         {
             routesViewModel.Reload();
         }
+
+        // Settings shows the autostart state, which the tray menu can also change.
+        if (SettingsViewControl.DataContext is SettingsViewModel settingsViewModel)
+        {
+            settingsViewModel.Reload();
+        }
     }
 
     private void MainWindow_Closing(object? sender, CancelEventArgs e)

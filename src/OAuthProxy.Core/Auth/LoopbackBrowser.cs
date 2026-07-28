@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using IdentityModel.OidcClient.Browser;
+using OAuthProxy.Core.Models;
 
 namespace OAuthProxy.Core.Auth;
 
@@ -56,6 +57,20 @@ public sealed class LoopbackBrowser : IBrowser
                     ResultType = BrowserResultType.UnknownError,
                     Error = $"Could not listen on {StaticRedirectUri} ({ex.Message}). "
                           + "Another OAuthProxy instance or another program is using that port.",
+                };
+            }
+
+            // UseShellExecute means Windows resolves whatever this string is — a registered
+            // protocol handler, a UNC path, an executable — not necessarily a browser. The URL
+            // is built from user-editable endpoint config, so check the scheme before handing
+            // it to the shell.
+            if (!UrlValidation.IsSafeToOpenInBrowser(options.StartUrl))
+            {
+                return new BrowserResult
+                {
+                    ResultType = BrowserResultType.UnknownError,
+                    Error = "Refusing to open the authorization URL: it is not an http/https address. "
+                          + "Check this credential's authorization endpoint.",
                 };
             }
 
