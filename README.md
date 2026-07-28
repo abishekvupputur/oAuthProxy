@@ -66,7 +66,7 @@ restart to take effect).
 Prebuilt, self-contained `OAuthProxy.exe` — no .NET install needed — is published on the
 [Releases page](../../releases) whenever a version tag (`v*`) is pushed. `.github/workflows/release.yml`
 runs the test suite first and only builds/publishes if it passes; nothing is released off a
-failing build. Download the zip, extract, run `OAuthProxy.exe`.
+failing build. Download `OAuthProxy-<version>.exe` and run it — no extraction needed.
 
 ## Setting up a credential
 

@@ -59,21 +59,16 @@ jobs:
           $version = $env:GITHUB_REF_NAME
           echo "version=$version" >> $env:GITHUB_OUTPUT
 
-      - name: Package release artifact
+      # Just the exe, renamed with the version so it's unambiguous in the Releases file
+      # list — no zip, no bundled LICENSE/notices alongside it.
+      - name: Rename artifact
         id: package
         shell: pwsh
         run: |
           $publishDir = "src/OAuthProxy.App/bin/Release/net8.0-windows/publish/win-x64"
-          $stagingDir = "release-staging"
-          New-Item -ItemType Directory -Path $stagingDir | Out-Null
-          Copy-Item "$publishDir/OAuthProxy.exe" $stagingDir
-          Copy-Item "LICENSE" $stagingDir
-          Copy-Item "THIRD-PARTY-NOTICES.md" $stagingDir
-          Copy-Item "README.md" $stagingDir
-
-          $zipName = "OAuthProxy-win-x64-${{ steps.version.outputs.version }}.zip"
-          Compress-Archive -Path "$stagingDir/*" -DestinationPath $zipName
-          echo "zipPath=$zipName" >> $env:GITHUB_OUTPUT
+          $exeName = "OAuthProxy-${{ steps.version.outputs.version }}.exe"
+          Copy-Item "$publishDir/OAuthProxy.exe" $exeName
+          echo "exePath=$exeName" >> $env:GITHUB_OUTPUT
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -81,4 +76,4 @@ jobs:
           tag_name: ${{ steps.version.outputs.version }}
           name: ${{ steps.version.outputs.version }}
           generate_release_notes: true
-          files: ${{ steps.package.outputs.zipPath }}
+          files: ${{ steps.package.outputs.exePath }}
