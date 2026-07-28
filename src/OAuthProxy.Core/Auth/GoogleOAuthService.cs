@@ -1,6 +1,7 @@
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Auth.OAuth2.Flows;
 using Google.Apis.Auth.OAuth2.Responses;
+using OAuthProxy.Core.Diagnostics;
 using OAuthProxy.Core.Models;
 
 namespace OAuthProxy.Core.Auth;
@@ -12,7 +13,7 @@ namespace OAuthProxy.Core.Auth;
 /// keeps up with any Google-side auth quirks automatically. Every other provider
 /// (Nextcloud, Custom) still goes through the generic OAuth2Service/OidcClient path.
 /// </summary>
-public sealed class GoogleOAuthService
+public sealed class GoogleOAuthService(ActivityLog activityLog)
 {
     public const string GoogleAuthority = "https://accounts.google.com";
 
@@ -27,6 +28,13 @@ public sealed class GoogleOAuthService
         {
             ClientSecrets = new ClientSecrets { ClientId = credential.ClientId, ClientSecret = credential.ClientSecret },
             DataStore = new NoOpDataStore(),
+            // Google only issues a refresh_token on a user's first consent for this
+            // client+scope combination — every later authorization is access-token-only
+            // unless the consent screen is forced to show again. Without this, a credential
+            // that's been (re)connected more than once ends up with no refresh_token at all,
+            // and then silently can't auto-refresh: RefreshAsync just returns null with
+            // nothing to log, since there's no exception, just nothing to refresh with.
+            Prompt = "consent",
         };
 
         try
@@ -53,6 +61,8 @@ public sealed class GoogleOAuthService
     {
         if (credential.Token?.RefreshToken is not { } refreshToken)
         {
+            activityLog.Log($"REFRESH '{credential.Name}' has no refresh token stored — reconnect required. "
+                           + "(This happens if it was connected before the fix that forces Google's consent screen on every authorization.)");
             return null;
         }
 
@@ -70,8 +80,14 @@ public sealed class GoogleOAuthService
             ApplyToken(credential, tokenResponse);
             return credential.Token;
         }
-        catch
+        catch (Exception ex)
         {
+            // This used to be a bare catch that discarded the real reason — every failed
+            // refresh (both the manual button and the background auto-refresh loop, which
+            // goes through this exact method) showed only "reconnect may be required" with
+            // no way to find out why. Now the actual exception — invalid_grant, revoked
+            // access, network failure, whatever it is — lands in the error log.
+            activityLog.LogError($"Google token refresh failed for '{credential.Name}'", ex);
             credential.NeedsReconnect = true;
             return null;
         }

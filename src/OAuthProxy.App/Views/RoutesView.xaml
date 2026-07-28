@@ -4,8 +4,18 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:helpers="clr-namespace:OAuthProxy.App.Helpers"
+             xmlns:sys="clr-namespace:System;assembly=mscorlib"
              mc:Ignorable="d" d:DesignWidth="720"
              Background="{StaticResource BgBrush}">
+    <UserControl.Resources>
+        <sys:String x:Key="StripPrefixHelpText">Strip prefix: remove the local path prefix before forwarding.
+
+ON  — /app/foo/bar  is sent upstream as  /bar
+OFF — /app/foo/bar  is sent upstream as  /app/foo/bar
+
+Leave this ON unless the upstream genuinely expects the prefix in its path.</sys:String>
+    </UserControl.Resources>
+
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
@@ -15,9 +25,107 @@
         <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                       helpers:SmoothScroll.Enable="True" Padding="0,0,4,0">
             <StackPanel Margin="16">
-            <Button Content="Refresh" HorizontalAlignment="Right" Width="90" Margin="0,0,0,10"
-                    Style="{StaticResource GhostButtonStyle}" Command="{Binding RefreshCommand}"
-                    ToolTip="Re-read credentials, upstreams and routes from storage"/>
+            <!-- Saved routes first: what's configured is more useful at a glance than the
+                 forms used to create it. -->
+            <Grid Margin="0,0,0,6">
+                <TextBlock Text="Routes" Style="{StaticResource SectionHeaderStyle}" VerticalAlignment="Center"/>
+                <Button Content="Refresh" HorizontalAlignment="Right" Width="90"
+                        Style="{StaticResource GhostButtonStyle}" Command="{Binding RefreshCommand}"
+                        ToolTip="Re-read credentials, upstreams and routes from storage"/>
+            </Grid>
+
+            <TextBlock Style="{StaticResource EmptyStateStyle}"
+                       Text="No routes yet — add an upstream below, then map a path prefix to it."
+                       Visibility="{Binding HasNoRoutes, Converter={StaticResource BoolToVisibilityConverter}}"/>
+
+            <DataGrid ItemsSource="{Binding Routes}" AutoGenerateColumns="False" IsReadOnly="True" Margin="0,0,0,18"
+                      Visibility="{Binding HasRoutes, Converter={StaticResource BoolToVisibilityConverter}}">
+                <DataGrid.Columns>
+                    <!-- The full local endpoint, ready to paste into an MCP client config. -->
+                    <DataGridTemplateColumn Header="LOCAL ENDPOINT" Width="*" MinWidth="230">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <StackPanel VerticalAlignment="Center" ToolTip="{Binding Summary}">
+                                    <TextBox Text="{Binding LocalUrl, Mode=OneWay}" IsReadOnly="True"
+                                             FontFamily="Cascadia Code, Consolas" FontSize="11"
+                                             Background="Transparent" BorderThickness="0" Padding="0"
+                                             Foreground="{StaticResource AccentBrush}"/>
+                                    <TextBlock Text="{Binding PathPrefix}" FontSize="10"
+                                               Foreground="{StaticResource DisabledTextBrush}"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+
+                    <!-- Where it actually forwards to: upstream name plus its base URL. -->
+                    <DataGridTemplateColumn Header="FORWARDS TO" Width="*" MinWidth="230">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <StackPanel VerticalAlignment="Center" ToolTip="{Binding Summary}">
+                                    <TextBlock Text="{Binding UpstreamName}" TextWrapping="Wrap"/>
+                                    <TextBlock Text="{Binding UpstreamBaseUrl}" TextWrapping="Wrap" FontSize="10"
+                                               FontFamily="Cascadia Code, Consolas"
+                                               Foreground="{StaticResource MutedTextBrush}"/>
+                                    <TextBlock Text="⚠ upstream missing — this route is not served" FontSize="10"
+                                               Foreground="{StaticResource ErrorBrush}" TextWrapping="Wrap"
+                                               Visibility="{Binding IsBroken, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+
+                    <DataGridTemplateColumn Header="TOKEN FROM" Width="150">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding CredentialName}" TextWrapping="Wrap"/>
+                                    <TextBlock Text="⚠ credential missing" FontSize="10"
+                                               Foreground="{StaticResource ErrorBrush}" TextWrapping="Wrap"
+                                               Visibility="{Binding IsMissingCredential, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+
+                    <!-- Template columns, not DataGridCheckBoxColumn: the grid is IsReadOnly,
+                         which renders built-in checkbox columns inert. These stay clickable
+                         and write straight through to the route. -->
+                    <DataGridTemplateColumn Width="60">
+                        <DataGridTemplateColumn.Header>
+                            <TextBlock Text="ENABLED"
+                                       ToolTip="Uncheck to stop serving this route without deleting it."/>
+                        </DataGridTemplateColumn.Header>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <CheckBox IsChecked="{Binding Enabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          HorizontalAlignment="Center" VerticalAlignment="Center"
+                                          ToolTip="Uncheck to stop serving this route without deleting it."/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Width="95">
+                        <DataGridTemplateColumn.Header>
+                            <TextBlock Text="STRIP PREFIX" ToolTip="{StaticResource StripPrefixHelpText}"/>
+                        </DataGridTemplateColumn.Header>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <CheckBox IsChecked="{Binding StripPrefix, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          HorizontalAlignment="Center" VerticalAlignment="Center"
+                                          ToolTip="{StaticResource StripPrefixHelpText}"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="" Width="90">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <Button Content="Delete" Margin="2" Style="{StaticResource GhostButtonStyle}"
+                                        Command="{Binding DataContext.DeleteRouteCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                        CommandParameter="{Binding}"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                </DataGrid.Columns>
+            </DataGrid>
 
             <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14">
                 <StackPanel>
@@ -97,41 +205,13 @@
                             </ComboBox>
                         </StackPanel>
                     </UniformGrid>
-                    <CheckBox Content="Strip path prefix before forwarding" IsChecked="{Binding NewRouteStripPrefix}" Margin="0,0,0,10"/>
+                    <CheckBox Content="Strip path prefix before forwarding" IsChecked="{Binding NewRouteStripPrefix}"
+                              ToolTip="{StaticResource StripPrefixHelpText}" Margin="0,0,0,4"/>
+                    <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,10"
+                               Text="Recommended. With this on, /app/foo/bar is forwarded upstream as /bar — the prefix is just your local label."/>
                     <Button Content="Add route" HorizontalAlignment="Left" Width="100" Command="{Binding AddRouteCommand}"/>
                 </StackPanel>
             </Border>
-
-            <TextBlock Text="Routes" Style="{StaticResource SectionHeaderStyle}" Margin="0,0,0,8"/>
-
-            <TextBlock Style="{StaticResource EmptyStateStyle}"
-                       Text="No routes yet — add an upstream, then map a path prefix to it above."
-                       Visibility="{Binding HasNoRoutes, Converter={StaticResource BoolToVisibilityConverter}}"/>
-
-            <DataGrid ItemsSource="{Binding Routes}" AutoGenerateColumns="False" IsReadOnly="True" Margin="0,0,0,12"
-                      Visibility="{Binding HasRoutes, Converter={StaticResource BoolToVisibilityConverter}}">
-                <DataGrid.Columns>
-                    <DataGridTextColumn Header="PATH PREFIX" Binding="{Binding PathPrefix}" Width="*" MinWidth="180">
-                        <DataGridTextColumn.ElementStyle>
-                            <Style TargetType="TextBlock">
-                                <Setter Property="TextWrapping" Value="Wrap"/>
-                                <Setter Property="VerticalAlignment" Value="Center"/>
-                            </Style>
-                        </DataGridTextColumn.ElementStyle>
-                    </DataGridTextColumn>
-                    <DataGridCheckBoxColumn Header="ENABLED" Binding="{Binding Enabled}" Width="80"/>
-                    <DataGridCheckBoxColumn Header="STRIP PREFIX" Binding="{Binding StripPrefix}" Width="100"/>
-                    <DataGridTemplateColumn Header="" Width="90">
-                        <DataGridTemplateColumn.CellTemplate>
-                            <DataTemplate>
-                                <Button Content="Delete" Margin="2" Style="{StaticResource GhostButtonStyle}"
-                                        Command="{Binding DataContext.DeleteRouteCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                        CommandParameter="{Binding}"/>
-                            </DataTemplate>
-                        </DataGridTemplateColumn.CellTemplate>
-                    </DataGridTemplateColumn>
-                </DataGrid.Columns>
-            </DataGrid>
 
             </StackPanel>
         </ScrollViewer>

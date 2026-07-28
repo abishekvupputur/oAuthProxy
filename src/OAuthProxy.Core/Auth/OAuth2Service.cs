@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using IdentityModel.Client;
 using IdentityModel.Jwk;
 using IdentityModel.OidcClient;
+using OAuthProxy.Core.Diagnostics;
 using OAuthProxy.Core.Models;
 
 namespace OAuthProxy.Core.Auth;
@@ -15,7 +16,7 @@ public sealed record AuthorizationOutcome(bool Success, string? Error, string? E
 /// branching only on whether the credential has an Authority (OIDC discovery) or manual
 /// AuthorizationEndpoint/TokenEndpoint.
 /// </summary>
-public sealed class OAuth2Service(GoogleOAuthService googleOAuthService)
+public sealed class OAuth2Service(GoogleOAuthService googleOAuthService, ActivityLog activityLog)
 {
     // Guards against the background refresh loop and a manual "Refresh Now" UI action
     // racing a refresh for the same credential.
@@ -87,6 +88,11 @@ public sealed class OAuth2Service(GoogleOAuthService googleOAuthService)
 
             if (result.IsError)
             {
+                // Same fix as GoogleOAuthService: the provider's actual error/description was
+                // being discarded here, leaving only "reconnect may be required" in the UI
+                // with no way to find out why (expired refresh token, revoked grant, endpoint
+                // unreachable, etc).
+                activityLog.Log($"REFRESH '{credential.Name}' provider error: {result.Error} {result.ErrorDescription}".Trim());
                 credential.NeedsReconnect = true;
                 return null;
             }

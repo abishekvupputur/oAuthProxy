@@ -5,7 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:views="clr-namespace:OAuthProxy.App.Views"
         mc:Ignorable="d"
-        Title="OAuthProxy" Height="640" Width="860" MinHeight="420" MinWidth="720"
+        Title="OAuthProxy" Height="688" Width="892" MinHeight="420" MinWidth="720"
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}"
         TextElement.FontFamily="Segoe UI">

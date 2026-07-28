@@ -13,7 +13,7 @@ public sealed partial class RoutesViewModel : ObservableObject
     private readonly ProxyConfigChangeNotifier _proxyConfigChangeNotifier;
 
     public ObservableCollection<UpstreamRecord> Upstreams { get; } = [];
-    public ObservableCollection<RouteMapping> Routes { get; } = [];
+    public ObservableCollection<RouteItemViewModel> Routes { get; } = [];
     public ObservableCollection<CredentialRecord> Credentials { get; } = [];
 
     [ObservableProperty] private string _newUpstreamName = "";
@@ -69,11 +69,21 @@ public sealed partial class RoutesViewModel : ObservableObject
         Upstreams.Clear();
         foreach (var u in store.Upstreams) Upstreams.Add(u);
 
-        Routes.Clear();
-        foreach (var r in store.Routes) Routes.Add(r);
-
         Credentials.Clear();
         foreach (var c in store.Credentials) Credentials.Add(c);
+
+        // Resolved against the current upstream/credential lists so the grid can show names
+        // and the real local URL rather than bare ids.
+        Routes.Clear();
+        foreach (var r in store.Routes)
+        {
+            Routes.Add(new RouteItemViewModel(
+                r,
+                store.Upstreams.FirstOrDefault(u => u.Id == r.UpstreamId),
+                store.Credentials.FirstOrDefault(c => c.Id == r.CredentialId),
+                store.Settings.ListenPort,
+                OnRouteToggled));
+        }
 
         NewRouteUpstream = Upstreams.FirstOrDefault(u => u.Id == selectedUpstreamId);
         NewRouteCredential = Credentials.FirstOrDefault(c => c.Id == selectedCredentialId);
@@ -104,9 +114,18 @@ public sealed partial class RoutesViewModel : ObservableObject
     private async Task DeleteUpstreamAsync(UpstreamRecord? upstream)
     {
         if (upstream is null) return;
+
+        var affected = _configStoreCache.Current.Routes.Count(r => r.UpstreamId == upstream.Id);
+
         _configStoreCache.Current.Upstreams.Remove(upstream);
         await SaveAndRebuildAsync();
-        Upstreams.Remove(upstream);
+        // Reload so any route that pointed at this upstream immediately shows as broken
+        // rather than silently continuing to display a name that no longer exists.
+        Reload();
+
+        StatusMessage = affected == 0
+            ? $"Upstream '{upstream.Name}' deleted."
+            : $"Upstream '{upstream.Name}' deleted — {affected} route(s) now have no upstream and will not be served.";
     }
 
     [RelayCommand]
@@ -144,19 +163,46 @@ public sealed partial class RoutesViewModel : ObservableObject
 
         _configStoreCache.Current.Routes.Add(route);
         await SaveAndRebuildAsync();
-        Routes.Add(route);
+        // Reload rather than Add: the row needs its upstream/credential names resolved.
+        Reload();
 
         NewRoutePathPrefix = "";
         StatusMessage = $"Route '{prefix}' added.";
     }
 
     [RelayCommand]
-    private async Task DeleteRouteAsync(RouteMapping? route)
+    private async Task DeleteRouteAsync(RouteItemViewModel? item)
     {
-        if (route is null) return;
-        _configStoreCache.Current.Routes.Remove(route);
+        if (item is null) return;
+        _configStoreCache.Current.Routes.Remove(item.Route);
         await SaveAndRebuildAsync();
-        Routes.Remove(route);
+        Routes.Remove(item);
+        StatusMessage = $"Route '{item.PathPrefix}' deleted.";
+    }
+
+    /// <summary>
+    /// Called when a route's Enabled/Strip checkbox is toggled in the grid. The property
+    /// setter is synchronous, so persistence is kicked off here and any failure is reported
+    /// in the footer rather than surfacing as an unobserved task exception.
+    /// </summary>
+    private void OnRouteToggled(RouteItemViewModel item)
+    {
+        _ = PersistToggleAsync(item);
+    }
+
+    private async Task PersistToggleAsync(RouteItemViewModel item)
+    {
+        try
+        {
+            await SaveAndRebuildAsync();
+            StatusMessage = item.Enabled
+                ? $"Route '{item.PathPrefix}' enabled."
+                : $"Route '{item.PathPrefix}' disabled — requests to it will no longer be proxied.";
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Could not save change to '{item.PathPrefix}': {ex.Message}";
+        }
     }
 
     private async Task SaveAndRebuildAsync()
