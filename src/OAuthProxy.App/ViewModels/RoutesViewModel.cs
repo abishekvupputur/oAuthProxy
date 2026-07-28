@@ -24,12 +24,30 @@ public sealed partial class RoutesViewModel : ObservableObject
     [ObservableProperty] private CredentialRecord? _newRouteCredential;
     [ObservableProperty] private bool _newRouteStripPrefix = true;
 
-    [ObservableProperty] private string _statusMessage = "";
+    [ObservableProperty] private string _statusMessage = "Ready.";
+
+    public bool HasUpstreams => Upstreams.Count > 0;
+    public bool HasNoUpstreams => Upstreams.Count == 0;
+    public bool HasRoutes => Routes.Count > 0;
+    public bool HasNoRoutes => Routes.Count == 0;
 
     public RoutesViewModel(ConfigStoreCache configStoreCache, ProxyConfigChangeNotifier proxyConfigChangeNotifier)
     {
         _configStoreCache = configStoreCache;
         _proxyConfigChangeNotifier = proxyConfigChangeNotifier;
+
+        // Empty-state visibility is derived from these collections, so re-evaluate on change.
+        Upstreams.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(HasUpstreams));
+            OnPropertyChanged(nameof(HasNoUpstreams));
+        };
+        Routes.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(HasRoutes));
+            OnPropertyChanged(nameof(HasNoRoutes));
+        };
+
         Reload();
     }
 

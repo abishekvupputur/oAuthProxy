@@ -21,7 +21,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private int _listenPort;
     [ObservableProperty] private bool _startWithWindows;
     [ObservableProperty] private string _recentActivity = "";
-    [ObservableProperty] private string _statusMessage = "";
+    [ObservableProperty] private string _statusMessage = "Ready.";
 
     public SettingsViewModel(ConfigStoreCache configStoreCache, AutostartService autostartService, ActivityLog activityLog)
     {

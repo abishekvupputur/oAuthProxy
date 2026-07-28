@@ -3,10 +3,18 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:helpers="clr-namespace:OAuthProxy.App.Helpers"
              mc:Ignorable="d" d:DesignWidth="480"
              Background="{StaticResource BgBrush}">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Margin="16">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                      helpers:SmoothScroll.Enable="True" Padding="0,0,4,0">
+            <StackPanel Margin="16">
             <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14">
                 <StackPanel>
                     <TextBlock Text="Listen port" Style="{StaticResource SectionHeaderStyle}"/>
@@ -55,7 +63,12 @@
                 </StackPanel>
             </Border>
 
-            <TextBlock Text="{Binding StatusMessage}" Style="{StaticResource HintTextStyle}" Margin="0,16,0,0"/>
-        </StackPanel>
-    </ScrollViewer>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Pinned footer: status stays visible instead of scrolling out of view. -->
+        <Border Grid.Row="1" Style="{StaticResource FooterBarStyle}">
+            <TextBlock Text="{Binding StatusMessage}" Style="{StaticResource FooterTextStyle}"/>
+        </Border>
+    </Grid>
 </UserControl>

@@ -35,7 +35,10 @@ public sealed partial class CredentialsViewModel : ObservableObject
     [ObservableProperty] private bool _isEditing;
     [ObservableProperty] private string _formHeaderText = "Add credential";
     [ObservableProperty] private string _saveButtonLabel = "Add credential";
-    [ObservableProperty] private string _statusMessage = "";
+    [ObservableProperty] private string _statusMessage = "Ready.";
+
+    public bool HasCredentials => Credentials.Count > 0;
+    public bool HasNoCredentials => Credentials.Count == 0;
 
     public CredentialsViewModel(ConfigStoreCache configStoreCache, OAuth2Service oAuth2Service, ActivityLog activityLog)
     {
@@ -48,6 +51,14 @@ public sealed partial class CredentialsViewModel : ObservableObject
         {
             Credentials.Add(new CredentialItemViewModel(record).Refresh());
         }
+
+        // Empty-state visibility is derived from the collection, so it has to be re-evaluated
+        // whenever rows are added or removed.
+        Credentials.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(HasCredentials));
+            OnPropertyChanged(nameof(HasNoCredentials));
+        };
 
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
         _statusTimer.Tick += (_, _) => RefreshStatuses();

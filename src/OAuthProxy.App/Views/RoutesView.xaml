@@ -3,10 +3,18 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:helpers="clr-namespace:OAuthProxy.App.Helpers"
              mc:Ignorable="d" d:DesignWidth="720"
              Background="{StaticResource BgBrush}">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Margin="16">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                      helpers:SmoothScroll.Enable="True" Padding="0,0,4,0">
+            <StackPanel Margin="16">
             <Button Content="Refresh" HorizontalAlignment="Right" Width="90" Margin="0,0,0,10"
                     Style="{StaticResource GhostButtonStyle}" Command="{Binding RefreshCommand}"
                     ToolTip="Re-read credentials, upstreams and routes from storage"/>
@@ -25,7 +33,12 @@
                         </StackPanel>
                     </UniformGrid>
                     <Button Content="Add upstream" HorizontalAlignment="Left" Width="120" Command="{Binding AddUpstreamCommand}" Margin="0,0,0,10"/>
-                    <DataGrid ItemsSource="{Binding Upstreams}" AutoGenerateColumns="False" IsReadOnly="True" MaxHeight="160">
+                    <TextBlock Style="{StaticResource EmptyStateStyle}" Text="No upstreams yet."
+                               Visibility="{Binding HasNoUpstreams, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                    <!-- No MaxHeight: a nested scroll region here is exactly what made the
+                         wheel feel stuck. The page scrolls instead. -->
+                    <DataGrid ItemsSource="{Binding Upstreams}" AutoGenerateColumns="False" IsReadOnly="True"
+                              Visibility="{Binding HasUpstreams, Converter={StaticResource BoolToVisibilityConverter}}">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="NAME" Binding="{Binding Name}" Width="150">
                                 <DataGridTextColumn.ElementStyle>
@@ -91,7 +104,12 @@
 
             <TextBlock Text="Routes" Style="{StaticResource SectionHeaderStyle}" Margin="0,0,0,8"/>
 
-            <DataGrid ItemsSource="{Binding Routes}" AutoGenerateColumns="False" IsReadOnly="True" Margin="0,0,0,12">
+            <TextBlock Style="{StaticResource EmptyStateStyle}"
+                       Text="No routes yet — add an upstream, then map a path prefix to it above."
+                       Visibility="{Binding HasNoRoutes, Converter={StaticResource BoolToVisibilityConverter}}"/>
+
+            <DataGrid ItemsSource="{Binding Routes}" AutoGenerateColumns="False" IsReadOnly="True" Margin="0,0,0,12"
+                      Visibility="{Binding HasRoutes, Converter={StaticResource BoolToVisibilityConverter}}">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="PATH PREFIX" Binding="{Binding PathPrefix}" Width="*" MinWidth="180">
                         <DataGridTextColumn.ElementStyle>
@@ -115,7 +133,12 @@
                 </DataGrid.Columns>
             </DataGrid>
 
-            <TextBlock Text="{Binding StatusMessage}" Style="{StaticResource HintTextStyle}"/>
-        </StackPanel>
-    </ScrollViewer>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Pinned footer: status stays visible instead of scrolling out of view. -->
+        <Border Grid.Row="1" Style="{StaticResource FooterBarStyle}">
+            <TextBlock Text="{Binding StatusMessage}" Style="{StaticResource FooterTextStyle}"/>
+        </Border>
+    </Grid>
 </UserControl>
