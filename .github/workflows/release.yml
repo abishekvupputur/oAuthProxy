@@ -1,11 +1,15 @@
 name: Test, build, and release
 
-# Runs on every push to main: test -> (if tests pass) build+publish -> create a GitHub
-# release with the self-contained exe attached. Windows-only runner because this is a
-# net8.0-windows WPF app; it cannot build on Linux/macOS runners.
+# Runs when a version tag is pushed (e.g. `git tag v1.2.0 && git push origin v1.2.0`):
+# test -> (if tests pass) build+publish -> create a GitHub release with the self-contained
+# exe attached, named after the tag. Windows-only runner because this is a net8.0-windows
+# WPF app; it cannot build on Linux/macOS runners.
+#
+# Ordinary pushes to main no longer trigger this — cutting a release is now a deliberate
+# action (push a tag), not a side effect of every commit.
 on:
   push:
-    branches: [main]
+    tags: ["v*"]
 
 permissions:
   contents: write # needed to create the release and upload the asset
@@ -51,7 +55,8 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $version = "v1.0.$env:GITHUB_RUN_NUMBER"
+          # GITHUB_REF_NAME is the tag itself (e.g. "v1.2.0") when triggered by a tag push.
+          $version = $env:GITHUB_REF_NAME
           echo "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Package release artifact
