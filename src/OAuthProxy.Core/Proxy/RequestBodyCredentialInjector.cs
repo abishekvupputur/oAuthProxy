@@ -44,9 +44,24 @@ internal static class RequestBodyCredentialInjector
         }
 
         var kind = Classify(request.ContentType);
-        var buffer = new MemoryStream((int)(request.ContentLength ?? 0));
-        await request.Body.CopyToAsync(buffer, context.HttpContext.RequestAborted);
-        var body = Encoding.UTF8.GetString(buffer.ToArray());
+
+        var (buffered, exceededLimit) = await ReadCappedAsync(
+            request.Body, MaxBufferedBodyBytes, context.HttpContext.RequestAborted);
+
+        if (exceededLimit)
+        {
+            // Only reachable for an undeclared body, since a declared one over the limit was
+            // refused above. Nothing has been lost: the prefix already read is put back in front
+            // of the unread remainder so the request still forwards in full, just unauthenticated.
+            activityLog.Log($"BODY-AUTH '{credentialName}' not attached to {request.Method} {request.Path} "
+                            + $"— streamed body exceeded the {MaxBufferedBodyBytes}-byte limit for body injection");
+
+            request.Body = new PrefixedStream(buffered, request.Body);
+            return false;
+        }
+
+        var buffer = new MemoryStream(buffered, writable: false);
+        var body = Encoding.UTF8.GetString(buffered);
 
         var (rewritten, mediaType) = kind == BodyKind.Json
             ? (RewriteJson(body, fieldName, value), $"{MediaTypeOf(request.ContentType)}; charset=utf-8")
@@ -84,16 +99,98 @@ internal static class RequestBodyCredentialInjector
             return "body is content-encoded";
         }
 
-        // Chunked bodies have no declared length, so there is no way to know whether buffering
-        // is affordable before starting to read — and a partially read body cannot be undone.
-        if (request.ContentLength is not { } length)
-        {
-            return "body has no Content-Length (chunked or streamed)";
-        }
+        // A body with no declared length used to be refused outright, on the reasoning that
+        // buffering could not be budgeted in advance and a partly read body could not be undone.
+        // Both halves turned out to be wrong: reading is capped, and whatever was read can be
+        // put back in front of the remainder (see PrefixedStream).
+        //
+        // Refusing it was not a small gap either. Every MCP client streams its JSON-RPC POSTs
+        // chunked, so body placement silently never attached a credential to MCP traffic at all —
+        // the one kind of upstream this proxy exists to serve.
+        if (request.ContentLength is not { } length) return null;
 
         return length > MaxBufferedBodyBytes
             ? $"body is {length} bytes, over the {MaxBufferedBodyBytes}-byte limit for body injection"
             : null;
+    }
+
+    /// <summary>
+    /// Reads at most <paramref name="limit"/> bytes, reporting whether there is more to come.
+    /// Reads one byte past the limit to tell "exactly at the limit" from "over" it.
+    /// </summary>
+    private static async ValueTask<(byte[] Buffered, bool ExceededLimit)> ReadCappedAsync(
+        Stream body, long limit, CancellationToken cancellationToken)
+    {
+        var buffer = new MemoryStream();
+        var chunk = new byte[8192];
+        var total = 0L;
+
+        while (true)
+        {
+            var read = await body.ReadAsync(chunk, cancellationToken);
+            if (read == 0) break;
+
+            buffer.Write(chunk, 0, read);
+            total += read;
+
+            if (total > limit) return (buffer.ToArray(), true);
+        }
+
+        return (buffer.ToArray(), false);
+    }
+
+    /// <summary>
+    /// Replays an already-read prefix, then continues from the stream it was read from.
+    ///
+    /// This is what makes reading-then-declining safe. Without it, discovering mid-read that a
+    /// body is too large to buffer would leave those bytes consumed and the request truncated.
+    /// </summary>
+    private sealed class PrefixedStream(byte[] prefix, Stream rest) : Stream
+    {
+        private int _position;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            if (_position >= prefix.Length) return rest.Read(buffer);
+
+            var take = Math.Min(buffer.Length, prefix.Length - _position);
+            prefix.AsSpan(_position, take).CopyTo(buffer);
+            _position += take;
+
+            return take;
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_position >= prefix.Length) return await rest.ReadAsync(buffer, cancellationToken);
+
+            var take = Math.Min(buffer.Length, prefix.Length - _position);
+            prefix.AsMemory(_position, take).CopyTo(buffer);
+            _position += take;
+
+            return take;
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private static BodyKind Classify(string? contentType)
@@ -191,6 +288,11 @@ internal static class RequestBodyCredentialInjector
         if (mediaType is not null) request.ContentType = mediaType;
 
         if (context.ProxyRequest.Content is not { } content) return;
+
+        // A body that arrived chunked now has a known length. Leaving the chunked marker in
+        // place alongside a Content-Length is an illegal combination and makes the upstream
+        // read the length prefix of the first chunk as body content.
+        context.ProxyRequest.Headers.TransferEncodingChunked = null;
 
         content.Headers.ContentLength = bytes.Length;
 

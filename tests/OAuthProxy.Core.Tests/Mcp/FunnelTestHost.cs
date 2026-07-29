@@ -1,0 +1,222 @@
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+using OAuthProxy.Core.Diagnostics;
+using OAuthProxy.Core.Mcp;
+using OAuthProxy.Core.Models;
+using OAuthProxy.Core.Proxy;
+using OAuthProxy.Core.Storage;
+
+namespace OAuthProxy.Core.Tests.Mcp;
+
+/// <summary>
+/// The real app's pipeline — guard, funnel gate, funnel endpoints, YARP — on a loopback socket,
+/// with storage and logs pointed at temp paths so a test run cannot touch the %APPDATA% store
+/// belonging to whoever runs the suite.
+/// </summary>
+internal sealed class FunnelTestHost : IAsyncDisposable
+{
+    public const string ApiKey = "funnel-test-key-0123456789";
+
+    private readonly WebApplication _proxy;
+    private readonly string _storePath;
+    private readonly string _logPath;
+    private readonly List<McpClient> _clients = [];
+
+    private FunnelTestHost(WebApplication proxy, string baseUrl, string storePath, string logPath)
+    {
+        _proxy = proxy;
+        BaseUrl = baseUrl;
+        _storePath = storePath;
+        _logPath = logPath;
+    }
+
+    public string BaseUrl { get; }
+
+    /// <summary>YARP's own explanation for the most recent failed forward, if there was one.</summary>
+    public static string? LastForwarderError;
+
+    public ConfigStoreCache Cache => _proxy.Services.GetRequiredService<ConfigStoreCache>();
+
+    public McpSourceConnectionPool Pool => _proxy.Services.GetRequiredService<McpSourceConnectionPool>();
+
+    public ActivityLog ActivityLog => _proxy.Services.GetRequiredService<ActivityLog>();
+
+    public static async Task<FunnelTestHost> StartAsync()
+    {
+        var storePath = Path.Combine(Path.GetTempPath(), $"oauthproxy-funnel-{Guid.NewGuid()}.dat");
+        var logPath = Path.Combine(Path.GetTempPath(), $"oauthproxy-funnel-logs-{Guid.NewGuid()}");
+
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.Logging.ClearProviders();
+        builder.Services.AddOAuthProxy();
+        builder.Services.Replace(ServiceDescriptor.Singleton(_ => new SecureStore(storePath)));
+        builder.Services.Replace(ServiceDescriptor.Singleton(_ => new ActivityLog(logPath)));
+
+        var proxy = builder.Build();
+
+        // A forwarding failure surfaces as a bare 502 with no detail, which is nearly impossible
+        // to tell from an upstream that fell over. YARP records the real reason here.
+        proxy.Use(async (context, next) =>
+        {
+            await next();
+            if (context.Features.Get<Yarp.ReverseProxy.Forwarder.IForwarderErrorFeature>() is { } error)
+            {
+                LastForwarderError = $"{error.Error}: {error.Exception}";
+            }
+        });
+
+        // Deliberately the same order as App.StartHost; the gate has to sit behind the guard and
+        // the funnel endpoints ahead of the catch-all proxy routes.
+        proxy.UseLocalAccessGuard();
+        proxy.UseMcpFunnelGate();
+        proxy.MapMcpFunnel();
+        proxy.MapReverseProxy();
+
+        await proxy.StartAsync();
+
+        var baseUrl = proxy.Services.GetRequiredService<IServer>()
+            .Features.Get<IServerAddressesFeature>()!.Addresses.First();
+
+        var host = new FunnelTestHost(proxy, baseUrl, storePath, logPath);
+        await host.Cache.MutateAsync(store =>
+        {
+            store.Settings.LocalApiKey = ApiKey;
+            store.Settings.McpFunnelEnabled = true;
+
+            // A route-backed source is dialled at 127.0.0.1:{ListenPort}, so the stored port has
+            // to match the port actually bound. In the app they are the same by construction —
+            // Kestrel is told to listen on the stored value — but here the host takes an
+            // ephemeral port, and without this the funnel would quietly dial 5559 instead.
+            store.Settings.ListenPort = new Uri(baseUrl).Port;
+        });
+
+        return host;
+    }
+
+    /// <summary>Registers a source pointing at a no-auth MCP server URL.</summary>
+    public async Task<McpSourceRecord> AddRemoteSourceAsync(string alias, string url)
+    {
+        var source = new McpSourceRecord
+        {
+            Name = $"source-{alias}",
+            Alias = alias,
+            Kind = McpSourceKind.RemoteUrl,
+            Url = url,
+            // Pinned rather than AutoDetect so a test failure means the funnel is broken, not
+            // that transport probing raced.
+            Transport = McpTransportPreference.StreamableHttp,
+        };
+
+        await Cache.MutateAsync(store => store.McpSources.Add(source));
+        return source;
+    }
+
+    /// <summary>Registers a source reached through one of this proxy's own credentialed routes.</summary>
+    public async Task<McpSourceRecord> AddRouteSourceAsync(string alias, Guid routeId)
+    {
+        var source = new McpSourceRecord
+        {
+            Name = $"source-{alias}",
+            Alias = alias,
+            Kind = McpSourceKind.ProxyRoute,
+            RouteId = routeId,
+            Transport = McpTransportPreference.StreamableHttp,
+        };
+
+        await Cache.MutateAsync(store => store.McpSources.Add(source));
+        return source;
+    }
+
+    public async Task<McpFunnelRecord> AddFunnelAsync(string slug, params McpFunnelSource[] sources)
+    {
+        var funnel = new McpFunnelRecord
+        {
+            Name = slug,
+            Slug = slug,
+            Sources = [.. sources],
+        };
+
+        await Cache.MutateAsync(store => store.McpFunnels.Add(funnel));
+        return funnel;
+    }
+
+    public Task MutateAsync(Action<ConfigStore> mutate) => Cache.MutateAsync(mutate);
+
+    /// <summary>
+    /// Pushes route changes into YARP. Funnel edits need no equivalent — the funnel reads config
+    /// per request — but a route-backed source is only reachable once its route is live.
+    /// </summary>
+    public void RebuildProxyConfig() =>
+        _proxy.Services.GetRequiredService<ProxyConfigChangeNotifier>().Rebuild();
+
+    /// <summary>Connects an MCP client to one funnel endpoint, exactly as an agent would.</summary>
+    public async Task<McpClient> ConnectAsync(string slug, string? apiKey = ApiKey)
+    {
+        var headers = new Dictionary<string, string>();
+        if (apiKey is not null) headers[LocalAccessGuard.ApiKeyHeaderName] = apiKey;
+
+        var transport = new HttpClientTransport(new HttpClientTransportOptions
+        {
+            Endpoint = new Uri($"{BaseUrl}{McpFunnelEndpoints.BasePath}/{slug}"),
+            TransportMode = HttpTransportMode.StreamableHttp,
+            ConnectionTimeout = TimeSpan.FromSeconds(30),
+            AdditionalHeaders = headers,
+        });
+
+        var client = await McpClient.CreateAsync(transport);
+        _clients.Add(client);
+
+        return client;
+    }
+
+    /// <summary>Calls a tool and returns the raw result, so a caller can inspect IsError.</summary>
+    public static async Task<CallToolResult> CallAsync(McpClient client, string tool, string? value = null)
+    {
+        var arguments = new Dictionary<string, object?>();
+        if (value is not null) arguments["value"] = value;
+
+        return await client.CallToolAsync(tool, arguments!);
+    }
+
+    /// <summary>
+    /// Calls a tool that is expected to succeed and returns its text. Asserts on IsError rather
+    /// than letting it slide, because the SDK reports a refused or failed call as a result with
+    /// IsError set — not as an exception — so an unasserted failure would otherwise show up as a
+    /// confusing string mismatch further down the test.
+    /// </summary>
+    public static async Task<string> CallTextAsync(McpClient client, string tool, string? value = null)
+    {
+        var result = await CallAsync(client, tool, value);
+        var text = result.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text ?? "";
+
+        Assert.True(result.IsError != true, $"'{tool}' failed: {text}");
+
+        return text;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        foreach (var client in _clients)
+        {
+            try { await client.DisposeAsync(); } catch { /* best effort */ }
+        }
+
+        await _proxy.StopAsync();
+        await _proxy.DisposeAsync();
+
+        foreach (var path in new[] { _storePath, _storePath + ".tmp" })
+        {
+            try { if (File.Exists(path)) File.Delete(path); } catch { /* best effort */ }
+        }
+
+        try { Directory.Delete(_logPath, recursive: true); } catch { /* best effort */ }
+    }
+}

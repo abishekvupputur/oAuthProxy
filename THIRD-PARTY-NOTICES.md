@@ -16,6 +16,11 @@ none impose source-disclosure obligations on OAuthProxy.
 |---|---|---|
 | .NET Runtime / ASP.NET Core / WPF (`Microsoft.NETCore.App`, `Microsoft.AspNetCore.App`, `Microsoft.WindowsDesktop.App`) | 8.0.x | MIT |
 | Yarp.ReverseProxy | 2.3.0 | MIT |
+| ModelContextProtocol | 2.0.0 | Apache-2.0 |
+| ModelContextProtocol.Core | 2.0.0 | Apache-2.0 |
+| ModelContextProtocol.AspNetCore | 2.0.0 | Apache-2.0 |
+| Microsoft.Extensions.AI.Abstractions | 10.8.3 | MIT |
+| System.Net.ServerSentEvents | 10.0.10 | MIT |
 | Google.Apis.Auth | 1.75.0 | Apache-2.0 |
 | Google.Apis | 1.75.0 | Apache-2.0 |
 | Google.Apis.Core | 1.75.0 | Apache-2.0 |

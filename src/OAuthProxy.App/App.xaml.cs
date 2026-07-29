@@ -8,6 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using OAuthProxy.App.Tray;
 using OAuthProxy.App.ViewModels;
+using OAuthProxy.Core.Mcp;
 using OAuthProxy.Core.Platform;
 using OAuthProxy.Core.Proxy;
 using OAuthProxy.Core.Storage;
@@ -108,6 +109,7 @@ public partial class App : Application
 
         builder.Services.AddSingleton<CredentialsViewModel>();
         builder.Services.AddSingleton<RoutesViewModel>();
+        builder.Services.AddSingleton<McpFunnelViewModel>();
         builder.Services.AddSingleton<SettingsViewModel>();
         builder.Services.AddSingleton<MainWindow>();
         builder.Services.AddSingleton<TrayIconManager>();
@@ -126,6 +128,12 @@ public partial class App : Application
             // local API key, and blocks DNS-rebinding and browser-originated requests. Without
             // it, any process on this machine can spend the user's OAuth grant.
             app.UseLocalAccessGuard();
+
+            // After the guard, so funnel callers must present the local API key like anyone
+            // else, and before MapReverseProxy so /mcp is unambiguously the funnel's — routes
+            // are forbidden from claiming that prefix.
+            app.UseMcpFunnelGate();
+            app.MapMcpFunnel();
 
             app.MapReverseProxy();
             app.Start();

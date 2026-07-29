@@ -232,6 +232,22 @@ public class ProxyForwardingTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task HeaderPlacement_WorksOnARequestWithABody()
+    {
+        // Every header-placement test above uses GET, and that hid a real failure: clearing a
+        // caller-supplied header of the same name also probed HttpContent.Headers, which throws
+        // "Misused header name" for a request-header name — and a GET has no content, so the
+        // faulty call was never reached. Any POST through such a route died as a bare 502.
+        // MCP traffic is entirely POST, so this was not a corner case for long.
+        var seen = await SendAsync(
+            HttpMethod.Post, "/app/echo/rpc",
+            new StringContent("""{"jsonrpc":"2.0","id":1,"method":"ping"}""", Encoding.UTF8, "application/json"));
+
+        Assert.Equal($"Bearer {Token}", seen.Authorization);
+        Assert.Contains("ping", seen.Body);
+    }
+
+    [Fact]
     public async Task HeaderPlacement_WithNonBearerPrefix_UsesIt()
     {
         var seen = await SendAsync(HttpMethod.Get, "/app/prefixed-header/resource");

@@ -99,9 +99,9 @@ public sealed class ConfigStoreCache
     }
 
     /// <summary>
-    /// Membership of the three lists plus the settings scalars — which is exactly what callers
-    /// change through <see cref="MutateAsync"/> (add/remove a credential, upstream, or route;
-    /// set a port or key).
+    /// Membership of every list plus the settings scalars — which is exactly what callers
+    /// change through <see cref="MutateAsync"/> (add/remove a credential, upstream, route, MCP
+    /// source, or funnel; set a port or key).
     ///
     /// Deliberately shallow, and restored *into* the existing instances rather than by swapping
     /// <see cref="Current"/> for a clone. The view models hold direct references to individual
@@ -116,27 +116,36 @@ public sealed class ConfigStoreCache
         List<CredentialRecord> Credentials,
         List<UpstreamRecord> Upstreams,
         List<RouteMapping> Routes,
+        List<McpSourceRecord> McpSources,
+        List<McpFunnelRecord> McpFunnels,
         int ListenPort,
         bool StartWithWindows,
-        string LocalApiKey);
+        string LocalApiKey,
+        bool McpFunnelEnabled);
 
     private static StoreSnapshot Snapshot(ConfigStore store) => new(
         [.. store.Credentials],
         [.. store.Upstreams],
         [.. store.Routes],
+        [.. store.McpSources],
+        [.. store.McpFunnels],
         store.Settings.ListenPort,
         store.Settings.StartWithWindows,
-        store.Settings.LocalApiKey);
+        store.Settings.LocalApiKey,
+        store.Settings.McpFunnelEnabled);
 
     private static void RestoreInto(ConfigStore store, StoreSnapshot snapshot)
     {
         ReplaceAll(store.Credentials, snapshot.Credentials);
         ReplaceAll(store.Upstreams, snapshot.Upstreams);
         ReplaceAll(store.Routes, snapshot.Routes);
+        ReplaceAll(store.McpSources, snapshot.McpSources);
+        ReplaceAll(store.McpFunnels, snapshot.McpFunnels);
 
         store.Settings.ListenPort = snapshot.ListenPort;
         store.Settings.StartWithWindows = snapshot.StartWithWindows;
         store.Settings.LocalApiKey = snapshot.LocalApiKey;
+        store.Settings.McpFunnelEnabled = snapshot.McpFunnelEnabled;
     }
 
     private static void ReplaceAll<T>(List<T> target, List<T> source)

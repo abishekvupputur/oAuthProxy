@@ -34,6 +34,21 @@ public static class LocalAccessGuard
     /// </summary>
     public const string ApiKeyQueryName = "proxy_key";
 
+    /// <summary>
+    /// Stamped by the MCP funnel on every request it makes to one of its own sources. A funnel
+    /// legitimately calls a route; a route must never lead back into a funnel, which would loop.
+    /// Recorded into <see cref="FunnelHopItemKey"/> and stripped here, before forwarding, for the
+    /// same reason as the API key: it is this proxy's private signalling and the upstream would
+    /// log it.
+    /// </summary>
+    public const string FunnelHopHeaderName = "X-Proxy-Funnel-Hop";
+
+    /// <summary>
+    /// Where the stripped hop marker is preserved for later middleware. The funnel gate runs
+    /// after this guard, so by the time it looks the header is already gone.
+    /// </summary>
+    public const string FunnelHopItemKey = "OAuthProxy.FunnelHop";
+
     private static readonly string[] AllowedHosts = ["127.0.0.1", "localhost", "[::1]", "::1"];
 
     public static IApplicationBuilder UseLocalAccessGuard(this IApplicationBuilder app)
@@ -47,11 +62,14 @@ public static class LocalAccessGuard
         {
             var rejection = Reject(context, configStoreCache);
 
+            // Read before stripping, since the funnel gate downstream needs to know.
+            context.Items[FunnelHopItemKey] = context.Request.Headers.ContainsKey(FunnelHopHeaderName);
+
             // Unconditionally, whether or not the request was allowed: the key authenticates
             // the caller to *this* proxy and has no business reaching the upstream, which will
             // happily write it to its own access log. YARP forwards both headers and the query
             // string verbatim, so it has to come off here, before the request goes anywhere.
-            StripApiKeyFromRequest(context.Request);
+            StripInternalHeadersFromRequest(context.Request);
 
             if (rejection is { } reason)
             {
@@ -82,14 +100,16 @@ public static class LocalAccessGuard
     }
 
     /// <summary>
-    /// Removes the local API key from the request in both forms it can arrive in, so it is
-    /// never forwarded upstream and never reaches the activity log. Everything else is
-    /// preserved untouched — callers legitimately pass their own headers and parameters (an
-    /// upstream's own <c>?token=</c>, for instance), and those still have to arrive intact.
+    /// Removes this proxy's own signalling headers — the local API key in both forms it can
+    /// arrive in, and the funnel hop marker — so none of it is forwarded upstream or reaches the
+    /// activity log. Everything else is preserved untouched: callers legitimately pass their own
+    /// headers and parameters (an upstream's own <c>?token=</c>, for instance), and those still
+    /// have to arrive intact.
     /// </summary>
-    private static void StripApiKeyFromRequest(HttpRequest request)
+    private static void StripInternalHeadersFromRequest(HttpRequest request)
     {
         request.Headers.Remove(ApiKeyHeaderName);
+        request.Headers.Remove(FunnelHopHeaderName);
 
         if (!request.Query.ContainsKey(ApiKeyQueryName)) return;
 

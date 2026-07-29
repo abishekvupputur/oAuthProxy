@@ -20,6 +20,15 @@ public static class RouteValidation
     private static readonly char[] ForbiddenCharacters = ['{', '}', '?', '#', '\\'];
 
     /// <summary>
+    /// Path space this app serves itself. A route claiming "/mcp" would sit next to the funnel
+    /// endpoints in the same routing table — and, worse, a funnel source pointing at that route
+    /// would forward straight back into the funnel, so a single tools/list would recurse until
+    /// something ran out. Endpoint routing already prefers the funnel's literal segments over a
+    /// catch-all, so this is about removing the ambiguity rather than resolving it.
+    /// </summary>
+    public static readonly string[] ReservedPathPrefixes = ["/mcp"];
+
+    /// <summary>
     /// Validates a route path prefix. Returns null when acceptable, or a message suitable for
     /// showing in the UI footer.
     /// </summary>
@@ -59,6 +68,18 @@ public static class RouteValidation
         if (prefix.Any(char.IsControl) || prefix.Any(char.IsWhiteSpace))
         {
             return "Path prefix may not contain spaces or control characters.";
+        }
+
+        // Whole-segment comparison: "/mcpstuff" is a different area and stays allowed, while
+        // both "/mcp" and "/mcp/anything" are refused.
+        var normalized = prefix.TrimEnd('/');
+        foreach (var reserved in ReservedPathPrefixes)
+        {
+            if (normalized.Equals(reserved, StringComparison.OrdinalIgnoreCase) ||
+                normalized.StartsWith(reserved + "/", StringComparison.OrdinalIgnoreCase))
+            {
+                return $"'{reserved}' is reserved for this proxy's own MCP funnel endpoints. Pick another prefix.";
+            }
         }
 
         return null;

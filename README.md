@@ -27,6 +27,8 @@ already-authenticated requests to whatever's actually behind the route.
   fixed 1:1 mapping
 - **Per-route credential placement** — `Authorization: Bearer <token>` by default, or any
   header name, query parameter, or request-body field, with a custom value prefix
+- **[MCP Funnel](#mcp-funnel)** (opt-in) — pool several MCP servers behind one local endpoint
+  per AI agent, and choose exactly which of their tools, resources, and prompts that agent sees
 - **Multi-provider OAuth2**:
   - **Google** — via Google's own official library (`Google.Apis.Auth`), fixed loopback
     redirect port so it can be registered in Google Cloud Console if needed
@@ -151,6 +153,96 @@ selecting the route in the grid.
 - Names the proxy owns are rejected: `Host`, `Content-Length`, `Transfer-Encoding`,
   `Connection`, `Upgrade` as header names, and `proxy_key` as a query parameter name.
 
+## MCP Funnel
+
+A route solves auth for one MCP server. The funnel solves the next problem: an agent pointed at
+three servers sees all ninety of their tools, and there is no way to hand it only the six it
+should have.
+
+A **funnel** is a local MCP endpoint — `http://127.0.0.1:5559/mcp/<slug>` — that pools several
+MCP servers and exposes a chosen subset of what they offer. Point one funnel at each agent:
+
+- **Pooling** — one endpoint fronting Notion + GitHub + an internal server, instead of three.
+- **Limiting** — 6 tools instead of 90. Smaller prompt, smaller blast radius.
+
+Off by default. Turn it on with **Enable MCP funnel** on the MCP Funnel tab; while off, every
+path under `/mcp` answers `404`.
+
+### Sources
+
+A **source** is one MCP server the funnel can draw from. Two kinds:
+
+| Kind | What it is |
+|---|---|
+| **Route (credentialed)** | An MCP server reached through one of your routes. The route's OAuth token is attached automatically — this is the point of having the funnel inside this app rather than beside it. |
+| **URL (no auth)** | Any MCP server that needs no credential. |
+
+Press **Refresh** on a source to connect and read what it offers; the ticklists are populated
+from that.
+
+### Naming
+
+Every name a source contributes is prefixed with that source's **alias**: a tool called
+`create_issue` from a source aliased `gh` reaches the agent as `gh__create_issue`. Resources are
+rewritten to `funnel://gh/<original-uri>` and mapped back on read.
+
+Prefixing is always on, not only when two sources collide. Conditional prefixing would mean a
+tool silently renames itself the day you add an unrelated source, breaking every agent prompt
+that referred to it.
+
+### Choosing what an agent sees
+
+Per source, per kind (tools / resources / prompts):
+
+| Mode | Behaviour |
+|---|---|
+| **All** | Everything, including anything the server gains later. |
+| **Include** | Only what is ticked. A tool the server adds later stays hidden until you pick it. |
+| **Exclude** | Everything except what is ticked. A tool the server adds later is exposed immediately. |
+
+Include to grant a known set; Exclude to revoke a few from an otherwise trusted server.
+
+Filtering is enforced on the **call** path as well as the listing — an agent that learned a name
+before you unticked it, or simply guessed one, is refused, and the call never reaches the
+upstream.
+
+Edits apply on the agent's **next call**. No reconnect, no restart.
+
+### Pointing an agent at a funnel
+
+Same local API key as everything else:
+
+```bash
+curl -H "X-Proxy-Key: <your-key>" http://127.0.0.1:5559/mcp/coding-agent
+```
+
+The endpoint URL is shown on the MCP Funnel tab, selectable, ready to paste into an agent's
+config.
+
+### How it behaves
+
+- **Each endpoint is independent.** Two funnels drawing on the same upstream get their own MCP
+  session to it, so one agent's activity cannot perturb another's, and one expired session does
+  not take both endpoints down.
+- **Calls run in parallel**, both across endpoints and within one.
+- **One dead source degrades only itself** — the other sources' tools still list, and the
+  failure is shown on the source's row and in the activity log.
+- **Arguments are never logged.** Tool names and outcomes are; the values an agent passes are
+  not, because they routinely carry your data.
+- `/mcp` is **reserved** — a route cannot claim it, and a request that already passed through a
+  funnel is refused rather than allowed to loop.
+
+### Limits
+
+- Sources must be HTTP MCP servers. Local **stdio** servers (`npx …`) are not supported.
+- Sampling, elicitation, and resource subscriptions are not offered on a funnel endpoint. The
+  endpoint runs stateless, which is what makes a GUI edit take effect on the next call.
+- Two agents connected to the *same* funnel share that funnel's upstream sessions. Give each
+  agent its own funnel if they must be isolated from each other.
+- A route-backed source whose server keys sessions on a **cookie** rather than the standard
+  `Mcp-Session-Id` header cannot hold a session: the proxy strips `Cookie` on the way upstream,
+  deliberately, so a caller cannot launder its own credentials through it.
+
 ## Calling the proxy (local API key)
 
 Every proxied request must present the **local API key** shown in the Settings tab:
@@ -190,8 +282,8 @@ old one starts getting `403` immediately.
 ## Project layout
 
 ```
-src/OAuthProxy.Core/     OAuth flows, encrypted storage, YARP proxy config, activity log
-                          — no WPF dependency, just the engine
+src/OAuthProxy.Core/     OAuth flows, encrypted storage, YARP proxy config, MCP funnel,
+                          activity log — no WPF dependency, just the engine
 src/OAuthProxy.App/      WPF tray app: hosts Kestrel+YARP in-process, tray icon, UI
 tests/OAuthProxy.Core.Tests/   xunit tests for the Core project
 ```
@@ -233,7 +325,7 @@ Everything lives under `%AppData%\OAuthProxy\`:
 
 | Path | Contents |
 |---|---|
-| `store.dat` | DPAPI-encrypted credentials, upstreams, routes, settings |
+| `store.dat` | DPAPI-encrypted credentials, upstreams, routes, MCP sources and funnels, settings |
 | `store.dat.corrupt-<timestamp>` | Only if a store could not be decrypted or parsed at startup — see below |
 | `logs\activity-YYYYMMDD.log` | Every proxied request/response, connect/refresh/disconnect, route reloads. Rotates every 2 days, auto-deletes after ~10 |
 | `logs\errors.log` | Unhandled exceptions and provider errors, with full stack traces |

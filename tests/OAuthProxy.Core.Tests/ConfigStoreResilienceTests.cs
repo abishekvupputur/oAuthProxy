@@ -161,6 +161,76 @@ public class ConfigStoreResilienceTests : IDisposable
     }
 
     [Fact]
+    public async Task MutateAsync_WhenTheSaveFails_UndoesMcpFunnelChangesToo()
+    {
+        // The rollback snapshot names every list explicitly, so a list added to ConfigStore
+        // without being added there is silently exempt from rollback — exactly the silent
+        // data-loss bug this whole mechanism exists to prevent, reintroduced quietly.
+        var cache = new ConfigStoreCache(UnwritableStore());
+
+        await Assert.ThrowsAnyAsync<Exception>(() => cache.MutateAsync(store =>
+        {
+            store.McpSources.Add(new McpSourceRecord { Name = "doomed", Alias = "d", Url = "https://example.com/mcp" });
+            store.McpFunnels.Add(new McpFunnelRecord { Name = "doomed", Slug = "doomed" });
+            store.Settings.McpFunnelEnabled = true;
+        }));
+
+        Assert.Empty(cache.Current.McpSources);
+        Assert.Empty(cache.Current.McpFunnels);
+        Assert.False(cache.Current.Settings.McpFunnelEnabled);
+    }
+
+    [Fact]
+    public async Task McpFunnelConfiguration_SurvivesARoundTripToDisk()
+    {
+        var cache = new ConfigStoreCache(new SecureStore(_tempFile));
+        await cache.InitializeAsync();
+
+        var source = new McpSourceRecord
+        {
+            Name = "github",
+            Alias = "gh",
+            Kind = McpSourceKind.RemoteUrl,
+            Url = "https://example.com/mcp",
+            Transport = McpTransportPreference.Sse,
+        };
+
+        await cache.MutateAsync(store =>
+        {
+            store.Settings.McpFunnelEnabled = true;
+            store.McpSources.Add(source);
+            store.McpFunnels.Add(new McpFunnelRecord
+            {
+                Name = "coding agent",
+                Slug = "coding-agent",
+                Sources =
+                [
+                    new McpFunnelSource
+                    {
+                        SourceId = source.Id,
+                        ToolMode = McpSelectionMode.Include,
+                        Tools = ["create_issue"],
+                    },
+                ],
+            });
+        });
+
+        var reloaded = await new SecureStore(_tempFile).LoadAsync();
+
+        Assert.True(reloaded.Settings.McpFunnelEnabled);
+
+        var reloadedSource = Assert.Single(reloaded.McpSources);
+        Assert.Equal("gh", reloadedSource.Alias);
+        Assert.Equal(McpTransportPreference.Sse, reloadedSource.Transport);
+
+        var reloadedFunnel = Assert.Single(reloaded.McpFunnels);
+        var link = Assert.Single(reloadedFunnel.Sources);
+        Assert.Equal(source.Id, link.SourceId);
+        Assert.Equal(McpSelectionMode.Include, link.ToolMode);
+        Assert.Equal(["create_issue"], link.Tools);
+    }
+
+    [Fact]
     public async Task MutateAsync_WhenTheSaveSucceeds_KeepsTheMutation()
     {
         var cache = new ConfigStoreCache(new SecureStore(_tempFile));

@@ -8,12 +8,17 @@ namespace OAuthProxy.App;
 
 public partial class MainWindow : Window
 {
-    public MainWindow(CredentialsViewModel credentialsViewModel, RoutesViewModel routesViewModel, SettingsViewModel settingsViewModel)
+    public MainWindow(
+        CredentialsViewModel credentialsViewModel,
+        RoutesViewModel routesViewModel,
+        McpFunnelViewModel mcpFunnelViewModel,
+        SettingsViewModel settingsViewModel)
     {
         InitializeComponent();
 
         CredentialsViewControl.DataContext = credentialsViewModel;
         RoutesViewControl.DataContext = routesViewModel;
+        McpFunnelViewControl.DataContext = mcpFunnelViewModel;
         SettingsViewControl.DataContext = settingsViewModel;
 
         SourceInitialized += (_, _) => WindowHelper.ApplyDarkTitleBar(this);
@@ -31,6 +36,13 @@ public partial class MainWindow : Window
         if (RoutesViewControl.DataContext is RoutesViewModel routesViewModel)
         {
             routesViewModel.Reload();
+        }
+
+        // The MCP Funnel tab lists routes owned by the Routes tab, and its endpoint URLs embed
+        // the listen port owned by Settings — both can change while this tab is off screen.
+        if (McpFunnelViewControl.DataContext is McpFunnelViewModel mcpFunnelViewModel)
+        {
+            mcpFunnelViewModel.Reload();
         }
 
         // Settings shows the autostart state, which the tray menu can also change.

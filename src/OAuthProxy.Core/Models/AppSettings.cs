@@ -8,6 +8,13 @@ public sealed class AppSettings
     public bool StartWithWindows { get; set; }
 
     /// <summary>
+    /// Master switch for the MCP funnel endpoints under /mcp. Off by default: the funnel lets a
+    /// caller reach several upstreams (and their attached OAuth grants) through one path, so it
+    /// stays dark until the user asks for it rather than appearing on upgrade.
+    /// </summary>
+    public bool McpFunnelEnabled { get; set; }
+
+    /// <summary>
     /// Shared secret every proxied request must present. Binding to loopback is not an
     /// authorization boundary — without this, any process on the machine (or any web page,
     /// via DNS rebinding) can spend the user's OAuth grant just by knowing the port.

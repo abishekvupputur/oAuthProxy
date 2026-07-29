@@ -90,9 +90,31 @@ public sealed class CredentialInjectionTransformProvider(
                 }
             }
 
-            activityLog.Log($"  <- {(status is null ? "no response (upstream unreachable)" : ((int)status).ToString())} for {request.Method} {LogSafePath(request)}");
+            activityLog.Log(
+                $"  <- {(status is null ? "no response (upstream unreachable)" : ((int)status).ToString())}"
+                + $"{DescribeContentType(transformContext.ProxyResponse)} for {request.Method} {LogSafePath(request)}");
             return ValueTask.CompletedTask;
         });
+    }
+
+    /// <summary>
+    /// The response's media type, for any status that is not a plain success.
+    ///
+    /// Media type only — never the body, which carries user data. This one word separates two
+    /// failures that otherwise look identical in the log: an upstream that answered 200 with the
+    /// JSON the client wanted, and one that answered 200 with an HTML sign-in or landing page.
+    /// The second reads as success everywhere except inside the client, which then reports
+    /// something oblique like "response completed without a reply".
+    /// </summary>
+    private static string DescribeContentType(HttpResponseMessage? response)
+    {
+        if (response?.Content.Headers.ContentType?.MediaType is not { } mediaType) return "";
+
+        // A JSON or event-stream answer is the expected case and needs no annotation.
+        return mediaType.Contains("json", StringComparison.OrdinalIgnoreCase)
+               || mediaType.Contains("event-stream", StringComparison.OrdinalIgnoreCase)
+            ? ""
+            : $" [{mediaType}]";
     }
 
     /// <summary>
@@ -121,9 +143,41 @@ public sealed class CredentialInjectionTransformProvider(
                 // Removed first for the same reason: TryAddWithoutValidation appends rather than
                 // replaces, so without this a caller-supplied header of the same name would be
                 // sent alongside ours and the upstream would pick whichever it liked.
-                context.ProxyRequest.Headers.Remove(injection.Name);
-                context.ProxyRequest.Content?.Headers.Remove(injection.Name);
+                //
+                // Both collections are tried because HttpClient splits headers between them and
+                // which one a given name lives in depends on the name, not on the caller.
+                TryRemove(context.ProxyRequest.Headers, injection.Name);
+                if (context.ProxyRequest.Content is { } content)
+                {
+                    TryRemove(content.Headers, injection.Name);
+                }
+
                 return context.ProxyRequest.Headers.TryAddWithoutValidation(injection.Name, value);
+        }
+    }
+
+    /// <summary>
+    /// Removes a header if that collection is allowed to hold it.
+    ///
+    /// HttpHeaders.Remove throws "Misused header name" when asked for a name belonging to the
+    /// other collection — request headers on an HttpContent, or content headers on an
+    /// HttpRequestMessage. That threw straight out of the transform and became a bare 502, which
+    /// is how every POST through a header-placement route used to fail: a GET has no Content at
+    /// all, so the faulty call was never reached, and only requests with a body hit it. MCP
+    /// traffic is entirely POST, so the funnel met it immediately.
+    ///
+    /// The exception is the answer, not an error: a name this collection cannot hold is a name it
+    /// cannot have a stale value under either.
+    /// </summary>
+    private static void TryRemove(System.Net.Http.Headers.HttpHeaders headers, string name)
+    {
+        try
+        {
+            headers.Remove(name);
+        }
+        catch (InvalidOperationException)
+        {
+            // Not a header this collection can carry; nothing to clear.
         }
     }
 

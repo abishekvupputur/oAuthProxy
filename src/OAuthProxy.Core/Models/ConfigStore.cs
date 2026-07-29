@@ -6,5 +6,7 @@ public sealed class ConfigStore
     public List<CredentialRecord> Credentials { get; set; } = [];
     public List<UpstreamRecord> Upstreams { get; set; } = [];
     public List<RouteMapping> Routes { get; set; } = [];
+    public List<McpSourceRecord> McpSources { get; set; } = [];
+    public List<McpFunnelRecord> McpFunnels { get; set; } = [];
     public AppSettings Settings { get; set; } = new();
 }
