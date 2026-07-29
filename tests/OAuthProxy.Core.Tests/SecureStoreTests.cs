@@ -38,6 +38,62 @@ public class SecureStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task SaveAndLoad_RoundTripsARoutesCredentialPlacement()
+    {
+        var store = new ConfigStore();
+        store.Routes.Add(new RouteMapping
+        {
+            PathPrefix = "/app/api",
+            CredentialPlacement = CredentialPlacement.Body,
+            CredentialParameterName = "auth_token",
+            CredentialValuePrefix = "token ",
+        });
+
+        var secureStore = new SecureStore(_tempFile);
+        await secureStore.SaveAsync(store);
+
+        var route = Assert.Single((await secureStore.LoadAsync()).Routes);
+        Assert.Equal(CredentialPlacement.Body, route.CredentialPlacement);
+        Assert.Equal("auth_token", route.CredentialParameterName);
+        Assert.Equal("token ", route.CredentialValuePrefix);
+    }
+
+    [Fact]
+    public async Task Load_StoreWrittenBeforeCredentialPlacementExisted_DefaultsToBearerHeader()
+    {
+        // The literal JSON an older build wrote, encrypted the same way: these fields are simply
+        // absent, so the property initializers are the only thing keeping an upgraded install's
+        // routes forwarding exactly as they did before.
+        const string legacyJson = """
+            {
+              "SchemaVersion": 1,
+              "Credentials": [],
+              "Upstreams": [],
+              "Routes": [
+                {
+                  "Id": "6f9619ff-8b86-d011-b42d-00c04fc964ff",
+                  "PathPrefix": "/app/api",
+                  "UpstreamId": "00000000-0000-0000-0000-000000000001",
+                  "CredentialId": "00000000-0000-0000-0000-000000000002",
+                  "StripPrefix": true,
+                  "Enabled": true
+                }
+              ],
+              "Settings": { "ListenPort": 8722, "StartWithWindows": false, "LocalApiKey": "legacy-key" }
+            }
+            """;
+
+        await File.WriteAllBytesAsync(_tempFile, System.Security.Cryptography.ProtectedData.Protect(
+            System.Text.Encoding.UTF8.GetBytes(legacyJson),
+            optionalEntropy: null,
+            System.Security.Cryptography.DataProtectionScope.CurrentUser));
+
+        var route = Assert.Single((await new SecureStore(_tempFile).LoadAsync()).Routes);
+        Assert.Equal("/app/api", route.PathPrefix);
+        Assert.Equal(CredentialInjection.BearerHeader, route.ToCredentialInjection());
+    }
+
+    [Fact]
     public async Task Load_MissingFile_ReturnsEmptyStore()
     {
         var secureStore = new SecureStore(_tempFile);

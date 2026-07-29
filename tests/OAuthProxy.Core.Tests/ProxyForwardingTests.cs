@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -20,10 +22,15 @@ namespace OAuthProxy.Core.Tests;
 /// forwards: the guard removes the API key from HttpContext.Request, and whether that removal
 /// is visible to the forwarder depends on YARP reading the live request rather than a snapshot
 /// taken earlier in the pipeline. The only way to know is to look at what the upstream sees.
+///
+/// The credential placements are here for the same reason. Query and body injection both edit
+/// state the forwarder consumes later — the query collection, and the request body stream or the
+/// outgoing HttpContent — so only the upstream's view proves the edit survived.
 /// </summary>
 public class ProxyForwardingTests : IAsyncLifetime
 {
     private const string ApiKey = "forwarding-test-key-0123456789";
+    private const string Token = "UPSTREAM-ACCESS-TOKEN";
 
     private readonly string _storePath = Path.Combine(Path.GetTempPath(), $"oauthproxy-fwd-{Guid.NewGuid()}.dat");
     private readonly string _logPath = Path.Combine(Path.GetTempPath(), $"oauthproxy-fwd-logs-{Guid.NewGuid()}");
@@ -32,8 +39,23 @@ public class ProxyForwardingTests : IAsyncLifetime
     private WebApplication _proxy = null!;
     private HttpClient _client = null!;
 
-    /// <summary>What the upstream saw on the most recent request.</summary>
-    private static readonly List<(string Path, string Query, string? ProxyKeyHeader, string? Authorization, string? Cookie)> Received = [];
+    /// <summary>What the upstream saw on a request.</summary>
+    private sealed record ReceivedRequest(
+        string Path,
+        string Query,
+        Dictionary<string, string> Headers,
+        string? ContentType,
+        string Body)
+    {
+        public string? Header(string name) => Headers.TryGetValue(name, out var value) ? value : null;
+        public string? Authorization => Header("Authorization");
+        public string? Cookie => Header("Cookie");
+    }
+
+    private static readonly List<ReceivedRequest> Received = [];
+
+    /// <summary>YARP's own explanation for the most recent failed forward, if there was one.</summary>
+    private static string? LastForwarderError;
 
     public async Task InitializeAsync()
     {
@@ -46,12 +68,16 @@ public class ProxyForwardingTests : IAsyncLifetime
         _upstream = upstreamBuilder.Build();
         _upstream.Run(async context =>
         {
-            Received.Add((
+            using var reader = new StreamReader(context.Request.Body);
+            var body = await reader.ReadToEndAsync();
+
+            Received.Add(new ReceivedRequest(
                 context.Request.Path,
                 context.Request.QueryString.Value ?? "",
-                context.Request.Headers[LocalAccessGuard.ApiKeyHeaderName].FirstOrDefault(),
-                context.Request.Headers.Authorization.FirstOrDefault(),
-                context.Request.Headers.Cookie.FirstOrDefault()));
+                context.Request.Headers.ToDictionary(h => h.Key, h => h.Value.ToString(), StringComparer.OrdinalIgnoreCase),
+                context.Request.ContentType,
+                body));
+
             await context.Response.WriteAsync("upstream-ok");
         });
         await _upstream.StartAsync();
@@ -72,18 +98,32 @@ public class ProxyForwardingTests : IAsyncLifetime
         proxyBuilder.Services.Replace(ServiceDescriptor.Singleton(_ => new ActivityLog(_logPath)));
 
         _proxy = proxyBuilder.Build();
+
+        // A forwarding failure surfaces to the client as a bare 502 with no detail, which makes
+        // a broken transform very hard to tell apart from an upstream that fell over. YARP
+        // records the real reason here; SendAsync puts it in the assertion message.
+        _proxy.Use(async (context, next) =>
+        {
+            await next();
+            if (context.Features.Get<Yarp.ReverseProxy.Forwarder.IForwarderErrorFeature>() is { } error)
+            {
+                LastForwarderError = $"{error.Error}: {error.Exception}";
+            }
+        });
+
         _proxy.UseLocalAccessGuard();
         _proxy.MapReverseProxy();
         await _proxy.StartAsync();
 
-        // Configure a route now that the hosted-service initialization has run.
+        // Configure routes now that the hosted-service initialization has run — one per
+        // credential placement, so each test just picks the prefix it needs.
         var cache = _proxy.Services.GetRequiredService<ConfigStoreCache>();
         var credential = new CredentialRecord
         {
             Name = "test-credential",
             ClientId = "id",
             ClientSecret = "secret",
-            Token = new TokenSet("UPSTREAM-ACCESS-TOKEN", "refresh", DateTimeOffset.UtcNow.AddHours(1), "Bearer", DateTimeOffset.UtcNow),
+            Token = new TokenSet(Token, "refresh", DateTimeOffset.UtcNow.AddHours(1), "Bearer", DateTimeOffset.UtcNow),
         };
         var upstreamRecord = new UpstreamRecord { Name = "echo", BaseUrl = upstreamUrl };
 
@@ -92,13 +132,25 @@ public class ProxyForwardingTests : IAsyncLifetime
             store.Settings.LocalApiKey = ApiKey;
             store.Credentials.Add(credential);
             store.Upstreams.Add(upstreamRecord);
-            store.Routes.Add(new RouteMapping
-            {
-                PathPrefix = "/app/echo",
-                UpstreamId = upstreamRecord.Id,
-                CredentialId = credential.Id,
-                StripPrefix = true,
-            });
+
+            void AddRoute(string prefix, CredentialPlacement placement, string name, string valuePrefix) =>
+                store.Routes.Add(new RouteMapping
+                {
+                    PathPrefix = prefix,
+                    UpstreamId = upstreamRecord.Id,
+                    CredentialId = credential.Id,
+                    StripPrefix = true,
+                    CredentialPlacement = placement,
+                    CredentialParameterName = name,
+                    CredentialValuePrefix = valuePrefix,
+                });
+
+            // The default shape, spelled out rather than relying on the record's defaults.
+            AddRoute("/app/echo", CredentialPlacement.Header, "Authorization", "Bearer ");
+            AddRoute("/app/custom-header", CredentialPlacement.Header, "X-Api-Key", "");
+            AddRoute("/app/prefixed-header", CredentialPlacement.Header, "X-Auth", "token ");
+            AddRoute("/app/query", CredentialPlacement.Query, "access_token", "");
+            AddRoute("/app/body", CredentialPlacement.Body, "access_token", "");
         });
         _proxy.Services.GetRequiredService<ProxyConfigChangeNotifier>().Rebuild();
 
@@ -132,10 +184,10 @@ public class ProxyForwardingTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
         var seen = Assert.Single(Received);
-        Assert.Null(seen.ProxyKeyHeader);
+        Assert.Null(seen.Header(LocalAccessGuard.ApiKeyHeaderName));
         Assert.Equal("/resource", seen.Path);
         Assert.Equal("?token=abc", seen.Query);
-        Assert.Equal("Bearer UPSTREAM-ACCESS-TOKEN", seen.Authorization);
+        Assert.Equal($"Bearer {Token}", seen.Authorization);
     }
 
     [Fact]
@@ -165,8 +217,114 @@ public class ProxyForwardingTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
         var seen = Assert.Single(Received);
-        Assert.Equal("Bearer UPSTREAM-ACCESS-TOKEN", seen.Authorization);
+        Assert.Equal($"Bearer {Token}", seen.Authorization);
         Assert.Null(seen.Cookie);
+    }
+
+    [Fact]
+    public async Task CustomHeaderPlacement_SendsBareTokenInThatHeader()
+    {
+        // The X-Api-Key/PRIVATE-TOKEN shape: no prefix, no Authorization header at all.
+        var seen = await SendAsync(HttpMethod.Get, "/app/custom-header/resource");
+
+        Assert.Equal(Token, seen.Header("X-Api-Key"));
+        Assert.Null(seen.Authorization);
+    }
+
+    [Fact]
+    public async Task HeaderPlacement_WithNonBearerPrefix_UsesIt()
+    {
+        var seen = await SendAsync(HttpMethod.Get, "/app/prefixed-header/resource");
+
+        Assert.Equal($"token {Token}", seen.Header("X-Auth"));
+    }
+
+    [Fact]
+    public async Task HeaderPlacement_ReplacesACallerSuppliedHeaderOfTheSameName()
+    {
+        // Headers append rather than replace, so without an explicit removal the upstream would
+        // receive both values and pick whichever it liked.
+        var request = new HttpRequestMessage(HttpMethod.Get, "/app/custom-header/resource");
+        request.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, ApiKey);
+        request.Headers.Add("X-Api-Key", "CALLER-SUPPLIED-KEY");
+
+        await _client.SendAsync(request);
+
+        var seen = Assert.Single(Received);
+        Assert.Equal(Token, seen.Header("X-Api-Key"));
+    }
+
+    [Fact]
+    public async Task QueryPlacement_AddsTheParameterAndKeepsTheCallersOwn()
+    {
+        var seen = await SendAsync(HttpMethod.Get, "/app/query/resource?page=2");
+
+        Assert.Contains($"access_token={Token}", seen.Query);
+        Assert.Contains("page=2", seen.Query);
+        Assert.Null(seen.Authorization);
+    }
+
+    [Fact]
+    public async Task QueryPlacement_OverwritesACallerSuppliedParameterOfTheSameName()
+    {
+        var seen = await SendAsync(HttpMethod.Get, "/app/query/resource?access_token=CALLER-SUPPLIED");
+
+        Assert.DoesNotContain("CALLER-SUPPLIED", seen.Query);
+        Assert.Contains($"access_token={Token}", seen.Query);
+    }
+
+    [Fact]
+    public async Task BodyPlacement_AddsTheFieldToAJsonObjectAndKeepsTheRest()
+    {
+        var seen = await SendAsync(
+            HttpMethod.Post, "/app/body/rpc",
+            new StringContent("""{"jsonrpc":"2.0","method":"ping"}""", Encoding.UTF8, "application/json"));
+
+        using var json = JsonDocument.Parse(seen.Body);
+        Assert.Equal(Token, json.RootElement.GetProperty("access_token").GetString());
+        Assert.Equal("ping", json.RootElement.GetProperty("method").GetString());
+
+        // The rewritten body has to arrive with a matching length, or the upstream would either
+        // block waiting for bytes that never come or truncate the JSON.
+        Assert.Equal(seen.Body.Length.ToString(), seen.Header("Content-Length"));
+        Assert.Null(seen.Authorization);
+    }
+
+    [Fact]
+    public async Task BodyPlacement_OverwritesACallerSuppliedFieldOfTheSameName()
+    {
+        var seen = await SendAsync(
+            HttpMethod.Post, "/app/body/rpc",
+            new StringContent("""{"access_token":"CALLER-SUPPLIED"}""", Encoding.UTF8, "application/json"));
+
+        using var json = JsonDocument.Parse(seen.Body);
+        Assert.Equal(Token, json.RootElement.GetProperty("access_token").GetString());
+    }
+
+    [Fact]
+    public async Task BodyPlacement_AddsTheFieldToAFormBody()
+    {
+        var seen = await SendAsync(
+            HttpMethod.Post, "/app/body/form",
+            new FormUrlEncodedContent([new KeyValuePair<string, string>("grant", "value")]));
+
+        Assert.Contains("application/x-www-form-urlencoded", seen.ContentType);
+        Assert.Contains("grant=value", seen.Body);
+        Assert.Contains($"access_token={Token}", seen.Body);
+    }
+
+    [Fact]
+    public async Task BodyPlacement_LeavesABodyItCannotParseUntouched()
+    {
+        // A half-rewritten body reaching an upstream is worse than an unauthenticated request:
+        // this forwards the bytes exactly as sent and says so in the activity log.
+        const string plain = "not a structured body";
+        var seen = await SendAsync(
+            HttpMethod.Post, "/app/body/raw", new StringContent(plain, Encoding.UTF8, "text/plain"));
+
+        Assert.Equal(plain, seen.Body);
+        Assert.DoesNotContain(Token, seen.Body);
+        Assert.Null(seen.Authorization);
     }
 
     [Fact]
@@ -216,6 +374,18 @@ public class ProxyForwardingTests : IAsyncLifetime
 
         Assert.Contains("200", statusLine);
         Assert.Equal("/resource", Assert.Single(Received).Path);
+    }
+
+    /// <summary>Sends an authenticated request and returns what the upstream saw.</summary>
+    private async Task<ReceivedRequest> SendAsync(HttpMethod method, string url, HttpContent? content = null)
+    {
+        var request = new HttpRequestMessage(method, url) { Content = content };
+        request.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, ApiKey);
+
+        var response = await _client.SendAsync(request);
+        Assert.True(response.StatusCode == HttpStatusCode.OK, $"{response.StatusCode} / {LastForwarderError}");
+
+        return Assert.Single(Received);
     }
 
     /// <summary>

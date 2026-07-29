@@ -1,8 +1,9 @@
 # OAuthProxy
 
 An always-on Windows tray app that acts as a local OAuth2 reverse proxy for MCP and REST
-endpoints. It exposes routes under `http://127.0.0.1:<port>/app/...`, injects a bearer token
-per route, and refreshes tokens automatically before they expire — so tools like an MCP
+endpoints. It exposes routes under `http://127.0.0.1:<port>/app/...`, injects each route's
+credential (a bearer token by default), and refreshes tokens automatically before they expire
+— so tools like an MCP
 client can talk to an OAuth-protected API without handling auth themselves.
 
 ## Screenshots
@@ -24,6 +25,8 @@ already-authenticated requests to whatever's actually behind the route.
 - **Tray-resident**, starts hidden, no window shown until you open it from the tray icon
 - **Multiple credentials, upstreams, and routes** — any credential can back any route; not a
   fixed 1:1 mapping
+- **Per-route credential placement** — `Authorization: Bearer <token>` by default, or any
+  header name, query parameter, or request-body field, with a custom value prefix
 - **Multi-provider OAuth2**:
   - **Google** — via Google's own official library (`Google.Apis.Auth`), fixed loopback
     redirect port so it can be registered in Google Cloud Console if needed
@@ -123,6 +126,30 @@ a **path prefix** (e.g. `/app/my-service`), pick the upstream and credential →
   front rather than letting every request to it fail at runtime.
 - Upstream base URLs must be `https`, except on localhost. The access token is attached to
   every request forwarded there, so plain `http` would put it on the wire in cleartext.
+
+### How the credential is sent
+
+By default the token goes out as `Authorization: Bearer <token>`, which is what nearly every
+OAuth API expects. For the ones that want it elsewhere, each route has a **placement**, a
+**name**, and a **value prefix** — set on the add-route form, and editable afterwards by
+selecting the route in the grid.
+
+| Placement | Name means | Result with prefix `Bearer ` / empty prefix |
+|---|---|---|
+| **Header** (default) | header name | `Authorization: Bearer <token>` / `X-Api-Key: <token>` |
+| **Query** | query parameter name | `?access_token=<token>` |
+| **Body** | field name in the request body | `{"access_token": "<token>"}` |
+
+- The value prefix is literal text placed before the token — `Bearer ` **with its trailing
+  space**. Leave it empty to send the bare token.
+- A caller-supplied header, query parameter, or body field of the same name is replaced, never
+  duplicated, so the upstream is never shown two candidate credentials.
+- Body injection only applies to a JSON object or `application/x-www-form-urlencoded` body
+  that is under 1 MB and declares a `Content-Length`. Anything else (streamed, compressed, or
+  another content type) is forwarded untouched and the activity log records why the credential
+  could not be attached.
+- Names the proxy owns are rejected: `Host`, `Content-Length`, `Transfer-Encoding`,
+  `Connection`, `Upgrade` as header names, and `proxy_key` as a query parameter name.
 
 ## Calling the proxy (local API key)
 

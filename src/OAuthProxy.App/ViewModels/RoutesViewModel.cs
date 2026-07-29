@@ -24,7 +24,53 @@ public sealed partial class RoutesViewModel : ObservableObject
     [ObservableProperty] private CredentialRecord? _newRouteCredential;
     [ObservableProperty] private bool _newRouteStripPrefix = true;
 
+    // Bearer-in-a-header is the default here and in RouteMapping, so someone who never opens
+    // these fields gets exactly the behaviour the app had before they existed.
+    [ObservableProperty] private CredentialPlacement _newRouteCredentialPlacement = CredentialPlacement.Header;
+    [ObservableProperty] private string _newRouteCredentialParameterName = CredentialInjection.BearerHeader.Name;
+    [ObservableProperty] private string _newRouteCredentialValuePrefix = CredentialInjection.BearerHeader.ValuePrefix;
+
     [ObservableProperty] private string _statusMessage = "Ready.";
+
+    /// <summary>Drop-down source for both the add-route form and each row's editor.</summary>
+    public static IReadOnlyList<CredentialPlacement> AllPlacements { get; } = Enum.GetValues<CredentialPlacement>();
+
+    public IReadOnlyList<CredentialPlacement> Placements => AllPlacements;
+
+    /// <summary>The name box means something different per placement.</summary>
+    public string NewRouteParameterNameLabel => NewRouteCredentialPlacement switch
+    {
+        CredentialPlacement.Query => "Query parameter name",
+        CredentialPlacement.Body => "Body field name (JSON object or form body)",
+        _ => "Header name",
+    };
+
+    /// <summary>Live preview of what the upstream will receive, e.g. "header Authorization: Bearer &lt;token&gt;".</summary>
+    public string NewRouteInjectionSummary => new CredentialInjection(
+        NewRouteCredentialPlacement, NewRouteCredentialParameterName, NewRouteCredentialValuePrefix).Describe();
+
+    /// <summary>
+    /// Moves the name and prefix to the new placement's defaults when they were still at the
+    /// old placement's defaults, so switching to "Query" offers "?access_token=" instead of
+    /// carrying "Authorization"/"Bearer " across, while a value the user typed is left alone.
+    /// </summary>
+    partial void OnNewRouteCredentialPlacementChanged(CredentialPlacement oldValue, CredentialPlacement newValue)
+    {
+        var previous = CredentialInjection.DefaultFor(oldValue);
+        var replacement = CredentialInjection.DefaultFor(newValue);
+
+        if (NewRouteCredentialParameterName == previous.Name) NewRouteCredentialParameterName = replacement.Name;
+        if (NewRouteCredentialValuePrefix == previous.ValuePrefix) NewRouteCredentialValuePrefix = replacement.ValuePrefix;
+
+        OnPropertyChanged(nameof(NewRouteParameterNameLabel));
+        OnPropertyChanged(nameof(NewRouteInjectionSummary));
+    }
+
+    partial void OnNewRouteCredentialParameterNameChanged(string value) =>
+        OnPropertyChanged(nameof(NewRouteInjectionSummary));
+
+    partial void OnNewRouteCredentialValuePrefixChanged(string value) =>
+        OnPropertyChanged(nameof(NewRouteInjectionSummary));
 
     public bool HasUpstreams => Upstreams.Count > 0;
     public bool HasNoUpstreams => Upstreams.Count == 0;
@@ -82,7 +128,8 @@ public sealed partial class RoutesViewModel : ObservableObject
                 store.Upstreams.FirstOrDefault(u => u.Id == r.UpstreamId),
                 store.Credentials.FirstOrDefault(c => c.Id == r.CredentialId),
                 store.Settings.ListenPort,
-                OnRouteToggled));
+                OnRouteEdited,
+                message => StatusMessage = message));
         }
 
         NewRouteUpstream = Upstreams.FirstOrDefault(u => u.Id == selectedUpstreamId);
@@ -170,6 +217,16 @@ public sealed partial class RoutesViewModel : ObservableObject
             return;
         }
 
+        // Shared with ProxyConfigBuilder, which drops a route whose injection settings cannot be
+        // put on the wire — accepting one here would create a route that never serves anything.
+        if (RouteValidation.ValidateCredentialInjection(
+                NewRouteCredentialPlacement, NewRouteCredentialParameterName, NewRouteCredentialValuePrefix)
+            is { } injectionError)
+        {
+            StatusMessage = injectionError;
+            return;
+        }
+
         var route = new RouteMapping
         {
             PathPrefix = prefix,
@@ -177,6 +234,9 @@ public sealed partial class RoutesViewModel : ObservableObject
             CredentialId = NewRouteCredential.Id,
             StripPrefix = NewRouteStripPrefix,
             Enabled = true,
+            CredentialPlacement = NewRouteCredentialPlacement,
+            CredentialParameterName = NewRouteCredentialParameterName.Trim(),
+            CredentialValuePrefix = NewRouteCredentialValuePrefix,
         };
 
         await SaveAndRebuildAsync(store => store.Routes.Add(route));
@@ -184,7 +244,7 @@ public sealed partial class RoutesViewModel : ObservableObject
         Reload();
 
         NewRoutePathPrefix = "";
-        StatusMessage = $"Route '{prefix}' added.";
+        StatusMessage = $"Route '{prefix}' added — credential sent as {route.ToCredentialInjection().Describe()}.";
     }
 
     [RelayCommand]
@@ -197,23 +257,22 @@ public sealed partial class RoutesViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Called when a route's Enabled/Strip checkbox is toggled in the grid. The property
-    /// setter is synchronous, so persistence is kicked off here and any failure is reported
-    /// in the footer rather than surfacing as an unobserved task exception.
+    /// Called when a route row is edited in the grid — a checkbox toggled, or one of the
+    /// credential-injection fields changed. Those property setters are synchronous, so
+    /// persistence is kicked off here and any failure is reported in the footer rather than
+    /// surfacing as an unobserved task exception.
     /// </summary>
-    private void OnRouteToggled(RouteItemViewModel item)
+    private void OnRouteEdited(RouteItemViewModel item, string message)
     {
-        _ = PersistToggleAsync(item);
+        _ = PersistRouteEditAsync(item, message);
     }
 
-    private async Task PersistToggleAsync(RouteItemViewModel item)
+    private async Task PersistRouteEditAsync(RouteItemViewModel item, string message)
     {
         try
         {
             await SaveAndRebuildAsync();
-            StatusMessage = item.Enabled
-                ? $"Route '{item.PathPrefix}' enabled."
-                : $"Route '{item.PathPrefix}' disabled — requests to it will no longer be proxied.";
+            StatusMessage = message;
         }
         catch (Exception ex)
         {

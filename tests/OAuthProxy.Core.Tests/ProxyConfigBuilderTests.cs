@@ -86,6 +86,58 @@ public class ProxyConfigBuilderTests
     }
 
     [Fact]
+    public void Build_WritesTheRoutesCredentialPlacementIntoMetadata()
+    {
+        var upstream = new UpstreamRecord { Name = "api", BaseUrl = "https://api.test" };
+        var route = new RouteMapping
+        {
+            PathPrefix = "/app/api",
+            UpstreamId = upstream.Id,
+            CredentialId = Guid.NewGuid(),
+            CredentialPlacement = CredentialPlacement.Query,
+            CredentialParameterName = "access_token",
+            CredentialValuePrefix = "",
+        };
+
+        var (routes, _) = ProxyConfigBuilder.Build([route], [upstream]);
+
+        var injection = ProxyConfigBuilder.ReadCredentialInjection(Assert.Single(routes).Metadata!);
+        Assert.Equal(CredentialPlacement.Query, injection.Placement);
+        Assert.Equal("access_token", injection.Name);
+        Assert.Equal("", injection.ValuePrefix);
+    }
+
+    [Fact]
+    public void ReadCredentialInjection_WithoutPlacementMetadata_FallsBackToBearerHeader()
+    {
+        // Routes built before these metadata keys existed meant exactly one thing.
+        var injection = ProxyConfigBuilder.ReadCredentialInjection(
+            new Dictionary<string, string> { [ProxyConfigBuilder.CredentialIdMetadataKey] = Guid.NewGuid().ToString() });
+
+        Assert.Equal(CredentialInjection.BearerHeader, injection);
+    }
+
+    [Fact]
+    public void Build_RouteWithUnusableCredentialSettings_IsExcluded()
+    {
+        // A newline in the prefix would split the header line at the upstream, and a route that
+        // cannot attach its credential is not worth serving unauthenticated.
+        var upstream = new UpstreamRecord { Name = "api", BaseUrl = "https://api.test" };
+        var route = new RouteMapping
+        {
+            PathPrefix = "/app/api",
+            UpstreamId = upstream.Id,
+            CredentialId = Guid.NewGuid(),
+            CredentialValuePrefix = "Bearer \r\nX-Admin: 1",
+        };
+
+        var (routes, clusters) = ProxyConfigBuilder.Build([route], [upstream]);
+
+        Assert.Empty(routes);
+        Assert.Empty(clusters);
+    }
+
+    [Fact]
     public void Build_RouteWithDotSegmentPrefix_IsExcluded()
     {
         var upstream = new UpstreamRecord { Name = "echo", BaseUrl = "https://api.test" };

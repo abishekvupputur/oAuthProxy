@@ -66,4 +66,90 @@ public static class RouteValidation
 
     /// <summary>Convenience for callers that only need the yes/no answer.</summary>
     public static bool IsValidPathPrefix(string? pathPrefix) => ValidatePathPrefix(pathPrefix) is null;
+
+    /// <summary>
+    /// Characters allowed in an HTTP field name (RFC 9110 "token"). Anything outside this set
+    /// cannot be sent as a header at all, so it has to be rejected before it reaches a route.
+    /// </summary>
+    private const string HeaderNameSpecials = "!#$%&'*+-.^_`|~";
+
+    /// <summary>
+    /// Header names whose value this pipeline owns. Letting a route write them would not attach
+    /// a credential, it would break the forward: a rewritten Host lands the request on the wrong
+    /// virtual host, and a hand-written Content-Length or Transfer-Encoding desynchronizes the
+    /// message framing.
+    /// </summary>
+    private static readonly string[] ReservedHeaderNames =
+        ["host", "content-length", "transfer-encoding", "connection", "upgrade"];
+
+    /// <summary>
+    /// Validates the "where does the token go" settings of a route. Returns null when
+    /// acceptable, or a message suitable for showing in the UI footer.
+    /// </summary>
+    public static string? ValidateCredentialInjection(CredentialPlacement placement, string? name, string? valuePrefix)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return placement switch
+            {
+                CredentialPlacement.Query => "Query parameter name is required.",
+                CredentialPlacement.Body => "Body field name is required.",
+                _ => "Header name is required.",
+            };
+        }
+
+        // A CR or LF in the prefix would end the header line and let the rest be read as further
+        // headers — the classic response/request splitting trick, here aimed at the upstream.
+        // The same characters are meaningless in a query value or body field, so they are
+        // rejected for every placement rather than only for headers.
+        if (valuePrefix is not null && valuePrefix.Any(char.IsControl))
+        {
+            return "Value prefix may not contain control characters (including newlines).";
+        }
+
+        var trimmed = name.Trim();
+
+        switch (placement)
+        {
+            case CredentialPlacement.Header:
+                if (trimmed.Any(c => !char.IsAsciiLetterOrDigit(c) && !HeaderNameSpecials.Contains(c)))
+                {
+                    return "Header name may only contain letters, digits, and " + HeaderNameSpecials + ".";
+                }
+
+                if (ReservedHeaderNames.Contains(trimmed, StringComparer.OrdinalIgnoreCase))
+                {
+                    return $"'{trimmed}' is set by the proxy itself and cannot carry a credential. "
+                           + "Use a header such as 'Authorization' or 'X-Api-Key'.";
+                }
+
+                return null;
+
+            case CredentialPlacement.Query:
+                if (trimmed.Any(char.IsWhiteSpace) || trimmed.Any(char.IsControl) ||
+                    trimmed.IndexOfAny(['&', '=', '?', '#']) >= 0)
+                {
+                    return "Query parameter name may not contain spaces or any of: & = ? #";
+                }
+
+                // The local API key can arrive as this parameter and is stripped from every
+                // request before forwarding. Re-adding it here with a different value would put
+                // the proxy's own key name on the upstream carrying the upstream's token.
+                if (string.Equals(trimmed, "proxy_key", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "'proxy_key' is reserved for this proxy's own local API key. Pick another name.";
+                }
+
+                return null;
+
+            default:
+                return trimmed.Any(char.IsControl)
+                    ? "Body field name may not contain control characters."
+                    : null;
+        }
+    }
+
+    /// <summary>Convenience for callers that only need the yes/no answer.</summary>
+    public static bool IsValidCredentialInjection(CredentialInjection injection) =>
+        ValidateCredentialInjection(injection.Placement, injection.Name, injection.ValuePrefix) is null;
 }

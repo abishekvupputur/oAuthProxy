@@ -70,4 +70,81 @@ public class RouteValidationTests
         Assert.NotNull(RouteValidation.ValidatePathPrefix("/two words"));
         Assert.NotNull(RouteValidation.ValidatePathPrefix("/tab\there"));
     }
+
+    [Theory]
+    [InlineData(CredentialPlacement.Header, "Authorization", "Bearer ")]
+    [InlineData(CredentialPlacement.Header, "X-Api-Key", "")]
+    [InlineData(CredentialPlacement.Header, "PRIVATE-TOKEN", "")]
+    [InlineData(CredentialPlacement.Query, "access_token", "")]
+    [InlineData(CredentialPlacement.Query, "api-key", "")]
+    [InlineData(CredentialPlacement.Body, "access_token", "")]
+    [InlineData(CredentialPlacement.Body, "auth.token", "Bearer ")]
+    public void ValidateCredentialInjection_AcceptsOrdinarySettings(
+        CredentialPlacement placement, string name, string prefix) =>
+        Assert.Null(RouteValidation.ValidateCredentialInjection(placement, name, prefix));
+
+    [Theory]
+    [InlineData(CredentialPlacement.Header)]
+    [InlineData(CredentialPlacement.Query)]
+    [InlineData(CredentialPlacement.Body)]
+    public void ValidateCredentialInjection_RequiresAName(CredentialPlacement placement)
+    {
+        Assert.NotNull(RouteValidation.ValidateCredentialInjection(placement, "", ""));
+        Assert.NotNull(RouteValidation.ValidateCredentialInjection(placement, "   ", ""));
+    }
+
+    [Theory]
+    [InlineData("X Api Key")]      // space is not a token character
+    [InlineData("X-Api-Key:")]
+    [InlineData("Auth\r\nX-Evil")]
+    public void ValidateCredentialInjection_RejectsHeaderNamesThatAreNotHttpTokens(string name) =>
+        Assert.NotNull(RouteValidation.ValidateCredentialInjection(CredentialPlacement.Header, name, ""));
+
+    [Theory]
+    [InlineData("Host")]
+    [InlineData("content-length")]
+    [InlineData("Transfer-Encoding")]
+    public void ValidateCredentialInjection_RejectsHeadersTheProxyOwns(string name)
+    {
+        // Writing these would not attach a credential, it would break the forward — a rewritten
+        // Host lands on the wrong virtual host, a stale length desynchronizes the framing.
+        var error = RouteValidation.ValidateCredentialInjection(CredentialPlacement.Header, name, "");
+
+        Assert.NotNull(error);
+        Assert.Contains("cannot carry a credential", error);
+    }
+
+    [Theory]
+    [InlineData(CredentialPlacement.Header)]
+    [InlineData(CredentialPlacement.Query)]
+    [InlineData(CredentialPlacement.Body)]
+    public void ValidateCredentialInjection_RejectsNewlinesInThePrefix(CredentialPlacement placement)
+    {
+        // A CR or LF ends the header line and lets the rest be read as further headers — request
+        // splitting, aimed at the upstream.
+        var error = RouteValidation.ValidateCredentialInjection(placement, "Authorization", "Bearer \r\nX-Admin: 1");
+
+        Assert.NotNull(error);
+        Assert.Contains("control characters", error);
+    }
+
+    [Theory]
+    [InlineData("two words")]
+    [InlineData("a=b")]
+    [InlineData("a&b")]
+    [InlineData("a?b")]
+    [InlineData("a#b")]
+    public void ValidateCredentialInjection_RejectsQueryNamesWithQueryStringSyntax(string name) =>
+        Assert.NotNull(RouteValidation.ValidateCredentialInjection(CredentialPlacement.Query, name, ""));
+
+    [Fact]
+    public void ValidateCredentialInjection_RejectsTheProxysOwnQueryParameterName()
+    {
+        // The local API key can arrive as "?proxy_key=" and is stripped from every request
+        // before forwarding; re-adding it here would send the upstream's token under that name.
+        var error = RouteValidation.ValidateCredentialInjection(CredentialPlacement.Query, "proxy_key", "");
+
+        Assert.NotNull(error);
+        Assert.Contains("reserved", error);
+    }
 }

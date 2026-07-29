@@ -13,7 +13,7 @@ public static class ProxyStartupExtensions
     /// <summary>
     /// Wires up storage, YARP (with an empty initial config — the real routes get loaded once
     /// ConfigStoreCache finishes loading from disk, via ConfigStoreInitializerHostedService),
-    /// and the bearer-token transform.
+    /// and the credential-injection transform.
     /// </summary>
     public static IServiceCollection AddOAuthProxy(this IServiceCollection services)
     {
@@ -45,7 +45,7 @@ public static class ProxyStartupExtensions
         services.AddSingleton<IProxyConfigProvider>(configProvider);
 
         services.AddSingleton<ProxyConfigChangeNotifier>();
-        services.AddSingleton<ITransformProvider, BearerTokenTransformProvider>();
+        services.AddSingleton<ITransformProvider, CredentialInjectionTransformProvider>();
 
         services.AddReverseProxy();
 

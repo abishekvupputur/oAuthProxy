@@ -1,6 +1,6 @@
-using System.Net.Http.Headers;
 using OAuthProxy.Core.Auth;
 using OAuthProxy.Core.Diagnostics;
+using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Storage;
 using Yarp.ReverseProxy.Transforms;
 using Yarp.ReverseProxy.Transforms.Builder;
@@ -8,12 +8,15 @@ using Yarp.ReverseProxy.Transforms.Builder;
 namespace OAuthProxy.Core.Proxy;
 
 /// <summary>
-/// Injects "Authorization: Bearer &lt;token&gt;" into proxied requests, reading the token from
-/// ConfigStoreCache live on every request (not captured at route-build time). This is what
-/// decouples token refresh from route rebuilds — a refreshed token applies to the very next
-/// proxied request automatically, no config reload needed.
+/// Attaches the route's credential to each proxied request, in whichever shape the route is
+/// configured for — a header (the "Authorization: Bearer &lt;token&gt;" default), a query
+/// parameter, or a field in the request body.
+///
+/// The token is read from ConfigStoreCache live on every request (not captured at route-build
+/// time). This is what decouples token refresh from route rebuilds — a refreshed token applies
+/// to the very next proxied request automatically, no config reload needed.
 /// </summary>
-public sealed class BearerTokenTransformProvider(
+public sealed class CredentialInjectionTransformProvider(
     ConfigStoreCache configStoreCache,
     AccessTokenProvider accessTokenProvider,
     ActivityLog activityLog) : ITransformProvider
@@ -35,6 +38,8 @@ public sealed class BearerTokenTransformProvider(
             return;
         }
 
+        var injection = ProxyConfigBuilder.ReadCredentialInjection(metadata);
+
         context.AddRequestTransform(async transformContext =>
         {
             var credential = configStoreCache.GetCredential(credentialId);
@@ -45,22 +50,23 @@ public sealed class BearerTokenTransformProvider(
             var token = await accessTokenProvider.GetAccessTokenAsync(
                 credentialId, transformContext.HttpContext.RequestAborted);
 
-            // Assigned unconditionally, including the null case. YARP copies request headers
-            // through by default, so merely *skipping* the assignment when we have no token
-            // would forward the caller's own Authorization header to the upstream — letting a
-            // local caller use this proxy to pass arbitrary credentials to a configured host.
-            transformContext.ProxyRequest.Headers.Authorization =
-                token is null ? null : new AuthenticationHeaderValue("Bearer", token);
-
-            // Same reasoning for cookies: the upstream's auth is the bearer token we attach,
-            // never ambient browser state, and forwarding cookies only risks carrying a
-            // session the caller should not have been able to spend.
+            // Cleared unconditionally — whatever the route's placement is, and whether or not we
+            // have a token to attach. YARP copies request headers through by default, so leaving
+            // these alone would forward the caller's own Authorization header and cookies to the
+            // upstream, letting a local caller use this proxy to spend credentials (or an
+            // ambient browser session) it should not have been able to reach.
+            transformContext.ProxyRequest.Headers.Authorization = null;
             transformContext.ProxyRequest.Headers.Remove("Cookie");
 
+            var attached = token is not null
+                           && await InjectAsync(transformContext, injection, token, credential?.Name);
+
             var request = transformContext.HttpContext.Request;
-            activityLog.Log(token is not null
-                ? $"PROXY {request.Method} {LogSafePath(request)} -> {transformContext.DestinationPrefix} [token: {credential?.Name}]"
-                : $"PROXY {request.Method} {LogSafePath(request)} -> {transformContext.DestinationPrefix} [NO TOKEN - credential not connected]");
+            var placement = $"{injection.Placement.ToString().ToLowerInvariant()} {injection.Name}";
+            activityLog.Log(attached
+                ? $"PROXY {request.Method} {LogSafePath(request)} -> {transformContext.DestinationPrefix} [token: {credential?.Name} via {placement}]"
+                : $"PROXY {request.Method} {LogSafePath(request)} -> {transformContext.DestinationPrefix} "
+                  + $"[NO TOKEN - {(token is null ? "credential not connected" : $"could not be attached to {placement}")}]");
         });
 
         context.AddResponseTransform(transformContext =>
@@ -87,6 +93,38 @@ public sealed class BearerTokenTransformProvider(
             activityLog.Log($"  <- {(status is null ? "no response (upstream unreachable)" : ((int)status).ToString())} for {request.Method} {LogSafePath(request)}");
             return ValueTask.CompletedTask;
         });
+    }
+
+    /// <summary>
+    /// Puts the token where the route says it goes. Returns false when the request could not
+    /// carry it (a body placement on a body this cannot rewrite), so the caller can say so in
+    /// the activity log rather than leaving a bare 401 to explain itself.
+    /// </summary>
+    private async ValueTask<bool> InjectAsync(
+        RequestTransformContext context, CredentialInjection injection, string token, string? credentialName)
+    {
+        var value = injection.FormatValue(token);
+
+        switch (injection.Placement)
+        {
+            case CredentialPlacement.Query:
+                // Assigning replaces any same-named parameter the caller supplied, so a caller
+                // cannot pre-set "?access_token=..." and have the upstream see two of them.
+                context.Query.Collection[injection.Name] = value;
+                return true;
+
+            case CredentialPlacement.Body:
+                return await RequestBodyCredentialInjector.TryInjectAsync(
+                    context, injection.Name, value, activityLog, credentialName);
+
+            default:
+                // Removed first for the same reason: TryAddWithoutValidation appends rather than
+                // replaces, so without this a caller-supplied header of the same name would be
+                // sent alongside ours and the upstream would pick whichever it liked.
+                context.ProxyRequest.Headers.Remove(injection.Name);
+                context.ProxyRequest.Content?.Headers.Remove(injection.Name);
+                return context.ProxyRequest.Headers.TryAddWithoutValidation(injection.Name, value);
+        }
     }
 
     /// <summary>
