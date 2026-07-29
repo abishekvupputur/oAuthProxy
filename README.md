@@ -1,296 +1,349 @@
 # OAuthProxy
 
-An always-on Windows tray app that acts as a local OAuth2 reverse proxy for MCP and REST
-endpoints. It exposes routes under `http://127.0.0.1:<port>/app/...`, injects each route's
-credential (a bearer token by default), and refreshes tokens automatically before they expire
-— so tools like an MCP
-client can talk to an OAuth-protected API without handling auth themselves.
+**Give each AI agent its own MCP endpoint — pooling the servers you choose, exposing only the
+tools you allow, with OAuth handled for you.**
 
-## Screenshots
+A tray-resident Windows app that runs a local reverse proxy on `127.0.0.1`. It owns the OAuth2
+flow and token lifecycle for upstream APIs and MCP servers, then lets you compose those servers
+into filtered, per-agent MCP endpoints.
 
-| Credentials | Routes | Settings |
-|---|---|---|
-| [![Credentials tab](media/credentialsScreen.png)](media/credentialsScreen.png) | [![Routes tab](media/routesScreen.png)](media/routesScreen.png) | [![Settings tab](media/settingsScreen.png)](media/settingsScreen.png) |
+[![MCP Funnel tab](media/mcpFunnelScreen.png)](media/mcpFunnelScreen.png)
 
-*(Credential/upstream names blacked out — that's redaction, not a UI bug.)*
+---
 
-## Why
+## The problem
 
-MCP servers and REST APIs are often behind OAuth2, but most MCP clients expect a bare HTTP
-endpoint. OAuthProxy sits in between: it owns the OAuth flow and token lifecycle, and forwards
-already-authenticated requests to whatever's actually behind the route.
+MCP servers are increasingly behind OAuth2, but most MCP clients expect a bare HTTP endpoint with
+no auth story. And once you have three servers connected, your agent sees *all* of their tools —
+ninety of them — with no way to say "this agent gets these six."
+
+OAuthProxy solves both halves:
+
+| | |
+|---|---|
+| **Routes** | Attach a live OAuth token to every request forwarded to an upstream. Your client never handles auth. |
+| **Funnels** | Pool several MCP servers behind one local endpoint and expose only the tools, resources, and prompts you pick. |
+
+The result: point each agent at `http://127.0.0.1:5559/mcp/<name>` and it sees exactly the
+toolset you granted it, drawn from as many upstreams as you like — including ones it could never
+reach on its own.
 
 ## Features
 
-- **Tray-resident**, starts hidden, no window shown until you open it from the tray icon
-- **Multiple credentials, upstreams, and routes** — any credential can back any route; not a
-  fixed 1:1 mapping
-- **Per-route credential placement** — `Authorization: Bearer <token>` by default, or any
-  header name, query parameter, or request-body field, with a custom value prefix
-- **[MCP Funnel](#mcp-funnel)** (opt-in) — pool several MCP servers behind one local endpoint
-  per AI agent, and choose exactly which of their tools, resources, and prompts that agent sees
-- **Multi-provider OAuth2**:
-  - **Google** — via Google's own official library (`Google.Apis.Auth`), fixed loopback
-    redirect port so it can be registered in Google Cloud Console if needed
-  - **Nextcloud / any custom OAuth2 provider** — via `IdentityModel.OidcClient`, works with
-    plain OAuth2 (no OIDC discovery, no `userinfo` endpoint required)
-- **Full credential lifecycle** — Connect, Refresh, Disconnect (clears the local token
-  without revoking the grant at the provider), Edit, Delete
-- **Tokens auto-refresh** 10 minutes before expiry, in the background
-- **Live status per credential** — a colored dot plus expiry time, refreshed every 15s
-- **DPAPI-encrypted** credential store — nothing is ever written in plaintext
-- **Activity log** with 2-day rotation, viewable from the Settings tab (every proxied
-  request, token refresh, and route reload is logged)
-- **Single-instance guard** — a second launch refuses to start rather than fighting the first
-  over ports
-- Survives provider/network errors without crashing — this is meant to run unattended
-- **CI**: pushing a version tag runs the test suite, and only on success builds and publishes
-  a downloadable release — see [Releases](#releases)
+- **MCP Funnel** — per-agent endpoints pooling multiple MCP servers with per-tool filtering
+- **Multi-provider OAuth2** — Google (via `Google.Apis.Auth`), Nextcloud, or any custom OAuth2
+  provider (via `IdentityModel.OidcClient`; plain OAuth2, no OIDC discovery required)
+- **Flexible credential placement** — `Authorization: Bearer <token>` by default, or any header,
+  query parameter, or request-body field, with a custom value prefix
+- **Automatic token refresh** — 10 minutes ahead of expiry, in the background
+- **Any credential backs any route** — not a fixed 1:1 mapping
+- **DPAPI-encrypted store** — nothing written in plaintext
+- **Local API key** on every request, so other processes on your machine cannot spend your grants
+- **Activity log** with redaction and rotation, viewable in-app
+- **Tray-resident** — starts hidden, survives provider and network errors, single-instance guard
+- **CI-published releases** with build provenance attestation
 
 ## Requirements
 
 - Windows 10/11
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) or newer (built against
-  `net8.0-windows`; a `net9`/`net10` SDK can build it too — no need for an exact match)
+- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) or newer — only to build from
+  source; released binaries are self-contained
 
-## Quick start
+## Install
+
+### From a release
+
+Download `OAuthProxy-<version>.exe` from the [Releases page](../../releases) and run it. No .NET
+install, no extraction.
+
+Windows will warn about an unknown publisher — the binary is not Authenticode-signed. Instead
+every release carries a **build provenance attestation** recording the workflow, commit, and
+runner that produced it. Verify with the [GitHub CLI](https://cli.github.com/):
+
+```bash
+gh attestation verify OAuthProxy-v2.2.0.exe --repo abishekvupputur/oAuthProxy
+```
+
+A pass means the file is byte-for-byte what CI built from this repository.
+
+### From source
 
 ```
 clean-build.bat
 ```
 
-Stops any running instance, wipes `bin`/`obj`, rebuilds, and launches the app. Look for the
-padlock icon in the system tray — left-click opens the settings window, right-click gives a
-menu (Open Settings / Start with Windows / Exit).
+Stops any running instance, wipes `bin`/`obj`, rebuilds, and launches. Look for the padlock in
+the system tray — left-click opens the window, right-click gives a menu.
 
-The app listens on **`http://127.0.0.1:5559`** by default (changeable in Settings; requires a
-restart to take effect).
+The proxy listens on **`http://127.0.0.1:5559`** by default (changeable in Settings; requires a
+restart).
 
-## Releases
+---
 
-Prebuilt, self-contained `OAuthProxy.exe` — no .NET install needed — is published on the
-[Releases page](../../releases) whenever a version tag (`v*`) is pushed. `.github/workflows/release.yml`
-runs the test suite first and only builds/publishes if it passes; nothing is released off a
-failing build. Download `OAuthProxy-<version>.exe` and run it — no extraction needed.
+## Concepts
 
-Windows will warn that the exe is from an unknown publisher; it is not Authenticode-signed.
-Instead, every release carries a **build provenance attestation** recording the workflow,
-commit, and runner that produced that exact binary. Verify a download with the
-[GitHub CLI](https://cli.github.com/):
+Four things, each built on the last:
 
-```bash
-gh attestation verify OAuthProxy-v1.0.3.exe --repo abishekvupputur/oAuthProxy
+```
+Credential  →  an OAuth2 grant you have connected (Google, Nextcloud, custom)
+Upstream    →  a base URL to forward to
+Route       →  a local path prefix that forwards to an upstream with a credential attached
+Funnel      →  a local MCP endpoint pooling several MCP servers, filtered per agent
 ```
 
-A pass means the file is byte-for-byte what CI built from this repo. A failure means it was
-modified after the build, or did not come from here at all.
+You need a credential and a route to reach a protected API. You need a funnel only if you want to
+shape what an agent sees.
+
+---
 
 ## Setting up a credential
 
-Credentials tab → pick a provider preset → fill in Client ID/Secret and scopes → **Add
-credential** → **Connect** (opens your browser for the consent screen).
+**Credentials tab** → pick a provider preset → fill in Client ID/Secret and scopes → **Add
+credential** → **Connect** (opens your browser for consent).
 
 ### Google
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), create an OAuth client.
-   - **Desktop app** type is recommended — Google accepts any loopback port automatically,
-     nothing to register.
-   - If you use **Web application** type instead, you must add the exact redirect URI shown
-     in the Credentials tab (`http://127.0.0.1:51004/authorize/`) to the client's allowed
-     redirect URIs.
-2. Paste the Client ID/Secret, set your scopes, Connect.
+   - **Desktop app** is easiest — Google accepts any loopback port, nothing to register.
+   - For **Web application**, register the exact redirect URI shown in the Credentials tab
+     (`http://127.0.0.1:51004/authorize/`).
+2. Paste Client ID/Secret, set scopes, **Connect**.
 
-Every Google authorization forces the consent screen (`prompt=consent`) so a refresh token
-is issued every time, not just on first-ever consent — otherwise the credential silently
-can't auto-refresh later.
+Every Google authorization forces the consent screen (`prompt=consent`) so a refresh token is
+issued every time — otherwise the credential silently cannot auto-refresh later.
 
-### Nextcloud / custom OAuth2
+### Nextcloud or custom OAuth2
 
-1. Create an OAuth2 client under **Nextcloud Settings → Security → OAuth2** (or your
-   provider's equivalent).
-2. Pick the **Nextcloud** or **Custom** preset, fill in the Authorization/Token endpoints
-   (or an Authority for OIDC discovery), Client ID/Secret, scopes.
+1. Create an OAuth2 client under **Nextcloud Settings → Security → OAuth2**, or your provider's
+   equivalent.
+2. Pick the **Nextcloud** or **Custom** preset. Fill in the Authorization and Token endpoints (or
+   an Authority for OIDC discovery), Client ID/Secret, and scopes.
 3. Register `http://127.0.0.1:51005/callback/` as the redirect URI if your provider requires
-   pre-registration (it's shown in the UI, fixed and copyable).
+   pre-registration. It is fixed and copyable from the UI.
+
+Endpoints must be `https`, except on localhost — these fields receive your client secret and
+refresh token.
+
+---
 
 ## Setting up a route
 
-Routes tab → add an **Upstream** (a name + base URL, e.g. your MCP server or API) → fill in
-a **path prefix** (e.g. `/app/my-service`), pick the upstream and credential → **Add route**.
+**Routes tab** → add an **Upstream** (name + base URL) → enter a **path prefix**, pick the
+upstream and credential → **Add route**.
 
-- **Strip prefix** (recommended, on by default): `/app/my-service/foo` is forwarded upstream
-  as `/foo` — the prefix is just a local label. Turn it off only if the upstream genuinely
-  expects that prefix in its own path.
-- The full local endpoint (e.g. `http://127.0.0.1:5559/app/my-service`) is shown ready to
-  paste into an MCP client config.
-- A route can be turned off (**ENABLED** checkbox) without deleting it.
-- Path prefixes must be unique — two routes can't share one; the UI rejects the duplicate up
-  front rather than letting every request to it fail at runtime.
-- Upstream base URLs must be `https`, except on localhost. The access token is attached to
-  every request forwarded there, so plain `http` would put it on the wire in cleartext.
+[![Routes tab](media/routesScreen.png)](media/routesScreen.png)
+
+- **Strip prefix** (on by default): `/app/my-service/foo` forwards upstream as `/foo` — the prefix
+  is just a local label. Turn it off only if the upstream expects that prefix in its own path.
+- The full local endpoint is shown ready to paste into a client config.
+- Routes can be disabled without deleting them.
+- Prefixes must be unique, and `/mcp` is reserved for funnel endpoints.
+- Upstream base URLs must be `https` except on localhost — the access token goes to every request
+  forwarded there.
 
 ### How the credential is sent
 
-By default the token goes out as `Authorization: Bearer <token>`, which is what nearly every
-OAuth API expects. For the ones that want it elsewhere, each route has a **placement**, a
-**name**, and a **value prefix** — set on the add-route form, and editable afterwards by
-selecting the route in the grid.
+By default the token goes out as `Authorization: Bearer <token>`. For upstreams that want it
+elsewhere, each route has a **placement**, a **name**, and a **value prefix**:
 
-| Placement | Name means | Result with prefix `Bearer ` / empty prefix |
+| Placement | Name means | Result |
 |---|---|---|
-| **Header** (default) | header name | `Authorization: Bearer <token>` / `X-Api-Key: <token>` |
+| **Header** (default) | header name | `Authorization: Bearer <token>` or `X-Api-Key: <token>` |
 | **Query** | query parameter name | `?access_token=<token>` |
-| **Body** | field name in the request body | `{"access_token": "<token>"}` |
+| **Body** | field in the request body | `{"access_token": "<token>"}` |
 
-- The value prefix is literal text placed before the token — `Bearer ` **with its trailing
-  space**. Leave it empty to send the bare token.
-- A caller-supplied header, query parameter, or body field of the same name is replaced, never
-  duplicated, so the upstream is never shown two candidate credentials.
-- Body injection only applies to a JSON object or `application/x-www-form-urlencoded` body
-  that is under 1 MB and declares a `Content-Length`. Anything else (streamed, compressed, or
-  another content type) is forwarded untouched and the activity log records why the credential
-  could not be attached.
-- Names the proxy owns are rejected: `Host`, `Content-Length`, `Transfer-Encoding`,
-  `Connection`, `Upgrade` as header names, and `proxy_key` as a query parameter name.
+- The value prefix is literal text before the token — `Bearer ` **including the trailing space**.
+  Leave it empty for a bare token.
+- A caller-supplied header, parameter, or field of the same name is **replaced**, never
+  duplicated, so the upstream never sees two candidate credentials.
+- Body injection applies to JSON objects and `application/x-www-form-urlencoded` bodies up to
+  1 MB, including chunked and streamed ones. Anything larger or in another content type is
+  forwarded untouched and the activity log says why.
+- Names the proxy owns are rejected: `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`,
+  `Upgrade` as headers, and `proxy_key` as a query parameter.
+
+---
 
 ## MCP Funnel
 
-A route solves auth for one MCP server. The funnel solves the next problem: an agent pointed at
-three servers sees all ninety of their tools, and there is no way to hand it only the six it
-should have.
+A funnel is a local MCP endpoint at `http://127.0.0.1:5559/mcp/<slug>` that pools several MCP
+servers and exposes a subset of what they offer. Point one funnel at each agent.
 
-A **funnel** is a local MCP endpoint — `http://127.0.0.1:5559/mcp/<slug>` — that pools several
-MCP servers and exposes a chosen subset of what they offer. Point one funnel at each agent:
+Off by default — enable it with **Enable MCP funnel** on the MCP Funnel tab. While off, every path
+under `/mcp` returns `404`.
 
-- **Pooling** — one endpoint fronting Notion + GitHub + an internal server, instead of three.
-- **Limiting** — 6 tools instead of 90. Smaller prompt, smaller blast radius.
+### 1. Add sources
 
-Off by default. Turn it on with **Enable MCP funnel** on the MCP Funnel tab; while off, every
-path under `/mcp` answers `404`.
-
-### Sources
-
-A **source** is one MCP server the funnel can draw from. Two kinds:
+A **source** is one MCP server the funnel can draw from:
 
 | Kind | What it is |
 |---|---|
-| **Route (credentialed)** | An MCP server reached through one of your routes. The route's OAuth token is attached automatically — this is the point of having the funnel inside this app rather than beside it. |
-| **URL (no auth)** | Any MCP server that needs no credential. |
+| **Route (credentialed)** | An MCP server reached through one of your routes. The OAuth token is attached automatically. |
+| **URL (no auth)** | Any MCP server needing no credential. |
 
-Press **Refresh** on a source to connect and read what it offers; the ticklists are populated
-from that.
+Press **Refresh** on a source to connect and read what it offers. The status column reports the
+result, or the reason it could not be reached.
 
-### Naming
+### 2. Create a funnel
 
-Every name a source contributes is prefixed with that source's **alias**: a tool called
-`create_issue` from a source aliased `gh` reaches the agent as `gh__create_issue`. Resources are
-rewritten to `funnel://gh/<original-uri>` and mapped back on read.
+Give it a name and an endpoint slug. The full URL appears in the grid, selectable and ready to
+paste.
 
-Prefixing is always on, not only when two sources collide. Conditional prefixing would mean a
-tool silently renames itself the day you add an unrelated source, breaking every agent prompt
-that referred to it.
+### 3. Choose what it exposes
 
-### Choosing what an agent sees
-
-Per source, per kind (tools / resources / prompts):
+Select the funnel, tick the sources it pools, then per source and per kind (tools, resources,
+prompts):
 
 | Mode | Behaviour |
 |---|---|
-| **All** | Everything, including anything the server gains later. |
-| **Include** | Only what is ticked. A tool the server adds later stays hidden until you pick it. |
-| **Exclude** | Everything except what is ticked. A tool the server adds later is exposed immediately. |
+| **All** | Everything, including whatever the server gains later. |
+| **Include** | Only what is ticked. A tool added upstream later stays hidden until you pick it. |
+| **Exclude** | Everything except what is ticked. A tool added later is exposed immediately. |
 
-Include to grant a known set; Exclude to revoke a few from an otherwise trusted server.
+Use **Include** to grant a known set, **Exclude** to revoke a few from an otherwise trusted
+server.
 
-Filtering is enforced on the **call** path as well as the listing — an agent that learned a name
-before you unticked it, or simply guessed one, is refused, and the call never reaches the
-upstream.
+Edits apply on the agent's **next call** — no reconnect, no restart.
 
-Edits apply on the agent's **next call**. No reconnect, no restart.
+### Tool naming
+
+Every name is prefixed with its source's alias: `create_issue` from a source aliased `gh` reaches
+the agent as `gh__create_issue`. Resources are rewritten to `funnel://gh/<original-uri>` and
+mapped back on read.
+
+Prefixing is unconditional by design. Prefixing only on collision would rename a tool the day you
+add an unrelated source, breaking every agent prompt that referenced it.
 
 ### Pointing an agent at a funnel
 
-Same local API key as everything else:
-
-```bash
-curl -H "X-Proxy-Key: <your-key>" http://127.0.0.1:5559/mcp/coding-agent
+```jsonc
+{
+  "servers": {
+    "my-agent": {
+      "url": "http://127.0.0.1:5559/mcp/my-agent?proxy_key=<your-key>"
+    }
+  }
+}
 ```
 
-The endpoint URL is shown on the MCP Funnel tab, selectable, ready to paste into an agent's
-config.
+Or send the key as the `X-Proxy-Key` header if your client supports custom headers.
 
-### How it behaves
+### Behaviour
 
-- **Each endpoint is independent.** Two funnels drawing on the same upstream get their own MCP
-  session to it, so one agent's activity cannot perturb another's, and one expired session does
-  not take both endpoints down.
-- **Calls run in parallel**, both across endpoints and within one.
-- **One dead source degrades only itself** — the other sources' tools still list, and the
-  failure is shown on the source's row and in the activity log.
-- **Arguments are never logged.** Tool names and outcomes are; the values an agent passes are
-  not, because they routinely carry your data.
-- `/mcp` is **reserved** — a route cannot claim it, and a request that already passed through a
-  funnel is refused rather than allowed to loop.
+- **Endpoints are independent.** Two funnels drawing on the same upstream hold separate MCP
+  sessions, so one agent cannot perturb another and one expired session cannot take both down.
+- **Calls run in parallel**, across endpoints and within one.
+- **A dead source degrades only itself** — the healthy sources still list, and the failure is
+  shown on that source's row and in the log.
+- **Filtering is enforced on the call path**, not just the listing. A tool an agent learned before
+  you unticked it is refused, and the call never reaches the upstream.
+- **Arguments are never logged.** Tool names and outcomes are; the values an agent passes are not.
+- `/mcp` is reserved, and a request that already passed through a funnel is refused rather than
+  allowed to loop.
 
 ### Limits
 
 - Sources must be HTTP MCP servers. Local **stdio** servers (`npx …`) are not supported.
-- Sampling, elicitation, and resource subscriptions are not offered on a funnel endpoint. The
-  endpoint runs stateless, which is what makes a GUI edit take effect on the next call.
-- Two agents connected to the *same* funnel share that funnel's upstream sessions. Give each
-  agent its own funnel if they must be isolated from each other.
-- A route-backed source whose server keys sessions on a **cookie** rather than the standard
-  `Mcp-Session-Id` header cannot hold a session: the proxy strips `Cookie` on the way upstream,
-  deliberately, so a caller cannot launder its own credentials through it.
+- Sampling, elicitation, and resource subscriptions are not offered on a funnel endpoint — it runs
+  stateless, which is what makes edits take effect on the next call.
+- Two agents on the *same* funnel share its upstream sessions. Give each agent its own funnel if
+  they must be isolated.
+- A route-backed source that keys sessions on a **cookie** rather than the standard
+  `Mcp-Session-Id` header cannot hold a session: `Cookie` is stripped on the way upstream,
+  deliberately, so a caller cannot launder its own credentials through the proxy.
 
-## Calling the proxy (local API key)
+---
 
-Every proxied request must present the **local API key** shown in the Settings tab:
+## Calling the proxy
+
+Every request — routes and funnels alike — must present the **local API key** from the Settings
+tab:
 
 ```bash
 curl -H "X-Proxy-Key: <your-key>" http://127.0.0.1:5559/app/my-service/foo
 ```
 
-For clients that cannot set headers (browser `EventSource`, used by some MCP SSE transports),
-the key may instead be passed as a query parameter:
+For clients that cannot set headers (browser `EventSource`, some MCP SSE transports), pass it as a
+query parameter instead:
 
 ```
 http://127.0.0.1:5559/app/my-service?token=abc&proxy_key=<your-key>
 ```
 
-The key is removed before the request is forwarded — in **both** forms, header and query
-parameter — so it never reaches the upstream's access log and never appears in the activity
-log. Your own headers and query parameters (`token=abc` above) are passed through untouched.
+The key is stripped before forwarding — in both forms — so it never reaches the upstream's access
+log or this app's activity log. Your own headers and parameters pass through untouched. Requests
+without a valid key get `403`.
 
-Requests without a valid key get `403`.
+Use **Regenerate key** in Settings if it is ever exposed; clients using the old key start getting
+`403` immediately.
 
-**Why this exists.** Listening on `127.0.0.1` keeps other machines out, but it is not an
-authorization boundary: every process on this computer, under any user account, can reach
-loopback. Since the proxy attaches your live OAuth token to whatever it forwards, an
-unguarded listener would hand your Google or Nextcloud session to any local program that
-knew the port. The key also blocks *DNS rebinding*, where a page on an attacker's domain
-re-resolves that name to `127.0.0.1` so the browser treats proxied responses as same-origin
-and lets its JavaScript read them.
+### Why the key exists
 
-Alongside the key, the proxy refuses requests whose `Host` header is not loopback, refuses
-requests carrying an `Origin` header (only browsers send one), and strips `Access-Control-*`
-headers from upstream responses so a permissive upstream cannot re-open the same hole.
+Binding to `127.0.0.1` keeps other machines out, but it is **not** an authorization boundary:
+every process on your computer, under any account, can reach loopback. Since the proxy attaches
+your live OAuth token to whatever it forwards, an unguarded listener would hand your Google or
+Nextcloud session to any local program that knew the port.
 
-Use **Regenerate key** in Settings if the key is ever exposed; every client still using the
-old one starts getting `403` immediately.
+The key also blocks **DNS rebinding**, where a page on an attacker's domain re-resolves that name
+to `127.0.0.1` so the browser treats proxied responses as same-origin and lets its JavaScript read
+them.
 
-## Project layout
+Alongside the key, the proxy refuses requests whose `Host` is not loopback, refuses requests
+carrying an `Origin` header (only browsers send one), and strips `Access-Control-*` headers from
+upstream responses so a permissive upstream cannot reopen the same hole.
 
-```
-src/OAuthProxy.Core/     OAuth flows, encrypted storage, YARP proxy config, MCP funnel,
-                          activity log — no WPF dependency, just the engine
-src/OAuthProxy.App/      WPF tray app: hosts Kestrel+YARP in-process, tray icon, UI
-tests/OAuthProxy.Core.Tests/   xunit tests for the Core project
-```
+---
 
-`OAuthProxy.App` owns the process: it starts a Kestrel/YARP host on a background thread pool
-task (not the WPF dispatcher thread — avoids a sync-over-async deadlock), maps the reverse
-proxy, then initializes the tray icon. The proxy and the UI share one DI container.
+## Settings and diagnostics
+
+[![Settings tab](media/settingsScreen.png)](media/settingsScreen.png)
+
+**Autostart** — Settings tab → **Start with Windows**. Writes an `HKCU\...\Run` entry pointing at
+the current exe. Never set automatically.
+
+**Credentials** — Connect, Refresh, Disconnect (clears the local token without revoking the grant
+at the provider), Edit, Delete. A colored dot and expiry time refresh every 15 seconds.
+
+[![Credentials tab](media/credentialsScreen.png)](media/credentialsScreen.png)
+
+---
+
+## Data and logs
+
+Everything lives under `%AppData%\OAuthProxy\`:
+
+| Path | Contents |
+|---|---|
+| `store.dat` | DPAPI-encrypted credentials, upstreams, routes, MCP sources and funnels, settings |
+| `store.dat.corrupt-<timestamp>` | An unreadable store, kept aside — see below |
+| `logs\activity-YYYYMMDD.log` | Proxied requests and responses, connects, refreshes, route reloads. Rotates every 2 days, auto-deletes after ~10 |
+| `logs\errors.log` | Unhandled exceptions and provider errors with stack traces |
+
+The Settings tab can open either log, open the folder, or prune old ones.
+
+**Redaction.** Activity logs record request paths and query parameter *names*; values are
+redacted, and tokens are never logged. Control characters are escaped so one event can only ever
+produce one line — request paths reach the log percent-decoded, so without this a caller could
+write fabricated entries.
+
+**Startup warnings.** Any stored upstream or token endpoint using plain `http` off-machine is
+flagged as `STARTUP WARNING`. New entries are rejected when added, but anything saved by an older
+build was never re-checked.
+
+**Corrupt store recovery.** If `store.dat` cannot be read — truncated by a power loss, or a
+profile copied to another machine or account, which DPAPI cannot decrypt — it is renamed to
+`store.dat.corrupt-<timestamp>` and the app starts with empty config rather than failing to start.
+The old file is kept in case the account that wrote it can still recover it. This is reported in
+the log and in a dialog, because it means every credential, upstream, and route is gone and a
+**new local API key** has been generated — every configured client will get `403` until updated.
+
+**Encryption scope.** `store.dat` uses DPAPI at `CurrentUser` scope. That protects it from other
+accounts, from backups, and from being read on another machine — but **not** from code running as
+you. Any program in your Windows session can ask DPAPI to decrypt it. That is the ceiling for a
+desktop app with no master password; adding entropy would not raise it, since the entropy would
+have to live in the binary.
+
+---
 
 ## Building
 
@@ -298,20 +351,9 @@ proxy, then initializes the tray icon. The proxy and the UI share one DI contain
 dotnet build OAuthProxy.slnx -m:1
 ```
 
-`-m:1` (no parallel MSBuild) avoids an intermittent WPF markup-compile race on a freshly
-cleaned `obj/` that otherwise produces spurious `CS2001`/`MC1000` errors. `clean-build.bat`
-already retries once if the first pass fails, for the same reason.
-
-### Publishing a standalone exe
-
-```
-dotnet publish src/OAuthProxy.App/OAuthProxy.App.csproj -p:PublishProfile=win-x64-selfcontained -c Release
-```
-
-Produces a single self-contained `OAuthProxy.exe` (~180 MB, .NET runtime bundled) at
-`src/OAuthProxy.App/bin/Release/net8.0-windows/publish/win-x64/`. No .NET install required on
-the target machine. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) before redistributing
-it — it bundles third-party components whose licenses require their notices travel along.
+`-m:1` (no parallel MSBuild) avoids an intermittent WPF markup-compile race on a freshly cleaned
+`obj/` that produces spurious `CS2001`/`MC1000` errors. `clean-build.bat` retries once for the
+same reason.
 
 ### Tests
 
@@ -319,48 +361,61 @@ it — it bundles third-party components whose licenses require their notices tr
 dotnet test tests/OAuthProxy.Core.Tests/OAuthProxy.Core.Tests.csproj
 ```
 
-## Data & logs
+328 tests, covering the OAuth and storage layers, the full HTTP method × credential placement
+matrix against a real upstream, and end-to-end funnel behaviour — including that two funnels over
+one upstream stay isolated, run in parallel, and never cross-deliver a response.
 
-Everything lives under `%AppData%\OAuthProxy\`:
+### Publishing a standalone exe
 
-| Path | Contents |
-|---|---|
-| `store.dat` | DPAPI-encrypted credentials, upstreams, routes, MCP sources and funnels, settings |
-| `store.dat.corrupt-<timestamp>` | Only if a store could not be decrypted or parsed at startup — see below |
-| `logs\activity-YYYYMMDD.log` | Every proxied request/response, connect/refresh/disconnect, route reloads. Rotates every 2 days, auto-deletes after ~10 |
-| `logs\errors.log` | Unhandled exceptions and provider errors, with full stack traces |
+```
+dotnet publish src/OAuthProxy.App/OAuthProxy.App.csproj -p:PublishProfile=win-x64-selfcontained -c Release
+```
 
-Settings tab has buttons to open either log, open the folder, or prune old logs. Activity
-logs record request **paths** and query parameter **names**; parameter values are redacted,
-and tokens are never logged. Control characters in a logged value are escaped (`\n`, `\x1b`)
-so that one event can only ever produce one line — request paths reach the log percent-decoded,
-so without this a caller could write whole fabricated entries.
+Produces a self-contained `OAuthProxy.exe` (~180 MB, runtime bundled) under
+`src/OAuthProxy.App/bin/Release/net8.0-windows/publish/win-x64/`. See
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) before redistributing — it bundles components
+whose licenses require their notices travel along.
 
-At startup the log also flags any stored upstream or token endpoint that uses plain `http`
-off-machine, as `STARTUP WARNING`. New entries are rejected at the point they are added, but
-anything saved by an older build was never re-checked, and those put access tokens and client
-secrets on the wire in cleartext.
+### Project layout
 
-If `store.dat` cannot be read — a truncated file after a hard power loss, or a profile copied
-to another machine or user account, which DPAPI cannot decrypt — it is renamed aside as
-`store.dat.corrupt-<timestamp>` and the app starts with empty config rather than failing to
-start. The old file is kept, not deleted, in case it can still be recovered by the account
-that wrote it. This is reported both in the activity log and in a dialog on launch: it means
-every credential, upstream, and route is gone and a **new local API key** has been generated,
-so every configured client will get 403 until it is updated.
+```
+src/OAuthProxy.Core/            OAuth flows, encrypted storage, YARP proxy config, MCP funnel,
+                                activity log — no WPF dependency, just the engine
+src/OAuthProxy.App/             WPF tray app: hosts Kestrel + YARP in-process, tray icon, UI
+tests/OAuthProxy.Core.Tests/    xunit tests for Core
+```
 
-### Encryption scope
+`OAuthProxy.App` owns the process. It starts the Kestrel/YARP host on a thread-pool task rather
+than the WPF dispatcher thread — avoiding a sync-over-async deadlock — then initializes the tray
+icon. The proxy and the UI share one DI container.
 
-`store.dat` is encrypted with DPAPI at `CurrentUser` scope. That protects it from other user
-accounts, from backups, and from being read on another machine — but **not** from code running
-as you. Any program in your own Windows session can ask DPAPI to decrypt it. That is the
-ceiling for a desktop app with no master password; adding entropy would not raise it, since
-the entropy would have to live in the binary.
+### Releases
 
-## Autostart
+Pushing a version tag (`v*`) runs the test suite and, only on success, builds and publishes a
+release with a provenance attestation. Nothing is released off a failing build.
 
-Settings tab → **Start with Windows**. Writes an `HKCU\...\Run` registry entry pointing at
-the current exe; never set automatically.
+---
+
+## Troubleshooting
+
+**A funnel source shows an error after Refresh.** The message is the upstream's. A route-backed
+source also needs its route to exist and be enabled.
+
+**A funnel exposes no tools.** Check the source's Tools mode — under **Include** with nothing
+ticked, nothing is exposed. Press **Refresh** on the source first to populate the list.
+
+**An upstream returns 200 but the client reports no reply.** The activity log annotates non-JSON
+responses, e.g. `<- 200 [text/html] for POST /app/foo`. That usually means the upstream served a
+sign-in or landing page instead of running its handler — check its deployment settings and
+whether it accepts your token.
+
+**Requests get 403.** The local API key is missing, wrong, or was regenerated. Copy it again from
+the Settings tab.
+
+**A route 502s.** The activity log records YARP's reason. Confirm the upstream base URL is
+reachable and `https`.
+
+---
 
 ## License
 
