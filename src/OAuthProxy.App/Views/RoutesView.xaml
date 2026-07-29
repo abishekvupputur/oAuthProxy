@@ -27,6 +27,14 @@ Body only works on a JSON or application/x-www-form-urlencoded body under 1 MB t
 
 "Bearer " (with the trailing space) produces  Authorization: Bearer &lt;token&gt;.
 Leave empty to send the bare token, e.g. for X-Api-Key or ?access_token=.</sys:String>
+
+        <sys:String x:Key="MultiCredentialHelpText">A route can attach any number of credentials, in any mix of places.
+
+None       — the request is forwarded as-is, with no token attached.
+One        — the usual case, e.g. Authorization: Bearer &lt;token&gt;.
+Several    — e.g. a header plus two query parameters, or a header plus a body field.
+
+Entries may reuse the same credential in different places, or use different credentials side by side. Two entries may not write the same header, query parameter, or body field — the second would silently overwrite the first.</sys:String>
     </UserControl.Resources>
 
     <Grid>
@@ -66,28 +74,72 @@ Leave empty to send the bare token, e.g. for X-Api-Key or ?access_token=.</sys:S
                         <Border Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderSubtleBrush}"
                                 BorderThickness="0,1,0,0" Padding="12,10">
                             <StackPanel>
-                                <TextBlock Text="Credential is sent as" Style="{StaticResource FieldLabelStyle}"
-                                           ToolTip="{StaticResource CredentialPlacementHelpText}"/>
-                                <UniformGrid Columns="3" Rows="1" Margin="0,0,0,6">
-                                    <StackPanel Margin="0,0,6,0">
-                                        <TextBlock Text="Placement" Style="{StaticResource FieldLabelStyle}"/>
-                                        <ComboBox ItemsSource="{Binding Placements}"
-                                                  SelectedItem="{Binding CredentialPlacement, Mode=TwoWay}"
-                                                  ToolTip="{StaticResource CredentialPlacementHelpText}"/>
-                                    </StackPanel>
-                                    <StackPanel Margin="6,0">
-                                        <TextBlock Text="{Binding ParameterNameLabel}" Style="{StaticResource FieldLabelStyle}"/>
-                                        <TextBox Text="{Binding CredentialParameterName, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"/>
-                                    </StackPanel>
-                                    <StackPanel Margin="6,0,0,0">
-                                        <TextBlock Text="Value prefix" Style="{StaticResource FieldLabelStyle}"
-                                                   ToolTip="{StaticResource ValuePrefixHelpText}"/>
-                                        <TextBox Text="{Binding CredentialValuePrefix, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
-                                                 ToolTip="{StaticResource ValuePrefixHelpText}"/>
-                                    </StackPanel>
-                                </UniformGrid>
-                                <TextBlock Style="{StaticResource HintTextStyle}"
-                                           Text="{Binding InjectionSummary, StringFormat='Upstream receives: {0}'}"/>
+                                <TextBlock Text="Credentials attached to this route" Style="{StaticResource FieldLabelStyle}"
+                                           ToolTip="{StaticResource MultiCredentialHelpText}"/>
+
+                                <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,6"
+                                           Text="None — requests are forwarded to the upstream with nothing attached."
+                                           Visibility="{Binding HasNoCredentials, Converter={StaticResource BoolToVisibilityConverter}}"/>
+
+                                <!-- One editor per attached credential. Any number, in any mix of
+                                     header / query / body slots. -->
+                                <ItemsControl ItemsSource="{Binding Credentials}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border BorderBrush="{StaticResource BorderSubtleBrush}" BorderThickness="0,0,0,1"
+                                                    Padding="0,0,0,8" Margin="0,0,0,8">
+                                                <StackPanel>
+                                                    <Grid Margin="0,0,0,4">
+                                                        <TextBlock Text="{Binding InjectionSummary, StringFormat='Upstream receives: {0}'}"
+                                                                   Style="{StaticResource HintTextStyle}" VerticalAlignment="Center"/>
+                                                        <Button Content="Remove" HorizontalAlignment="Right" Width="80"
+                                                                Style="{StaticResource GhostButtonStyle}"
+                                                                Command="{Binding DataContext.RemoveCredentialCommand, RelativeSource={RelativeSource AncestorType=DataGridRow}}"
+                                                                CommandParameter="{Binding}"
+                                                                ToolTip="Stop attaching this credential on this route."/>
+                                                    </Grid>
+                                                    <UniformGrid Columns="4" Rows="1">
+                                                        <StackPanel Margin="0,0,6,0">
+                                                            <TextBlock Text="Credential" Style="{StaticResource FieldLabelStyle}"/>
+                                                            <ComboBox ItemsSource="{Binding AvailableCredentials}"
+                                                                      SelectedItem="{Binding Credential, Mode=TwoWay}">
+                                                                <ComboBox.ItemTemplate>
+                                                                    <DataTemplate>
+                                                                        <TextBlock Text="{Binding Name}"/>
+                                                                    </DataTemplate>
+                                                                </ComboBox.ItemTemplate>
+                                                            </ComboBox>
+                                                            <TextBlock Text="⚠ credential missing" FontSize="10"
+                                                                       Foreground="{StaticResource ErrorBrush}" TextWrapping="Wrap"
+                                                                       Visibility="{Binding IsMissingCredential, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                                                        </StackPanel>
+                                                        <StackPanel Margin="6,0">
+                                                            <TextBlock Text="Placement" Style="{StaticResource FieldLabelStyle}"/>
+                                                            <ComboBox ItemsSource="{Binding Placements}"
+                                                                      SelectedItem="{Binding Placement, Mode=TwoWay}"
+                                                                      ToolTip="{StaticResource CredentialPlacementHelpText}"/>
+                                                        </StackPanel>
+                                                        <StackPanel Margin="6,0">
+                                                            <TextBlock Text="{Binding ParameterNameLabel}" Style="{StaticResource FieldLabelStyle}"/>
+                                                            <TextBox Text="{Binding ParameterName, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"/>
+                                                        </StackPanel>
+                                                        <StackPanel Margin="6,0,0,0">
+                                                            <TextBlock Text="Value prefix" Style="{StaticResource FieldLabelStyle}"
+                                                                       ToolTip="{StaticResource ValuePrefixHelpText}"/>
+                                                            <TextBox Text="{Binding ValuePrefix, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                                                     ToolTip="{StaticResource ValuePrefixHelpText}"/>
+                                                        </StackPanel>
+                                                    </UniformGrid>
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+
+                                <Button Content="Add credential" HorizontalAlignment="Left" Width="120"
+                                        Style="{StaticResource GhostButtonStyle}"
+                                        Command="{Binding AddCredentialCommand}"
+                                        ToolTip="{StaticResource MultiCredentialHelpText}"/>
                             </StackPanel>
                         </Border>
                     </DataTemplate>
@@ -126,20 +178,15 @@ Leave empty to send the bare token, e.g. for X-Api-Key or ?access_token=.</sys:S
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
 
-                    <DataGridTemplateColumn Header="TOKEN FROM" Width="180">
+                    <DataGridTemplateColumn Header="TOKENS SENT" Width="220">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
-                                <StackPanel VerticalAlignment="Center" ToolTip="{Binding Summary}">
-                                    <TextBlock Text="{Binding CredentialName}" TextWrapping="Wrap"/>
-                                    <!-- How it's attached, so a non-default placement is visible
-                                         without selecting the row and opening the editor. -->
-                                    <TextBlock Text="{Binding InjectionSummary}" FontSize="10" TextWrapping="Wrap"
-                                               FontFamily="Cascadia Code, Consolas"
-                                               Foreground="{StaticResource MutedTextBrush}"/>
-                                    <TextBlock Text="⚠ credential missing" FontSize="10"
-                                               Foreground="{StaticResource ErrorBrush}" TextWrapping="Wrap"
-                                               Visibility="{Binding IsMissingCredential, Converter={StaticResource BoolToVisibilityConverter}}"/>
-                                </StackPanel>
+                                <!-- Every attached credential and where it goes, so a route with
+                                     two of them (or none) is visible without opening the editor. -->
+                                <TextBlock Text="{Binding CredentialSummary}" TextWrapping="Wrap" FontSize="10"
+                                           VerticalAlignment="Center" ToolTip="{Binding Summary}"
+                                           FontFamily="Cascadia Code, Consolas"
+                                           Foreground="{StaticResource MutedTextBrush}"/>
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
@@ -252,14 +299,27 @@ Leave empty to send the bare token, e.g. for X-Api-Key or ?access_token=.</sys:S
                             </ComboBox>
                         </StackPanel>
                         <StackPanel Margin="6,0,0,0">
-                            <TextBlock Text="Credential" Style="{StaticResource FieldLabelStyle}"/>
-                            <ComboBox ItemsSource="{Binding Credentials}" SelectedItem="{Binding NewRouteCredential}">
-                                <ComboBox.ItemTemplate>
-                                    <DataTemplate>
-                                        <TextBlock Text="{Binding Name}"/>
-                                    </DataTemplate>
-                                </ComboBox.ItemTemplate>
-                            </ComboBox>
+                            <TextBlock Text="Credential (optional)" Style="{StaticResource FieldLabelStyle}"
+                                       ToolTip="{StaticResource MultiCredentialHelpText}"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <ComboBox Grid.Column="0" ItemsSource="{Binding Credentials}" SelectedItem="{Binding NewRouteCredential}">
+                                    <ComboBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Name}"/>
+                                        </DataTemplate>
+                                    </ComboBox.ItemTemplate>
+                                </ComboBox>
+                                <!-- A ComboBox has no way back to "nothing selected", and a route
+                                     with no credential is a supported configuration. -->
+                                <Button Grid.Column="1" Content="None" Width="55" Margin="4,0,0,0"
+                                        Style="{StaticResource GhostButtonStyle}"
+                                        Command="{Binding ClearNewRouteCredentialCommand}"
+                                        ToolTip="Create the route with no credential — requests are forwarded unauthenticated."/>
+                            </Grid>
                         </StackPanel>
                     </UniformGrid>
                     <CheckBox Content="Strip path prefix before forwarding" IsChecked="{Binding NewRouteStripPrefix}"
@@ -268,29 +328,35 @@ Leave empty to send the bare token, e.g. for X-Api-Key or ?access_token=.</sys:S
                                Text="Recommended. With this on, /app/foo/bar is forwarded upstream as /bar — the prefix is just your local label."/>
 
                     <!-- Defaults to Authorization: Bearer <token>, so this whole block can be
-                         ignored unless the upstream wants the token somewhere else. -->
-                    <TextBlock Text="Credential is sent as" Style="{StaticResource FieldLabelStyle}"
-                               ToolTip="{StaticResource CredentialPlacementHelpText}"/>
-                    <UniformGrid Columns="3" Rows="1" Margin="0,0,0,6">
-                        <StackPanel Margin="0,0,6,0">
-                            <TextBlock Text="Placement" Style="{StaticResource FieldLabelStyle}"/>
-                            <ComboBox ItemsSource="{Binding Placements}"
-                                      SelectedItem="{Binding NewRouteCredentialPlacement, Mode=TwoWay}"
-                                      ToolTip="{StaticResource CredentialPlacementHelpText}"/>
-                        </StackPanel>
-                        <StackPanel Margin="6,0">
-                            <TextBlock Text="{Binding NewRouteParameterNameLabel}" Style="{StaticResource FieldLabelStyle}"/>
-                            <TextBox Text="{Binding NewRouteCredentialParameterName, UpdateSourceTrigger=PropertyChanged}"/>
-                        </StackPanel>
-                        <StackPanel Margin="6,0,0,0">
-                            <TextBlock Text="Value prefix" Style="{StaticResource FieldLabelStyle}"
-                                       ToolTip="{StaticResource ValuePrefixHelpText}"/>
-                            <TextBox Text="{Binding NewRouteCredentialValuePrefix, UpdateSourceTrigger=PropertyChanged}"
-                                     ToolTip="{StaticResource ValuePrefixHelpText}"/>
-                        </StackPanel>
-                    </UniformGrid>
-                    <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,10"
+                         ignored unless the upstream wants the token somewhere else. Hidden when
+                         no credential is picked, since there is then nothing to place. -->
+                    <StackPanel Visibility="{Binding NewRouteHasCredential, Converter={StaticResource BoolToVisibilityConverter}}">
+                        <TextBlock Text="Credential is sent as" Style="{StaticResource FieldLabelStyle}"
+                                   ToolTip="{StaticResource CredentialPlacementHelpText}"/>
+                        <UniformGrid Columns="3" Rows="1" Margin="0,0,0,6">
+                            <StackPanel Margin="0,0,6,0">
+                                <TextBlock Text="Placement" Style="{StaticResource FieldLabelStyle}"/>
+                                <ComboBox ItemsSource="{Binding Placements}"
+                                          SelectedItem="{Binding NewRouteCredentialPlacement, Mode=TwoWay}"
+                                          ToolTip="{StaticResource CredentialPlacementHelpText}"/>
+                            </StackPanel>
+                            <StackPanel Margin="6,0">
+                                <TextBlock Text="{Binding NewRouteParameterNameLabel}" Style="{StaticResource FieldLabelStyle}"/>
+                                <TextBox Text="{Binding NewRouteCredentialParameterName, UpdateSourceTrigger=PropertyChanged}"/>
+                            </StackPanel>
+                            <StackPanel Margin="6,0,0,0">
+                                <TextBlock Text="Value prefix" Style="{StaticResource FieldLabelStyle}"
+                                           ToolTip="{StaticResource ValuePrefixHelpText}"/>
+                                <TextBox Text="{Binding NewRouteCredentialValuePrefix, UpdateSourceTrigger=PropertyChanged}"
+                                         ToolTip="{StaticResource ValuePrefixHelpText}"/>
+                            </StackPanel>
+                        </UniformGrid>
+                    </StackPanel>
+                    <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,4"
                                Text="{Binding NewRouteInjectionSummary, StringFormat='Upstream receives: {0}'}"/>
+                    <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,10"
+                               Text="More credentials can be attached after the route exists — select it above and use 'Add credential'."
+                               ToolTip="{StaticResource MultiCredentialHelpText}"/>
                     <Button Content="Add route" HorizontalAlignment="Left" Width="100" Command="{Binding AddRouteCommand}"/>
                 </StackPanel>
             </Border>

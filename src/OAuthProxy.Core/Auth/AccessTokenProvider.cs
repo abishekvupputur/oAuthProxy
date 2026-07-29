@@ -26,7 +26,18 @@ public sealed class AccessTokenProvider(
     public async ValueTask<string?> GetAccessTokenAsync(Guid credentialId, CancellationToken ct = default)
     {
         var credential = configStoreCache.GetCredential(credentialId);
-        if (credential?.Token is not { } token) return null;
+        if (credential is null) return null;
+
+        // A static API key has no expiry, no refresh token, and no provider to ask — everything
+        // below this line is about keeping an OAuth token alive and would do nothing but waste
+        // work. Returned null when blank so the caller reports "not connected" rather than
+        // attaching an empty header the upstream would reject with a confusing 401.
+        if (credential.Kind == CredentialKind.ApiKey)
+        {
+            return string.IsNullOrEmpty(credential.ApiKey) ? null : credential.ApiKey;
+        }
+
+        if (credential.Token is not { } token) return null;
 
         if (!token.IsExpiringWithin(RefreshMargin))
         {

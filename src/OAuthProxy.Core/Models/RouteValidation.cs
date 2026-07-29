@@ -173,4 +173,57 @@ public static class RouteValidation
     /// <summary>Convenience for callers that only need the yes/no answer.</summary>
     public static bool IsValidCredentialInjection(CredentialInjection injection) =>
         ValidateCredentialInjection(injection.Placement, injection.Name, injection.ValuePrefix) is null;
+
+    /// <summary>
+    /// Validates one entry of a route's credential list. Returns null when acceptable, or a
+    /// message suitable for showing in the UI footer.
+    /// </summary>
+    public static string? ValidateCredential(RouteCredential credential)
+    {
+        if (credential.CredentialId == Guid.Empty)
+        {
+            return "Pick a credential for this entry, or remove it.";
+        }
+
+        return ValidateCredentialInjection(credential.Placement, credential.ParameterName, credential.ValuePrefix);
+    }
+
+    /// <summary>
+    /// Validates a route's whole credential list.
+    ///
+    /// An empty list is accepted: a route that attaches nothing is a plain forwarding hop, which
+    /// is a real configuration rather than a half-finished one.
+    ///
+    /// Beyond each entry being usable on its own, no two entries may target the same slot. Two
+    /// credentials writing one header (or one query parameter, or one body field) cannot both
+    /// arrive — the second silently overwrites the first, so the upstream sees one token while
+    /// the UI shows two. There is no reading of that config which does what it says, so it is
+    /// refused rather than resolved.
+    /// </summary>
+    public static string? ValidateCredentials(IReadOnlyList<RouteCredential> credentials)
+    {
+        foreach (var credential in credentials)
+        {
+            if (ValidateCredential(credential) is { } error) return error;
+        }
+
+        var seen = new Dictionary<string, RouteCredential>(StringComparer.Ordinal);
+        foreach (var credential in credentials)
+        {
+            if (seen.TryGetValue(credential.Slot, out var existing))
+            {
+                return $"Two credentials are both set to {existing.ToCredentialInjection().Describe()}. "
+                       + "Each header, query parameter, and body field can carry only one credential — "
+                       + "change one of them to a different name or placement.";
+            }
+
+            seen[credential.Slot] = credential;
+        }
+
+        return null;
+    }
+
+    /// <summary>Convenience for callers that only need the yes/no answer.</summary>
+    public static bool IsValidCredentialSet(IReadOnlyList<RouteCredential> credentials) =>
+        ValidateCredentials(credentials) is null;
 }

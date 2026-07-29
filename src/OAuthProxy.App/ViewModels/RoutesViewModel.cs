@@ -24,7 +24,7 @@ public sealed partial class RoutesViewModel : ObservableObject
     [ObservableProperty] private CredentialRecord? _newRouteCredential;
     [ObservableProperty] private bool _newRouteStripPrefix = true;
 
-    // Bearer-in-a-header is the default here and in RouteMapping, so someone who never opens
+    // Bearer-in-a-header is the default here and in RouteCredential, so someone who never opens
     // these fields gets exactly the behaviour the app had before they existed.
     [ObservableProperty] private CredentialPlacement _newRouteCredentialPlacement = CredentialPlacement.Header;
     [ObservableProperty] private string _newRouteCredentialParameterName = CredentialInjection.BearerHeader.Name;
@@ -46,8 +46,50 @@ public sealed partial class RoutesViewModel : ObservableObject
     };
 
     /// <summary>Live preview of what the upstream will receive, e.g. "header Authorization: Bearer &lt;token&gt;".</summary>
-    public string NewRouteInjectionSummary => new CredentialInjection(
-        NewRouteCredentialPlacement, NewRouteCredentialParameterName, NewRouteCredentialValuePrefix).Describe();
+    public string NewRouteInjectionSummary => NewRouteCredential is null
+        ? "nothing — the request is forwarded unauthenticated"
+        : new CredentialInjection(
+            NewRouteCredentialPlacement, NewRouteCredentialParameterName, NewRouteCredentialValuePrefix).Describe();
+
+    /// <summary>
+    /// Whether the add-route form will attach a credential. Drives the visibility of the
+    /// placement fields, which mean nothing when there is no token to place.
+    /// </summary>
+    public bool NewRouteHasCredential => NewRouteCredential is not null;
+
+    partial void OnNewRouteCredentialChanged(CredentialRecord? value)
+    {
+        // Prefill from the credential's own default placement, so picking an API-key credential
+        // offers "X-Api-Key: <key>" rather than the Bearer header no key-based API wants. Only
+        // when the fields are still at a placement default — a value the user typed is left
+        // alone rather than overwritten by changing the credential.
+        if (value is not null && IsAtAPlacementDefault())
+        {
+            var preferred = value.ToDefaultInjection();
+            NewRouteCredentialPlacement = preferred.Placement;
+            NewRouteCredentialParameterName = preferred.Name;
+            NewRouteCredentialValuePrefix = preferred.ValuePrefix;
+        }
+
+        OnPropertyChanged(nameof(NewRouteHasCredential));
+        OnPropertyChanged(nameof(NewRouteInjectionSummary));
+    }
+
+    private bool IsAtAPlacementDefault()
+    {
+        var current = CredentialInjection.DefaultFor(NewRouteCredentialPlacement);
+
+        return NewRouteCredentialParameterName == current.Name
+               && NewRouteCredentialValuePrefix == current.ValuePrefix;
+    }
+
+    /// <summary>
+    /// Clears the credential picker. A route with no credential is a supported configuration —
+    /// a plain forwarding hop to an upstream that needs no token — and a ComboBox offers no way
+    /// to go back to "nothing selected" on its own.
+    /// </summary>
+    [RelayCommand]
+    private void ClearNewRouteCredential() => NewRouteCredential = null;
 
     /// <summary>
     /// Moves the name and prefix to the new placement's defaults when they were still at the
@@ -121,12 +163,13 @@ public sealed partial class RoutesViewModel : ObservableObject
         // Resolved against the current upstream/credential lists so the grid can show names
         // and the real local URL rather than bare ids.
         Routes.Clear();
+        var credentials = store.Credentials.ToList();
         foreach (var r in store.Routes)
         {
             Routes.Add(new RouteItemViewModel(
                 r,
                 store.Upstreams.FirstOrDefault(u => u.Id == r.UpstreamId),
-                store.Credentials.FirstOrDefault(c => c.Id == r.CredentialId),
+                credentials,
                 store.Settings.ListenPort,
                 OnRouteEdited,
                 message => StatusMessage = message));
@@ -187,9 +230,12 @@ public sealed partial class RoutesViewModel : ObservableObject
     [RelayCommand]
     private async Task AddRouteAsync()
     {
-        if (string.IsNullOrWhiteSpace(NewRoutePathPrefix) || NewRouteUpstream is null || NewRouteCredential is null)
+        // The credential is deliberately not required. A route with none is a plain forwarding
+        // hop for an upstream that needs no token, and further credentials can be added to any
+        // route afterwards from its row.
+        if (string.IsNullOrWhiteSpace(NewRoutePathPrefix) || NewRouteUpstream is null)
         {
-            StatusMessage = "Path prefix, upstream, and credential are required.";
+            StatusMessage = "Path prefix and upstream are required.";
             return;
         }
 
@@ -217,11 +263,21 @@ public sealed partial class RoutesViewModel : ObservableObject
             return;
         }
 
-        // Shared with ProxyConfigBuilder, which drops a route whose injection settings cannot be
+        List<RouteCredential> credentials = NewRouteCredential is null
+            ? []
+            : [
+                new RouteCredential
+                {
+                    CredentialId = NewRouteCredential.Id,
+                    Placement = NewRouteCredentialPlacement,
+                    ParameterName = NewRouteCredentialParameterName.Trim(),
+                    ValuePrefix = NewRouteCredentialValuePrefix,
+                },
+            ];
+
+        // Shared with ProxyConfigBuilder, which drops a route whose credential settings cannot be
         // put on the wire — accepting one here would create a route that never serves anything.
-        if (RouteValidation.ValidateCredentialInjection(
-                NewRouteCredentialPlacement, NewRouteCredentialParameterName, NewRouteCredentialValuePrefix)
-            is { } injectionError)
+        if (RouteValidation.ValidateCredentials(credentials) is { } injectionError)
         {
             StatusMessage = injectionError;
             return;
@@ -231,12 +287,9 @@ public sealed partial class RoutesViewModel : ObservableObject
         {
             PathPrefix = prefix,
             UpstreamId = NewRouteUpstream.Id,
-            CredentialId = NewRouteCredential.Id,
             StripPrefix = NewRouteStripPrefix,
             Enabled = true,
-            CredentialPlacement = NewRouteCredentialPlacement,
-            CredentialParameterName = NewRouteCredentialParameterName.Trim(),
-            CredentialValuePrefix = NewRouteCredentialValuePrefix,
+            Credentials = credentials,
         };
 
         await SaveAndRebuildAsync(store => store.Routes.Add(route));
@@ -244,7 +297,10 @@ public sealed partial class RoutesViewModel : ObservableObject
         Reload();
 
         NewRoutePathPrefix = "";
-        StatusMessage = $"Route '{prefix}' added — credential sent as {route.ToCredentialInjection().Describe()}.";
+        StatusMessage = credentials.Count == 0
+            ? $"Route '{prefix}' added — no credential attached, requests are forwarded unauthenticated. "
+              + "Use 'Add credential' on the route to attach one."
+            : $"Route '{prefix}' added — credential sent as {credentials[0].ToCredentialInjection().Describe()}.";
     }
 
     [RelayCommand]

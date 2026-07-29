@@ -14,6 +14,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
     private readonly ConfigStoreCache _configStoreCache;
     private readonly OAuth2Service _oAuth2Service;
     private readonly TokenRefreshService _tokenRefreshService;
+    private readonly CredentialTestService _credentialTestService;
     private readonly ActivityLog _activityLog;
     private readonly DispatcherTimer _statusTimer;
 
@@ -22,10 +23,17 @@ public sealed partial class CredentialsViewModel : ObservableObject
     public ObservableCollection<CredentialItemViewModel> Credentials { get; } = [];
     public IReadOnlyList<OAuthProviderPreset> Presets { get; } = OAuthProviderPreset.All;
 
+    /// <summary>OAuth2 or API key — the first choice the form asks for, since it decides the rest.</summary>
+    public IReadOnlyList<CredentialKind> Kinds { get; } = Enum.GetValues<CredentialKind>();
+
+    public IReadOnlyList<CredentialPlacement> Placements { get; } = Enum.GetValues<CredentialPlacement>();
+
+    [ObservableProperty] private CredentialKind _selectedKind = CredentialKind.OAuth2;
     [ObservableProperty] private OAuthProviderPreset _selectedPreset = OAuthProviderPreset.Google;
     [ObservableProperty] private string _newName = "";
     [ObservableProperty] private string _newClientId = "";
     [ObservableProperty] private string _newClientSecret = "";
+    [ObservableProperty] private string _newApiKey = "";
     [ObservableProperty] private string _newScopes = "";
     [ObservableProperty] private string _newAuthority = "";
     [ObservableProperty] private string _newAuthorizationEndpoint = "";
@@ -38,8 +46,71 @@ public sealed partial class CredentialsViewModel : ObservableObject
     [ObservableProperty] private string _saveButtonLabel = "Add credential";
     [ObservableProperty] private string _statusMessage = "Ready.";
 
+    // Where this credential's secret goes by default: what the Test button sends, and what
+    // prefills a route's credential entry. The route still owns what it actually forwards with.
+    [ObservableProperty] private CredentialPlacement _newDefaultPlacement = CredentialPlacement.Header;
+    [ObservableProperty] private string _newDefaultParameterName = CredentialInjection.BearerHeader.Name;
+    [ObservableProperty] private string _newDefaultValuePrefix = CredentialInjection.BearerHeader.ValuePrefix;
+    [ObservableProperty] private string _newTestEndpoint = "";
+
     public bool HasCredentials => Credentials.Count > 0;
     public bool HasNoCredentials => Credentials.Count == 0;
+
+    /// <summary>Drives which half of the form is shown; WPF has no negating visibility converter built in.</summary>
+    public bool IsApiKeyKind => SelectedKind == CredentialKind.ApiKey;
+    public bool IsOAuthKind => SelectedKind == CredentialKind.OAuth2;
+
+    /// <summary>The name box means something different per placement.</summary>
+    public string DefaultParameterNameLabel => NewDefaultPlacement switch
+    {
+        CredentialPlacement.Query => "Query parameter name",
+        CredentialPlacement.Body => "Body field name",
+        _ => "Header name",
+    };
+
+    /// <summary>Live preview, e.g. "header X-Api-Key: &lt;token&gt;".</summary>
+    public string DefaultInjectionSummary =>
+        new CredentialInjection(NewDefaultPlacement, NewDefaultParameterName, NewDefaultValuePrefix).Describe();
+
+    /// <summary>
+    /// A GET carries no body, so a body-placement credential cannot be tested. Said in the form
+    /// rather than only on failure, so the test endpoint field does not look broken.
+    /// </summary>
+    public bool IsUntestablePlacement => NewDefaultPlacement == CredentialPlacement.Body;
+
+    partial void OnSelectedKindChanged(CredentialKind value)
+    {
+        // Bearer-in-a-header is an OAuth convention; a key-based API almost always wants a bare
+        // value in a bespoke header. Only moved when the fields are still at the other kind's
+        // defaults, so a value the user typed is left alone.
+        var previous = CredentialRecord.DefaultInjectionFor(value == CredentialKind.ApiKey ? CredentialKind.OAuth2 : CredentialKind.ApiKey);
+        var replacement = CredentialRecord.DefaultInjectionFor(value);
+
+        if (NewDefaultParameterName == previous.Name) NewDefaultParameterName = replacement.Name;
+        if (NewDefaultValuePrefix == previous.ValuePrefix) NewDefaultValuePrefix = replacement.ValuePrefix;
+
+        OnPropertyChanged(nameof(IsApiKeyKind));
+        OnPropertyChanged(nameof(IsOAuthKind));
+    }
+
+    partial void OnNewDefaultPlacementChanged(CredentialPlacement oldValue, CredentialPlacement newValue)
+    {
+        var previous = CredentialInjection.DefaultFor(oldValue);
+        var replacement = CredentialInjection.DefaultFor(newValue);
+
+        if (NewDefaultParameterName == previous.Name) NewDefaultParameterName = replacement.Name;
+        if (NewDefaultValuePrefix == previous.ValuePrefix) NewDefaultValuePrefix = replacement.ValuePrefix;
+
+        OnPropertyChanged(nameof(DefaultParameterNameLabel));
+        OnPropertyChanged(nameof(DefaultInjectionSummary));
+        OnPropertyChanged(nameof(IsUntestablePlacement));
+    }
+
+    partial void OnNewDefaultParameterNameChanged(string value) =>
+        OnPropertyChanged(nameof(DefaultInjectionSummary));
+
+    partial void OnNewDefaultValuePrefixChanged(string value) =>
+        OnPropertyChanged(nameof(DefaultInjectionSummary));
 
     /// <summary>
     /// Drives the PKCE checkbox's visibility. Only the Google flow actually honours the flag —
@@ -55,11 +126,13 @@ public sealed partial class CredentialsViewModel : ObservableObject
         ConfigStoreCache configStoreCache,
         OAuth2Service oAuth2Service,
         TokenRefreshService tokenRefreshService,
+        CredentialTestService credentialTestService,
         ActivityLog activityLog)
     {
         _configStoreCache = configStoreCache;
         _oAuth2Service = oAuth2Service;
         _tokenRefreshService = tokenRefreshService;
+        _credentialTestService = credentialTestService;
         _activityLog = activityLog;
         ApplyPresetDefaults(_selectedPreset);
 
@@ -111,6 +184,12 @@ public sealed partial class CredentialsViewModel : ObservableObject
     [RelayCommand]
     private async Task SaveCredentialAsync()
     {
+        if (SelectedKind == CredentialKind.ApiKey)
+        {
+            await SaveApiKeyCredentialAsync();
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(NewName) || string.IsNullOrWhiteSpace(NewClientId))
         {
             StatusMessage = "Name and Client ID are required.";
@@ -127,7 +206,8 @@ public sealed partial class CredentialsViewModel : ObservableObject
         // "http://" here put both on the wire in cleartext and nothing objected.
         var validationError = UrlValidation.ValidateEndpoint(authority, "Authority")
                               ?? UrlValidation.ValidateEndpoint(authorizationEndpoint, "Authorization endpoint")
-                              ?? UrlValidation.ValidateEndpoint(tokenEndpoint, "Token endpoint");
+                              ?? UrlValidation.ValidateEndpoint(tokenEndpoint, "Token endpoint")
+                              ?? ValidatePlacementAndTestEndpoint();
         if (validationError is not null)
         {
             StatusMessage = validationError;
@@ -159,6 +239,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
                 record.RequiresIdToken = SelectedPreset.RequiresIdToken;
                 record.UsesPkce = NewUsesPkce;
                 record.IsGoogleProvider = isGoogle;
+                ApplyPlacementAndTestEndpoint(record);
             });
 
             editing.Refresh();
@@ -170,6 +251,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
             var record = new CredentialRecord
             {
                 Name = NewName.Trim(),
+                Kind = CredentialKind.OAuth2,
                 ClientId = NewClientId.Trim(),
                 ClientSecret = NewClientSecret.Trim(),
                 Scopes = scopes,
@@ -180,6 +262,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
                 UsesPkce = NewUsesPkce,
                 IsGoogleProvider = isGoogle,
             };
+            ApplyPlacementAndTestEndpoint(record);
 
             // MutateAsync rather than mutate-then-save: the refresh loop can be serializing the
             // store on another thread, and a List.Add landing mid-serialization throws
@@ -194,6 +277,113 @@ public sealed partial class CredentialsViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// The API-key branch of Save. Separate from the OAuth one rather than threaded through it
+    /// with conditionals: the two share only a name and a placement, and every field the OAuth
+    /// path validates (client id, authority, endpoints, scopes, PKCE) is meaningless here.
+    /// </summary>
+    private async Task SaveApiKeyCredentialAsync()
+    {
+        if (string.IsNullOrWhiteSpace(NewName))
+        {
+            StatusMessage = "Name is required.";
+            return;
+        }
+
+        // On an edit, a blank box means "keep the current key" — the stored key is never
+        // redisplayed, exactly as for a client secret.
+        var keepExistingKey = IsEditing && string.IsNullOrWhiteSpace(NewApiKey);
+
+        if (!keepExistingKey && CredentialValidation.ValidateApiKey(NewApiKey) is { } keyError)
+        {
+            StatusMessage = keyError;
+            return;
+        }
+
+        if (ValidatePlacementAndTestEndpoint() is { } placementError)
+        {
+            StatusMessage = placementError;
+            return;
+        }
+
+        if (_editingItem is { } editing)
+        {
+            var record = editing.Record;
+
+            await _configStoreCache.MutateAsync(_ =>
+            {
+                record.Name = NewName.Trim();
+                record.Kind = CredentialKind.ApiKey;
+                if (!keepExistingKey) record.ApiKey = NewApiKey.Trim();
+                ApplyPlacementAndTestEndpoint(record);
+            });
+
+            editing.Refresh();
+            StatusMessage = $"Saved changes to '{record.Name}'.";
+            CancelEdit();
+            return;
+        }
+
+        var created = new CredentialRecord
+        {
+            Name = NewName.Trim(),
+            Kind = CredentialKind.ApiKey,
+            ApiKey = NewApiKey.Trim(),
+        };
+        ApplyPlacementAndTestEndpoint(created);
+
+        await _configStoreCache.MutateAsync(store => store.Credentials.Add(created));
+        Credentials.Add(new CredentialItemViewModel(created).Refresh());
+
+        NewName = "";
+        NewApiKey = "";
+        StatusMessage = string.IsNullOrWhiteSpace(created.TestEndpoint)
+            ? $"Added '{created.Name}'. It is ready to attach to a route."
+            : $"Added '{created.Name}'. Click Test to check the key against {created.TestEndpoint}.";
+    }
+
+    /// <summary>Checks the two fields both kinds share.</summary>
+    private string? ValidatePlacementAndTestEndpoint() =>
+        RouteValidation.ValidateCredentialInjection(NewDefaultPlacement, NewDefaultParameterName, NewDefaultValuePrefix)
+        ?? CredentialValidation.ValidateTestEndpoint(NewTestEndpoint);
+
+    private void ApplyPlacementAndTestEndpoint(CredentialRecord record)
+    {
+        record.DefaultPlacement = NewDefaultPlacement;
+        record.DefaultParameterName = NewDefaultParameterName.Trim();
+        record.DefaultValuePrefix = NewDefaultValuePrefix;
+        record.TestEndpoint = string.IsNullOrWhiteSpace(NewTestEndpoint) ? null : NewTestEndpoint.Trim();
+    }
+
+    /// <summary>
+    /// Sends one authenticated GET to the credential's test endpoint and reports what came back.
+    ///
+    /// Worth a button of its own because nothing else verifies a static API key: an OAuth grant
+    /// proves itself during the browser flow, but a pasted key's first sign of being wrong is a
+    /// 401 on a real request later, which reads as an upstream problem rather than a typo.
+    /// </summary>
+    [RelayCommand]
+    private async Task TestCredentialAsync(CredentialItemViewModel? item)
+    {
+        if (item is null) return;
+
+        StatusMessage = $"Testing '{item.Name}'…";
+
+        try
+        {
+            var result = await _credentialTestService.TestAsync(item.Record);
+            StatusMessage = result.Message;
+        }
+        catch (Exception ex)
+        {
+            // A test is a diagnostic; it must never be able to take down an always-on tray app.
+            StatusMessage = $"Could not test '{item.Name}': {ex.Message}";
+            _activityLog.LogError($"TEST '{item.Name}' threw", ex);
+        }
+
+        item.Refresh();
+    }
+
     [RelayCommand]
     private void EditCredential(CredentialItemViewModel? item)
     {
@@ -204,6 +394,11 @@ public sealed partial class CredentialsViewModel : ObservableObject
         FormHeaderText = $"Edit '{item.Name}'";
         SaveButtonLabel = "Save changes";
 
+        // Set before the rest: the kind decides which half of the form is shown, and its change
+        // handler moves the placement defaults, which the assignments below then overwrite with
+        // what this credential actually stored.
+        SelectedKind = item.Record.Kind;
+
         // Best-effort preset match so provider-specific hints (redirect URI, help text) still
         // make sense while editing — SelectedPreset itself isn't persisted, only the resolved
         // fields below are, and those are set explicitly right after so they win either way.
@@ -212,13 +407,20 @@ public sealed partial class CredentialsViewModel : ObservableObject
         NewName = item.Record.Name;
         NewClientId = item.Record.ClientId;
         NewClientSecret = "";
+        NewApiKey = "";
         NewScopes = string.Join(", ", item.Record.Scopes);
         NewAuthority = item.Record.Authority ?? "";
         NewAuthorizationEndpoint = item.Record.AuthorizationEndpoint ?? "";
         NewTokenEndpoint = item.Record.TokenEndpoint ?? "";
         NewUsesPkce = item.Record.UsesPkce;
+        NewDefaultPlacement = item.Record.DefaultPlacement;
+        NewDefaultParameterName = item.Record.DefaultParameterName;
+        NewDefaultValuePrefix = item.Record.DefaultValuePrefix;
+        NewTestEndpoint = item.Record.TestEndpoint ?? "";
 
-        StatusMessage = "Leave Client secret blank to keep the current one.";
+        StatusMessage = item.Record.Kind == CredentialKind.ApiKey
+            ? "Leave API key blank to keep the current one."
+            : "Leave Client secret blank to keep the current one.";
     }
 
     [RelayCommand]
@@ -231,6 +433,14 @@ public sealed partial class CredentialsViewModel : ObservableObject
         NewName = "";
         NewClientId = "";
         NewClientSecret = "";
+        NewApiKey = "";
+        NewTestEndpoint = "";
+
+        var defaults = CredentialRecord.DefaultInjectionFor(SelectedKind);
+        NewDefaultPlacement = defaults.Placement;
+        NewDefaultParameterName = defaults.Name;
+        NewDefaultValuePrefix = defaults.ValuePrefix;
+
         ApplyPresetDefaults(SelectedPreset);
     }
 

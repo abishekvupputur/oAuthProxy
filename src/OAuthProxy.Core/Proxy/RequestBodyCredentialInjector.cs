@@ -9,7 +9,7 @@ using Yarp.ReverseProxy.Transforms;
 namespace OAuthProxy.Core.Proxy;
 
 /// <summary>
-/// Writes the credential into the request body, for the upstreams that want it there rather
+/// Writes credentials into the request body, for the upstreams that want them there rather
 /// than in a header or the query string.
 ///
 /// Unlike the other two placements this cannot be done in passing: the body has to be buffered,
@@ -17,6 +17,10 @@ namespace OAuthProxy.Core.Proxy;
 /// and in a shape this understands. Everything else is refused outright and reported, because a
 /// half-rewritten body reaching an upstream is worse than an honest "could not attach" line in
 /// the activity log next to the 401 it explains.
+///
+/// A route may put several credentials in the body at once, so every field is written in a
+/// single pass. Injecting them one at a time would re-buffer and re-serialize the body once per
+/// field, and would leave the request half-authenticated if a later field failed.
 /// </summary>
 internal static class RequestBodyCredentialInjector
 {
@@ -30,12 +34,13 @@ internal static class RequestBodyCredentialInjector
 
     public static async ValueTask<bool> TryInjectAsync(
         RequestTransformContext context,
-        string fieldName,
-        string value,
+        IReadOnlyList<KeyValuePair<string, string>> fields,
         ActivityLog activityLog,
         string? credentialName)
     {
         var request = context.HttpContext.Request;
+
+        if (fields.Count == 0) return true;
 
         if (Refuse(request) is { } reason)
         {
@@ -64,8 +69,8 @@ internal static class RequestBodyCredentialInjector
         var body = Encoding.UTF8.GetString(buffered);
 
         var (rewritten, mediaType) = kind == BodyKind.Json
-            ? (RewriteJson(body, fieldName, value), $"{MediaTypeOf(request.ContentType)}; charset=utf-8")
-            : (RewriteForm(body, fieldName, value), "application/x-www-form-urlencoded");
+            ? (RewriteJson(body, fields), $"{MediaTypeOf(request.ContentType)}; charset=utf-8")
+            : (RewriteForm(body, fields), "application/x-www-form-urlencoded");
 
         if (rewritten is null)
         {
@@ -238,8 +243,8 @@ internal static class RequestBodyCredentialInjector
         return null;
     }
 
-    /// <summary>Sets the field on a JSON object body, or returns null if the body is not one.</summary>
-    private static string? RewriteJson(string body, string fieldName, string value)
+    /// <summary>Sets the fields on a JSON object body, or returns null if the body is not one.</summary>
+    private static string? RewriteJson(string body, IReadOnlyList<KeyValuePair<string, string>> fields)
     {
         JsonNode? parsed;
         try
@@ -257,16 +262,23 @@ internal static class RequestBodyCredentialInjector
 
         // Assignment, not Add: a caller-supplied field of the same name is overwritten rather
         // than duplicated, so the upstream cannot be shown two candidate credentials.
-        json[fieldName] = JsonValue.Create(value);
+        foreach (var (fieldName, value) in fields)
+        {
+            json[fieldName] = JsonValue.Create(value);
+        }
+
         return json.ToJsonString();
     }
 
-    private static string RewriteForm(string body, string fieldName, string value)
+    private static string RewriteForm(string body, IReadOnlyList<KeyValuePair<string, string>> fields)
     {
-        var fields = QueryHelpers.ParseQuery(body);
-        fields[fieldName] = new StringValues(value);
+        var parsed = QueryHelpers.ParseQuery(body);
+        foreach (var (fieldName, value) in fields)
+        {
+            parsed[fieldName] = new StringValues(value);
+        }
 
-        return string.Join("&", fields.SelectMany(field =>
+        return string.Join("&", parsed.SelectMany(field =>
             field.Value.Select(v => $"{Uri.EscapeDataString(field.Key)}={Uri.EscapeDataString(v ?? "")}")));
     }
 

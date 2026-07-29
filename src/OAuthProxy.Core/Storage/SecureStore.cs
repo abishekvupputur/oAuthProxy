@@ -46,7 +46,15 @@ public sealed class SecureStore
             {
                 var protectedBytes = await File.ReadAllBytesAsync(_filePath, ct).ConfigureAwait(false);
                 var jsonBytes = ProtectedData.Unprotect(protectedBytes, optionalEntropy: null, DataProtectionScope.CurrentUser);
-                return JsonSerializer.Deserialize<ConfigStore>(jsonBytes, JsonOptions) ?? new ConfigStore();
+                var store = JsonSerializer.Deserialize<ConfigStore>(jsonBytes, JsonOptions) ?? new ConfigStore();
+
+                // A route used to hold exactly one credential in four scalar fields. Folding
+                // those into the credential list here, once, is what lets everything downstream
+                // read one shape — and clears the old fields so the next save stops writing two
+                // representations of the same thing.
+                foreach (var route in store.Routes) route.Normalize();
+
+                return store;
             }
             catch (Exception ex) when (ex is CryptographicException or JsonException or IOException)
             {

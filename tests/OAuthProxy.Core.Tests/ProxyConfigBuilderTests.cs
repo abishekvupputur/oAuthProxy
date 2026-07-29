@@ -5,6 +5,9 @@ namespace OAuthProxy.Core.Tests;
 
 public class ProxyConfigBuilderTests
 {
+    private static RouteCredential Bearer(Guid credentialId) =>
+        RouteCredential.For(credentialId, CredentialPlacement.Header);
+
     [Fact]
     public void Build_EnabledRouteWithKnownUpstream_ProducesRouteAndCluster()
     {
@@ -14,7 +17,7 @@ public class ProxyConfigBuilderTests
         {
             PathPrefix = "/app/httpbin",
             UpstreamId = upstream.Id,
-            CredentialId = credentialId,
+            Credentials = [Bearer(credentialId)],
             StripPrefix = true,
             Enabled = true,
         };
@@ -25,8 +28,10 @@ public class ProxyConfigBuilderTests
         Assert.Equal(route.Id.ToString(), routeConfig.RouteId);
         Assert.Equal(route.Id.ToString(), routeConfig.ClusterId);
         Assert.Equal("/app/httpbin/{**catch-all}", routeConfig.Match.Path);
-        Assert.Equal(credentialId.ToString(), routeConfig.Metadata![ProxyConfigBuilder.CredentialIdMetadataKey]);
         Assert.NotNull(routeConfig.Transforms);
+
+        var written = Assert.Single(ProxyConfigBuilder.ReadCredentials(routeConfig.Metadata!));
+        Assert.Equal(credentialId, written.CredentialId);
 
         var clusterConfig = Assert.Single(clusters);
         Assert.Equal(route.Id.ToString(), clusterConfig.ClusterId);
@@ -41,7 +46,7 @@ public class ProxyConfigBuilderTests
         {
             PathPrefix = "/app/httpbin",
             UpstreamId = upstream.Id,
-            CredentialId = Guid.NewGuid(),
+            Credentials = [Bearer(Guid.NewGuid())],
             Enabled = false,
         };
 
@@ -58,7 +63,7 @@ public class ProxyConfigBuilderTests
         {
             PathPrefix = "/app/missing",
             UpstreamId = Guid.NewGuid(),
-            CredentialId = Guid.NewGuid(),
+            Credentials = [Bearer(Guid.NewGuid())],
         };
 
         var (routes, clusters) = ProxyConfigBuilder.Build([route], []);
@@ -75,8 +80,8 @@ public class ProxyConfigBuilderTests
         // be discarded too. Dropping just the bad one keeps the rest applying.
         var upstream = new UpstreamRecord { Name = "echo", BaseUrl = "https://api.test" };
 
-        var good = new RouteMapping { PathPrefix = "/good", UpstreamId = upstream.Id, CredentialId = Guid.NewGuid() };
-        var bad = new RouteMapping { PathPrefix = "/bad{x}", UpstreamId = upstream.Id, CredentialId = Guid.NewGuid() };
+        var good = new RouteMapping { PathPrefix = "/good", UpstreamId = upstream.Id, Credentials = [Bearer(Guid.NewGuid())] };
+        var bad = new RouteMapping { PathPrefix = "/bad{x}", UpstreamId = upstream.Id, Credentials = [Bearer(Guid.NewGuid())] };
 
         var (routes, clusters) = ProxyConfigBuilder.Build([good, bad], [upstream]);
 
@@ -86,14 +91,66 @@ public class ProxyConfigBuilderTests
     }
 
     [Fact]
-    public void Build_WritesTheRoutesCredentialPlacementIntoMetadata()
+    public void Build_WritesEveryCredentialAndItsPlacementIntoMetadata()
     {
         var upstream = new UpstreamRecord { Name = "api", BaseUrl = "https://api.test" };
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
         var route = new RouteMapping
         {
             PathPrefix = "/app/api",
             UpstreamId = upstream.Id,
-            CredentialId = Guid.NewGuid(),
+            Credentials =
+            [
+                new RouteCredential { CredentialId = first, Placement = CredentialPlacement.Query, ParameterName = "access_token", ValuePrefix = "" },
+                new RouteCredential { CredentialId = second, Placement = CredentialPlacement.Header, ParameterName = "X-Api-Key", ValuePrefix = "" },
+            ],
+        };
+
+        var (routes, _) = ProxyConfigBuilder.Build([route], [upstream]);
+
+        var read = ProxyConfigBuilder.ReadCredentials(Assert.Single(routes).Metadata!);
+        Assert.Equal(2, read.Count);
+
+        Assert.Equal(first, read[0].CredentialId);
+        Assert.Equal(CredentialPlacement.Query, read[0].Placement);
+        Assert.Equal("access_token", read[0].ParameterName);
+        Assert.Equal("", read[0].ValuePrefix);
+
+        Assert.Equal(second, read[1].CredentialId);
+        Assert.Equal(CredentialPlacement.Header, read[1].Placement);
+        Assert.Equal("X-Api-Key", read[1].ParameterName);
+    }
+
+    [Fact]
+    public void Build_RouteWithNoCredentials_IsStillServedAndCarriesAnEmptyList()
+    {
+        // A route that attaches nothing is a supported configuration — a plain forwarding hop —
+        // not a half-finished one. The metadata key is still written, because the transform it
+        // switches on also strips the caller's own Authorization and cookies.
+        var upstream = new UpstreamRecord { Name = "public", BaseUrl = "https://api.test" };
+        var route = new RouteMapping { PathPrefix = "/app/public", UpstreamId = upstream.Id };
+
+        var (routes, clusters) = ProxyConfigBuilder.Build([route], [upstream]);
+
+        var routeConfig = Assert.Single(routes);
+        Assert.Single(clusters);
+        Assert.True(routeConfig.Metadata!.ContainsKey(ProxyConfigBuilder.CredentialsMetadataKey));
+        Assert.Empty(ProxyConfigBuilder.ReadCredentials(routeConfig.Metadata));
+    }
+
+    [Fact]
+    public void Build_LegacySingleCredentialFields_AreTranslatedIntoTheCredentialList()
+    {
+        // An in-memory route (or a store not yet normalized) may still carry the superseded
+        // scalar fields. They have to keep producing exactly the route they always did.
+        var upstream = new UpstreamRecord { Name = "api", BaseUrl = "https://api.test" };
+        var credentialId = Guid.NewGuid();
+        var route = new RouteMapping
+        {
+            PathPrefix = "/app/api",
+            UpstreamId = upstream.Id,
+            CredentialId = credentialId,
             CredentialPlacement = CredentialPlacement.Query,
             CredentialParameterName = "access_token",
             CredentialValuePrefix = "",
@@ -101,20 +158,20 @@ public class ProxyConfigBuilderTests
 
         var (routes, _) = ProxyConfigBuilder.Build([route], [upstream]);
 
-        var injection = ProxyConfigBuilder.ReadCredentialInjection(Assert.Single(routes).Metadata!);
-        Assert.Equal(CredentialPlacement.Query, injection.Placement);
-        Assert.Equal("access_token", injection.Name);
-        Assert.Equal("", injection.ValuePrefix);
+        var read = Assert.Single(ProxyConfigBuilder.ReadCredentials(Assert.Single(routes).Metadata!));
+        Assert.Equal(credentialId, read.CredentialId);
+        Assert.Equal(CredentialPlacement.Query, read.Placement);
+        Assert.Equal("access_token", read.ParameterName);
     }
 
     [Fact]
-    public void ReadCredentialInjection_WithoutPlacementMetadata_FallsBackToBearerHeader()
+    public void ReadCredentials_WithoutTheMetadataKey_YieldsNothing()
     {
-        // Routes built before these metadata keys existed meant exactly one thing.
-        var injection = ProxyConfigBuilder.ReadCredentialInjection(
-            new Dictionary<string, string> { [ProxyConfigBuilder.CredentialIdMetadataKey] = Guid.NewGuid().ToString() });
-
-        Assert.Equal(CredentialInjection.BearerHeader, injection);
+        // The only safe reading of metadata this build cannot interpret is "attach nothing".
+        Assert.Empty(ProxyConfigBuilder.ReadCredentials(new Dictionary<string, string>()));
+        Assert.Empty(ProxyConfigBuilder.ReadCredentials(null));
+        Assert.Empty(ProxyConfigBuilder.ReadCredentials(
+            new Dictionary<string, string> { [ProxyConfigBuilder.CredentialsMetadataKey] = "not json" }));
     }
 
     [Fact]
@@ -127,8 +184,34 @@ public class ProxyConfigBuilderTests
         {
             PathPrefix = "/app/api",
             UpstreamId = upstream.Id,
-            CredentialId = Guid.NewGuid(),
-            CredentialValuePrefix = "Bearer \r\nX-Admin: 1",
+            Credentials =
+            [
+                new RouteCredential
+                {
+                    CredentialId = Guid.NewGuid(),
+                    ParameterName = "Authorization",
+                    ValuePrefix = "Bearer \r\nX-Admin: 1",
+                },
+            ],
+        };
+
+        var (routes, clusters) = ProxyConfigBuilder.Build([route], [upstream]);
+
+        Assert.Empty(routes);
+        Assert.Empty(clusters);
+    }
+
+    [Fact]
+    public void Build_RouteWithTwoCredentialsInTheSameSlot_IsExcluded()
+    {
+        // The second would silently overwrite the first, so the upstream would see one token
+        // while the UI showed two. There is no reading of that config that does what it says.
+        var upstream = new UpstreamRecord { Name = "api", BaseUrl = "https://api.test" };
+        var route = new RouteMapping
+        {
+            PathPrefix = "/app/api",
+            UpstreamId = upstream.Id,
+            Credentials = [Bearer(Guid.NewGuid()), Bearer(Guid.NewGuid())],
         };
 
         var (routes, clusters) = ProxyConfigBuilder.Build([route], [upstream]);
@@ -141,7 +224,12 @@ public class ProxyConfigBuilderTests
     public void Build_RouteWithDotSegmentPrefix_IsExcluded()
     {
         var upstream = new UpstreamRecord { Name = "echo", BaseUrl = "https://api.test" };
-        var route = new RouteMapping { PathPrefix = "/api/../admin", UpstreamId = upstream.Id, CredentialId = Guid.NewGuid() };
+        var route = new RouteMapping
+        {
+            PathPrefix = "/api/../admin",
+            UpstreamId = upstream.Id,
+            Credentials = [Bearer(Guid.NewGuid())],
+        };
 
         var (routes, _) = ProxyConfigBuilder.Build([route], [upstream]);
 

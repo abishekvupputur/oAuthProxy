@@ -8,11 +8,16 @@ using Yarp.ReverseProxy.Transforms.Builder;
 namespace OAuthProxy.Core.Proxy;
 
 /// <summary>
-/// Attaches the route's credential to each proxied request, in whichever shape the route is
-/// configured for — a header (the "Authorization: Bearer &lt;token&gt;" default), a query
-/// parameter, or a field in the request body.
+/// Attaches the route's credentials to each proxied request, in whichever shapes the route is
+/// configured for — headers (the "Authorization: Bearer &lt;token&gt;" default), query
+/// parameters, fields in the request body, or any combination of those.
 ///
-/// The token is read from ConfigStoreCache live on every request (not captured at route-build
+/// A route may carry none, one, or several credentials, and the same credential may appear in
+/// more than one slot. Body fields are collected and written in a single pass at the end, so a
+/// request whose body carries two credentials is buffered and re-serialized once rather than
+/// twice.
+///
+/// Tokens are read from ConfigStoreCache live on every request (not captured at route-build
 /// time). This is what decouples token refresh from route rebuilds — a refreshed token applies
 /// to the very next proxied request automatically, no config reload needed.
 /// </summary>
@@ -31,42 +36,79 @@ public sealed class CredentialInjectionTransformProvider(
 
     public void Apply(TransformBuilderContext context)
     {
+        // Presence of the key, not of any credential in it: a route configured to attach nothing
+        // still needs the transform below, because clearing the caller's own Authorization and
+        // cookies is not part of attaching a credential — it is what stops a local caller using
+        // this proxy as a courier for credentials it should not be able to reach.
         if (context.Route.Metadata is not { } metadata ||
-            !metadata.TryGetValue(ProxyConfigBuilder.CredentialIdMetadataKey, out var credentialIdText) ||
-            !Guid.TryParse(credentialIdText, out var credentialId))
+            !metadata.ContainsKey(ProxyConfigBuilder.CredentialsMetadataKey))
         {
             return;
         }
 
-        var injection = ProxyConfigBuilder.ReadCredentialInjection(metadata);
+        var credentials = ProxyConfigBuilder.ReadCredentials(metadata);
 
         context.AddRequestTransform(async transformContext =>
         {
-            var credential = configStoreCache.GetCredential(credentialId);
-
-            // Not credential.Token.AccessToken directly: this refreshes first if the token has
-            // already expired, so a request arriving between refresh-loop ticks (or after the
-            // machine slept through one) still goes out authenticated instead of 401-ing.
-            var token = await accessTokenProvider.GetAccessTokenAsync(
-                credentialId, transformContext.HttpContext.RequestAborted);
-
-            // Cleared unconditionally — whatever the route's placement is, and whether or not we
-            // have a token to attach. YARP copies request headers through by default, so leaving
-            // these alone would forward the caller's own Authorization header and cookies to the
-            // upstream, letting a local caller use this proxy to spend credentials (or an
-            // ambient browser session) it should not have been able to reach.
+            // Cleared unconditionally — whatever the route's placements are, and whether or not
+            // there is a token to attach. YARP copies request headers through by default, so
+            // leaving these alone would forward the caller's own Authorization header and cookies
+            // to the upstream, letting a local caller spend credentials (or an ambient browser
+            // session) it should not have been able to reach.
             transformContext.ProxyRequest.Headers.Authorization = null;
             transformContext.ProxyRequest.Headers.Remove("Cookie");
 
-            var attached = token is not null
-                           && await InjectAsync(transformContext, injection, token, credential?.Name);
+            var attached = new List<string>();
+            var failed = new List<string>();
 
-            var request = transformContext.HttpContext.Request;
-            var placement = $"{injection.Placement.ToString().ToLowerInvariant()} {injection.Name}";
-            activityLog.Log(attached
-                ? $"PROXY {request.Method} {LogSafePath(request)} -> {transformContext.DestinationPrefix} [token: {credential?.Name} via {placement}]"
-                : $"PROXY {request.Method} {LogSafePath(request)} -> {transformContext.DestinationPrefix} "
-                  + $"[NO TOKEN - {(token is null ? "credential not connected" : $"could not be attached to {placement}")}]");
+            // Body placements are gathered rather than applied in the loop; see WriteBodyAsync.
+            var bodyFields = new List<KeyValuePair<string, string>>();
+            var bodyLabels = new List<string>();
+
+            foreach (var routeCredential in credentials)
+            {
+                var injection = routeCredential.ToCredentialInjection();
+                var credential = configStoreCache.GetCredential(routeCredential.CredentialId);
+                var label = $"{credential?.Name ?? "(deleted credential)"} via {Describe(injection)}";
+
+                // Not credential.Token.AccessToken directly: this refreshes first if the token has
+                // already expired, so a request arriving between refresh-loop ticks (or after the
+                // machine slept through one) still goes out authenticated instead of 401-ing.
+                var token = await accessTokenProvider.GetAccessTokenAsync(
+                    routeCredential.CredentialId, transformContext.HttpContext.RequestAborted);
+
+                if (token is null)
+                {
+                    failed.Add($"{label} (credential not connected)");
+                    continue;
+                }
+
+                if (injection.Placement == CredentialPlacement.Body)
+                {
+                    bodyFields.Add(new KeyValuePair<string, string>(injection.Name, injection.FormatValue(token)));
+                    bodyLabels.Add(label);
+                    continue;
+                }
+
+                if (Inject(transformContext, injection, token))
+                {
+                    attached.Add(label);
+                }
+                else
+                {
+                    failed.Add($"{label} (could not be attached)");
+                }
+            }
+
+            if (bodyFields.Count > 0)
+            {
+                var wrote = await RequestBodyCredentialInjector.TryInjectAsync(
+                    transformContext, bodyFields, activityLog, string.Join(", ", bodyLabels));
+
+                (wrote ? attached : failed).AddRange(bodyLabels);
+            }
+
+            Log(transformContext, credentials.Count, attached, failed);
         });
 
         context.AddResponseTransform(transformContext =>
@@ -75,14 +117,18 @@ public sealed class CredentialInjectionTransformProvider(
             var request = transformContext.HttpContext.Request;
 
             // The request body has already been streamed upstream by this point, so replaying
-            // it here is not possible. Flagging the credential is the next best thing: the
-            // periodic loop picks it up and the user sees "Needs reconnect" in the UI, instead
+            // it here is not possible. Flagging the credentials is the next best thing: the
+            // periodic loop picks them up and the user sees "Needs reconnect" in the UI, instead
             // of silent 401s with no indication of which credential went bad.
+            //
+            // Every credential on the route is flagged because a 401 does not say which of them
+            // the upstream objected to.
             if (status == System.Net.HttpStatusCode.Unauthorized)
             {
-                var credential = configStoreCache.GetCredential(credentialId);
-                if (credential is not null)
+                foreach (var routeCredential in credentials)
                 {
+                    if (configStoreCache.GetCredential(routeCredential.CredentialId) is not { } credential) continue;
+
                     activityLog.Log(
                         $"AUTH '{credential.Name}' rejected by upstream (401) — token refresh will be retried, "
                         + "reconnect if this repeats");
@@ -95,6 +141,34 @@ public sealed class CredentialInjectionTransformProvider(
                 + $"{DescribeContentType(transformContext.ProxyResponse)} for {request.Method} {LogSafePath(request)}");
             return ValueTask.CompletedTask;
         });
+    }
+
+    private static string Describe(CredentialInjection injection) =>
+        $"{injection.Placement.ToString().ToLowerInvariant()} {injection.Name}";
+
+    /// <summary>
+    /// One activity-log line per proxied request, naming every credential that made it onto the
+    /// request and every one that did not. A route that attaches nothing says so explicitly —
+    /// otherwise an intentional pass-through route and a broken credential would produce
+    /// indistinguishable log lines.
+    /// </summary>
+    private void Log(
+        RequestTransformContext context, int configured, IReadOnlyList<string> attached, IReadOnlyList<string> failed)
+    {
+        var request = context.HttpContext.Request;
+        var head = $"PROXY {request.Method} {LogSafePath(request)} -> {context.DestinationPrefix}";
+
+        if (configured == 0)
+        {
+            activityLog.Log($"{head} [no credential configured - forwarded unauthenticated]");
+            return;
+        }
+
+        var parts = new List<string>();
+        if (attached.Count > 0) parts.Add($"tokens: {string.Join("; ", attached)}");
+        if (failed.Count > 0) parts.Add($"NOT ATTACHED: {string.Join("; ", failed)}");
+
+        activityLog.Log($"{head} [{string.Join(" | ", parts)}]");
     }
 
     /// <summary>
@@ -118,42 +192,43 @@ public sealed class CredentialInjectionTransformProvider(
     }
 
     /// <summary>
-    /// Puts the token where the route says it goes. Returns false when the request could not
-    /// carry it (a body placement on a body this cannot rewrite), so the caller can say so in
-    /// the activity log rather than leaving a bare 401 to explain itself.
+    /// Puts one token where its entry says it goes. Header and query only — body placements are
+    /// batched by the caller so the body is rewritten once regardless of how many credentials
+    /// live in it.
     /// </summary>
-    private async ValueTask<bool> InjectAsync(
-        RequestTransformContext context, CredentialInjection injection, string token, string? credentialName)
+    private static bool Inject(RequestTransformContext context, CredentialInjection injection, string token)
     {
         var value = injection.FormatValue(token);
 
-        switch (injection.Placement)
+        // The route's value prefix is validated when it is entered, but the secret itself is not
+        // always: an API key is whatever the user pasted, and a CR or LF picked up from a wrapped
+        // email would end the header line and let the rest be read as further headers — request
+        // splitting, aimed at the upstream. TryAddWithoutValidation is exactly as permissive as
+        // its name says, so the check has to happen here. Refused rather than sanitized: a
+        // silently trimmed key is a key that does not work, reported as one that does.
+        if (value.Any(char.IsControl)) return false;
+
+        if (injection.Placement == CredentialPlacement.Query)
         {
-            case CredentialPlacement.Query:
-                // Assigning replaces any same-named parameter the caller supplied, so a caller
-                // cannot pre-set "?access_token=..." and have the upstream see two of them.
-                context.Query.Collection[injection.Name] = value;
-                return true;
-
-            case CredentialPlacement.Body:
-                return await RequestBodyCredentialInjector.TryInjectAsync(
-                    context, injection.Name, value, activityLog, credentialName);
-
-            default:
-                // Removed first for the same reason: TryAddWithoutValidation appends rather than
-                // replaces, so without this a caller-supplied header of the same name would be
-                // sent alongside ours and the upstream would pick whichever it liked.
-                //
-                // Both collections are tried because HttpClient splits headers between them and
-                // which one a given name lives in depends on the name, not on the caller.
-                TryRemove(context.ProxyRequest.Headers, injection.Name);
-                if (context.ProxyRequest.Content is { } content)
-                {
-                    TryRemove(content.Headers, injection.Name);
-                }
-
-                return context.ProxyRequest.Headers.TryAddWithoutValidation(injection.Name, value);
+            // Assigning replaces any same-named parameter the caller supplied, so a caller
+            // cannot pre-set "?access_token=..." and have the upstream see two of them.
+            context.Query.Collection[injection.Name] = value;
+            return true;
         }
+
+        // Removed first for the same reason: TryAddWithoutValidation appends rather than
+        // replaces, so without this a caller-supplied header of the same name would be
+        // sent alongside ours and the upstream would pick whichever it liked.
+        //
+        // Both collections are tried because HttpClient splits headers between them and
+        // which one a given name lives in depends on the name, not on the caller.
+        TryRemove(context.ProxyRequest.Headers, injection.Name);
+        if (context.ProxyRequest.Content is { } content)
+        {
+            TryRemove(content.Headers, injection.Name);
+        }
+
+        return context.ProxyRequest.Headers.TryAddWithoutValidation(injection.Name, value);
     }
 
     /// <summary>

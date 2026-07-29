@@ -1,14 +1,21 @@
+using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
 using OAuthProxy.Core.Models;
 
 namespace OAuthProxy.App.ViewModels;
 
 /// <summary>
-/// A route row with its upstream and credential resolved to names, so the grid can show the
-/// whole hop (local endpoint -> upstream, and which credential's token gets attached) instead
-/// of raw ids. Rebuilt by RoutesViewModel.Reload() rather than mutated in place.
+/// A route row with its upstream resolved to a name and its credentials expanded into editable
+/// entries, so the grid can show the whole hop (local endpoint -> upstream, and which tokens get
+/// attached where) instead of raw ids. Rebuilt by RoutesViewModel.Reload() rather than mutated
+/// in place.
+///
+/// A route may attach nothing, one credential, or several — including the same credential twice
+/// in different places — so the credential side of the row is a collection rather than a fixed
+/// set of fields.
 /// </summary>
-public sealed class RouteItemViewModel : ObservableObject
+public sealed partial class RouteItemViewModel : ObservableObject
 {
     private const string Missing = "(missing)";
 
@@ -18,32 +25,57 @@ public sealed class RouteItemViewModel : ObservableObject
     /// <summary>Raised when an edit was rejected, so the owner can show why.</summary>
     private readonly Action<string>? _onInvalid;
 
+    private readonly IReadOnlyList<CredentialRecord> _availableCredentials;
+
     public RouteItemViewModel(
         RouteMapping route,
         UpstreamRecord? upstream,
-        CredentialRecord? credential,
+        IReadOnlyList<CredentialRecord> availableCredentials,
         int listenPort,
         Action<RouteItemViewModel, string>? onChanged = null,
         Action<string>? onInvalid = null)
     {
         Route = route;
+        _availableCredentials = availableCredentials;
         _onChanged = onChanged;
         _onInvalid = onInvalid;
 
         UpstreamName = upstream?.Name ?? Missing;
         UpstreamBaseUrl = upstream?.BaseUrl ?? Missing;
-        CredentialName = credential?.Name ?? Missing;
         LocalUrl = $"http://127.0.0.1:{listenPort}{route.PathPrefix}";
 
         // A route whose upstream is gone is silently dropped from the proxy config, so flag it
-        // rather than let it look active. A missing credential still routes, but unauthenticated.
+        // rather than let it look active. A missing credential still routes, unauthenticated.
         IsBroken = upstream is null;
-        IsMissingCredential = credential is null;
+
+        // Stores are normalized on load, but a route object built in memory may still carry the
+        // superseded single-credential fields. Folding them in here means the editor below only
+        // ever deals with the list, and an edit cannot leave the two representations disagreeing.
+        Route.Normalize();
+
+        foreach (var credential in Route.Credentials)
+        {
+            Credentials.Add(Wrap(credential));
+        }
+
+        Credentials.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(HasCredentials));
+            OnPropertyChanged(nameof(HasNoCredentials));
+            OnPropertyChanged(nameof(CredentialSummary));
+            OnPropertyChanged(nameof(Summary));
+        };
     }
 
     public RouteMapping Route { get; }
 
     public string PathPrefix => Route.PathPrefix;
+
+    /// <summary>Editable credential entries, in the order they are written onto the request.</summary>
+    public ObservableCollection<RouteCredentialItemViewModel> Credentials { get; } = [];
+
+    public bool HasCredentials => Credentials.Count > 0;
+    public bool HasNoCredentials => Credentials.Count == 0;
 
     /// <summary>
     /// Settable so the grid's checkbox can turn a route off without deleting it. Writes
@@ -76,114 +108,122 @@ public sealed class RouteItemViewModel : ObservableObject
         }
     }
 
-    public IReadOnlyList<CredentialPlacement> Placements { get; } = RoutesViewModel.AllPlacements;
+    /// <summary>
+    /// Adds another credential to this route, defaulted to the first free slot so clicking the
+    /// button twice does not produce two entries that collide and take the route off the air.
+    /// </summary>
+    [RelayCommand]
+    private void AddCredential()
+    {
+        if (_availableCredentials.Count == 0)
+        {
+            _onInvalid?.Invoke("No credentials available — connect one on the Credentials tab first.");
+            return;
+        }
+
+        if (NextFreeEntry() is not { } entry)
+        {
+            _onInvalid?.Invoke(
+                "Every default slot is already taken on this route. Change one of the existing "
+                + "entries' placement or name first, then add another.");
+            return;
+        }
+
+        Route.Credentials.Add(entry);
+        var item = Wrap(entry);
+        Credentials.Add(item);
+
+        _onChanged?.Invoke(this, $"Route '{PathPrefix}' now also sends {item.Describe()}.");
+    }
+
+    [RelayCommand]
+    private void RemoveCredential(RouteCredentialItemViewModel? item)
+    {
+        if (item is null) return;
+
+        Route.Credentials.Remove(item.Model);
+        Credentials.Remove(item);
+
+        _onChanged?.Invoke(this, Credentials.Count == 0
+            ? $"Route '{PathPrefix}' no longer attaches any credential — requests are forwarded unauthenticated."
+            : $"Route '{PathPrefix}' no longer sends {item.Describe()}.");
+    }
 
     /// <summary>
-    /// Header / query / body. Switching carries the name and prefix over to the new placement's
-    /// defaults *only* when they were still at the old placement's defaults, so picking "Query"
-    /// on an untouched route gives "?access_token=" rather than "?Authorization=Bearer ".
+    /// A credential entry that does not collide with any already on the route.
+    ///
+    /// Each credential's own default placement is tried first — an "X-Api-Key" credential should
+    /// arrive already described as one rather than as a Bearer header nobody wanted — then the
+    /// generic per-placement defaults, then the next credential.
     /// </summary>
-    public CredentialPlacement CredentialPlacement
+    private RouteCredential? NextFreeEntry()
     {
-        get => Route.CredentialPlacement;
-        set
+        var taken = Route.Credentials.Select(c => c.Slot).ToHashSet(StringComparer.Ordinal);
+
+        foreach (var credential in _availableCredentials)
         {
-            if (Route.CredentialPlacement == value) return;
+            var preferred = credential.ToDefaultInjection();
+            var candidate = new RouteCredential
+            {
+                CredentialId = credential.Id,
+                Placement = preferred.Placement,
+                ParameterName = preferred.Name,
+                ValuePrefix = preferred.ValuePrefix,
+            };
 
-            var previous = CredentialInjection.DefaultFor(Route.CredentialPlacement);
-            var replacement = CredentialInjection.DefaultFor(value);
+            if (taken.Add(candidate.Slot)) return candidate;
 
-            if (Route.CredentialParameterName == previous.Name) Route.CredentialParameterName = replacement.Name;
-            if (Route.CredentialValuePrefix == previous.ValuePrefix) Route.CredentialValuePrefix = replacement.ValuePrefix;
-
-            Route.CredentialPlacement = value;
-            OnPropertyChanged();
-            OnPropertyChanged(nameof(CredentialParameterName));
-            OnPropertyChanged(nameof(CredentialValuePrefix));
-            OnPropertyChanged(nameof(ParameterNameLabel));
-            NotifyInjectionChanged();
+            foreach (var placement in RoutesViewModel.AllPlacements)
+            {
+                var fallback = RouteCredential.For(credential.Id, placement);
+                if (taken.Add(fallback.Slot)) return fallback;
+            }
         }
+
+        return null;
     }
 
-    public string CredentialParameterName
+    private RouteCredentialItemViewModel Wrap(RouteCredential credential) =>
+        new(credential, _availableCredentials, ValidateEntry, OnEntryChanged, _onInvalid);
+
+    /// <summary>
+    /// Answers a row's "may I become this?" question, on behalf of the whole route.
+    ///
+    /// The row's own settings are checked first, then the proposed entry is put in the row's
+    /// place among its siblings and the whole set is validated. That second half is the point:
+    /// two entries writing the same header would silently overwrite each other, so the route,
+    /// not the row, has to be the one to say no.
+    /// </summary>
+    private string? ValidateEntry(RouteCredentialItemViewModel item, RouteCredential candidate)
     {
-        get => Route.CredentialParameterName;
-        set => SetInjectionField(
-            value,
-            Route.CredentialParameterName,
-            candidate => RouteValidation.ValidateCredentialInjection(CredentialPlacement, candidate, CredentialValuePrefix),
-            candidate => Route.CredentialParameterName = candidate.Trim(),
-            nameof(CredentialParameterName));
+        var proposed = Credentials
+            .Select(existing => ReferenceEquals(existing, item) ? candidate : existing.Model)
+            .ToList();
+
+        return RouteValidation.ValidateCredentials(proposed);
     }
 
-    public string CredentialValuePrefix
+    private void OnEntryChanged(RouteCredentialItemViewModel item, string message)
     {
-        get => Route.CredentialValuePrefix;
-        set => SetInjectionField(
-            value,
-            Route.CredentialValuePrefix,
-            candidate => RouteValidation.ValidateCredentialInjection(CredentialPlacement, CredentialParameterName, candidate),
-            candidate => Route.CredentialValuePrefix = candidate,
-            nameof(CredentialValuePrefix));
+        OnPropertyChanged(nameof(CredentialSummary));
+        OnPropertyChanged(nameof(Summary));
+        _onChanged?.Invoke(this, $"Route '{PathPrefix}': {message}");
     }
-
-    /// <summary>Label for the name box — it means something different per placement.</summary>
-    public string ParameterNameLabel => CredentialPlacement switch
-    {
-        Core.Models.CredentialPlacement.Query => "Query parameter name",
-        Core.Models.CredentialPlacement.Body => "Body field name",
-        _ => "Header name",
-    };
-
-    /// <summary>How the credential is attached, e.g. "header Authorization: Bearer &lt;token&gt;".</summary>
-    public string InjectionSummary => Route.ToCredentialInjection().Describe();
 
     public string LocalUrl { get; }
     public string UpstreamName { get; }
     public string UpstreamBaseUrl { get; }
-    public string CredentialName { get; }
 
     public bool IsBroken { get; }
-    public bool IsMissingCredential { get; }
+
+    /// <summary>Every credential this route attaches, one per line, for the grid column.</summary>
+    public string CredentialSummary => Credentials.Count == 0
+        ? "no credential — forwarded unauthenticated"
+        : string.Join("\n", Credentials.Select(c => c.Describe()));
 
     /// <summary>Short human summary of what this route does, e.g. for tooltips.</summary>
     public string Summary =>
         $"{LocalUrl}  →  {UpstreamBaseUrl}"
         + (StripPrefix ? $"   (prefix '{PathPrefix}' removed before forwarding)" : "   (prefix kept)")
-        + $"\nToken: {CredentialName}, sent as {InjectionSummary}";
-
-    /// <summary>
-    /// Rejected values are never written to the record: an unusable header name or a prefix
-    /// carrying a newline makes ProxyConfigBuilder drop the route entirely, so accepting one
-    /// here would silently take the route off the air. The property change notification puts
-    /// the stored value back in the box, and the message says what was wrong.
-    /// </summary>
-    private void SetInjectionField(
-        string? candidate,
-        string current,
-        Func<string, string?> validate,
-        Action<string> assign,
-        string propertyName)
-    {
-        var value = candidate ?? "";
-        if (value == current) return;
-
-        if (validate(value) is { } error)
-        {
-            OnPropertyChanged(propertyName);
-            _onInvalid?.Invoke(error);
-            return;
-        }
-
-        assign(value);
-        OnPropertyChanged(propertyName);
-        NotifyInjectionChanged();
-    }
-
-    private void NotifyInjectionChanged()
-    {
-        OnPropertyChanged(nameof(InjectionSummary));
-        OnPropertyChanged(nameof(Summary));
-        _onChanged?.Invoke(this, $"Route '{PathPrefix}' now sends its credential as {InjectionSummary}.");
-    }
+        + $"\n{CredentialSummary}";
 }

@@ -33,8 +33,12 @@ reach on its own.
 - **MCP Funnel** — per-agent endpoints pooling multiple MCP servers with per-tool filtering
 - **Multi-provider OAuth2** — Google (via `Google.Apis.Auth`), Nextcloud, or any custom OAuth2
   provider (via `IdentityModel.OidcClient`; plain OAuth2, no OIDC discovery required)
+- **Static API keys** — for the many services that never offered OAuth; attach to routes exactly
+  like a token, with an optional **Test** button that checks the key against a real endpoint
 - **Flexible credential placement** — `Authorization: Bearer <token>` by default, or any header,
   query parameter, or request-body field, with a custom value prefix
+- **Any number of credentials per route** — none, one, or several at once, in any mix of headers,
+  query parameters, and body fields; the same credential may appear in more than one place
 - **Automatic token refresh** — 10 minutes ahead of expiry, in the background
 - **Any credential backs any route** — not a fixed 1:1 mapping
 - **DPAPI-encrypted store** — nothing written in plaintext
@@ -85,9 +89,9 @@ restart).
 Four things, each built on the last:
 
 ```
-Credential  →  an OAuth2 grant you have connected (Google, Nextcloud, custom)
+Credential  →  an OAuth2 grant you have connected, or a static API key you pasted in
 Upstream    →  a base URL to forward to
-Route       →  a local path prefix that forwards to an upstream with a credential attached
+Route       →  a local path prefix that forwards to an upstream, attaching any number of credentials
 Funnel      →  a local MCP endpoint pooling several MCP servers, filtered per agent
 ```
 
@@ -98,8 +102,34 @@ shape what an agent sees.
 
 ## Setting up a credential
 
-**Credentials tab** → pick a provider preset → fill in Client ID/Secret and scopes → **Add
-credential** → **Connect** (opens your browser for consent).
+Pick a **Credential type** first — it decides the rest of the form.
+
+| Type | For | Needs |
+|---|---|---|
+| **OAuth2** | Google, Nextcloud, any OAuth2 provider | client ID/secret, scopes, a browser consent flow |
+| **API key** | services that never offered OAuth | the key, and where it goes |
+
+Both kinds attach to routes identically, and both share two fields:
+
+- **Default placement** — where the secret goes by default. Used by the Test button, and it
+  prefills the entry when you attach this credential to a route (a route can still override it).
+  OAuth2 defaults to `Authorization: Bearer <token>`; API key defaults to `X-Api-Key: <key>`.
+- **Test endpoint** (optional) — see [Testing a credential](#testing-a-credential).
+
+### API key
+
+**Credentials tab** → set type to **API key** → name it → paste the key → **Add credential**.
+
+- Set the placement to whatever the service documents — `X-Api-Key`, `PRIVATE-TOKEN`,
+  `?api_key=`, `Authorization` with a `token ` prefix, or a body field.
+- The key is stored DPAPI-encrypted with everything else and is **never redisplayed**. On edit, a
+  blank key box means "keep the current key", exactly as for a client secret.
+- Keys containing control characters (a line break picked up when copying out of a wrapped email,
+  say) are **rejected**. Written into a header, a CR or LF ends the header line and lets the rest
+  be read as further headers — request splitting, aimed at your upstream. The forwarder refuses
+  such a value too, in case one reached the store some other way.
+- There is nothing to connect, expire, or refresh, so an API-key credential shows **Connect /
+  Disconnect / Refresh** nowhere. Its status is simply whether a key is stored.
 
 ### Google
 
@@ -124,12 +154,38 @@ issued every time — otherwise the credential silently cannot auto-refresh late
 Endpoints must be `https`, except on localhost — these fields receive your client secret and
 refresh token.
 
+### Testing a credential
+
+Set a **Test endpoint** — any URL that answers `200` to an authenticated `GET` — and the
+credential's row gains a **Test** button. Clicking it sends one GET there with the credential
+attached in its default placement, and reports what came back.
+
+This matters most for API keys. An OAuth grant proves itself during the browser flow — a wrong
+client secret cannot complete one — but nothing validates a pasted key, so without this the first
+sign of a typo is a `401` on a real request hours later, which reads as an upstream problem
+rather than a credential one.
+
+| Result | Means |
+|---|---|
+| `200` | The credential works, in that placement, at that endpoint. |
+| `401` / `403` | The secret, or where it is placed, is wrong. |
+| `3xx` | Almost certainly a redirect to a sign-in page. |
+| `404` | Check the test endpoint URL itself, not the credential. |
+| unreachable / timeout | Says nothing about the credential. |
+
+- **Only `200` passes**, and **redirects are not followed** — following one would report a login
+  page as proof the credential works, which is exactly the failure being tested for.
+- A **body** default placement cannot be tested: the request is a GET and has no body. Set the
+  default placement to a header or query parameter to test, then override it on the route.
+- The endpoint must be `https` (or localhost) — the secret is sent there. Neither the result
+  message nor the activity log ever contains the secret or the query string it might sit in.
+
 ---
 
 ## Setting up a route
 
 **Routes tab** → add an **Upstream** (name + base URL) → enter a **path prefix**, pick the
-upstream and credential → **Add route**.
+upstream and (optionally) a credential → **Add route**.
 
 [![Routes tab](media/routesScreen.png)](media/routesScreen.png)
 
@@ -144,7 +200,7 @@ upstream and credential → **Add route**.
 ### How the credential is sent
 
 By default the token goes out as `Authorization: Bearer <token>`. For upstreams that want it
-elsewhere, each route has a **placement**, a **name**, and a **value prefix**:
+elsewhere, each credential on a route has a **placement**, a **name**, and a **value prefix**:
 
 | Placement | Name means | Result |
 |---|---|---|
@@ -161,6 +217,43 @@ elsewhere, each route has a **placement**, a **name**, and a **value prefix**:
   forwarded untouched and the activity log says why.
 - Names the proxy owns are rejected: `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`,
   `Upgrade` as headers, and `proxy_key` as a query parameter.
+
+### Zero, one, or several credentials per route
+
+Select a route in the grid to open its credential editor. **Add credential** appends another
+entry; **Remove** drops one. Every entry has its own credential, placement, name, and prefix, so a
+route can carry any combination:
+
+| Route attaches | Example |
+|---|---|
+| Nothing | plain forwarding hop to an upstream that needs no token |
+| One credential | `Authorization: Bearer <token>` — the usual case |
+| Two query parameters | `?access_token=<A>&api_key=<B>` |
+| Two or more headers | `Authorization: Bearer <A>` + `X-Project-Key: <B>` |
+| Query + header | `?access_token=<A>` + `X-Api-Key: <B>` |
+| Query + several headers | `?access_token=<A>` + `Authorization: Bearer <A>` + `X-Api-Key: <B>` + `PRIVATE-TOKEN: token <B>` |
+| Header + query + body | all three at once, from the same or different credentials |
+| Several body fields | `{"access_token": "<A>", "project_token": "<B>"}` — written in one rewrite |
+| OAuth token + API key | `Authorization: Bearer <token>` + `X-Api-Key: <key>` — a user grant plus a project key, which plenty of APIs demand together |
+
+- Entries are independent: two **different** credentials side by side, or the **same** credential
+  in two places (some APIs want the token in a header for auth and echoed in the body for audit).
+  OAuth2 and API-key credentials mix freely on one route.
+- Adding a credential to a route prefills from that credential's **default placement**, so an
+  `X-Api-Key` credential arrives already described as one.
+- **A route with no credential still forwards**, and still strips the caller's own `Authorization`
+  header and cookies. Attaching nothing is not a licence to relay whatever the caller sent — that
+  guarantee holds on every route, and the local API key is still required.
+- **No two entries may write the same slot.** Two credentials on one header, query parameter, or
+  body field would silently overwrite each other, so the pair is refused at the point of editing.
+  Header names are compared case-insensitively (HTTP treats them that way); query parameter and
+  body field names are case-sensitive.
+- A credential you delete stops being attached on the routes that referenced it — **the other
+  credentials on those routes keep working**. The row shows `⚠ credential missing`.
+- If a request cannot carry a body placement (a `GET`, or a body this cannot parse), that entry is
+  skipped and the header and query entries on the same route still arrive. The activity log names
+  every credential that was attached and every one that was not.
+- Routes created by older versions carry their single credential over unchanged on first load.
 
 ---
 
@@ -302,7 +395,9 @@ upstream responses so a permissive upstream cannot reopen the same hole.
 the current exe. Never set automatically.
 
 **Credentials** — Connect, Refresh, Disconnect (clears the local token without revoking the grant
-at the provider), Edit, Delete. A colored dot and expiry time refresh every 15 seconds.
+at the provider), Test, Edit, Delete. A colored dot and expiry time refresh every 15 seconds.
+Connect/Refresh/Disconnect appear only for OAuth2 credentials — an API key has nothing to
+authorize and nothing to refresh. Test appears only once a test endpoint is set.
 
 [![Credentials tab](media/credentialsScreen.png)](media/credentialsScreen.png)
 
@@ -361,9 +456,13 @@ same reason.
 dotnet test tests/OAuthProxy.Core.Tests/OAuthProxy.Core.Tests.csproj
 ```
 
-328 tests, covering the OAuth and storage layers, the full HTTP method × credential placement
-matrix against a real upstream, and end-to-end funnel behaviour — including that two funnels over
-one upstream stay isolated, run in parallel, and never cross-deliver a response.
+427 tests, covering the OAuth and storage layers, the full HTTP method × credential placement
+matrix against a real upstream, multi-credential routes (two query parameters, several headers,
+header + query + body together, the same credential in three slots at once, and routes attaching
+nothing), static API keys (forwarded in every placement, mixed with an OAuth token on one request,
+and a key with a line break refused before it reaches the wire), credential testing against a real
+endpoint that checks what it was sent, and end-to-end funnel behaviour — including that two
+funnels over one upstream stay isolated, run in parallel, and never cross-deliver a response.
 
 ### Publishing a standalone exe
 
@@ -414,6 +513,15 @@ the Settings tab.
 
 **A route 502s.** The activity log records YARP's reason. Confirm the upstream base URL is
 reachable and `https`.
+
+**An upstream returns 401 and you cannot tell which credential it objected to.** A 401 does not
+say, so all of the route's credentials are flagged. Set a **Test endpoint** on each and use the
+Test button to narrow it down — that reports per-credential, which a proxied request cannot.
+
+**An API key looks right but is always rejected.** Check the placement, not the key: a valid key
+in the wrong header is as broken as a wrong one, and Test reports both as `401`. Also check for a
+stray line break — a key with one is refused before it reaches the wire, and the activity log
+says `NOT ATTACHED` for that entry.
 
 ---
 

@@ -138,11 +138,17 @@ public class ProxyForwardingTests : IAsyncLifetime
                 {
                     PathPrefix = prefix,
                     UpstreamId = upstreamRecord.Id,
-                    CredentialId = credential.Id,
                     StripPrefix = true,
-                    CredentialPlacement = placement,
-                    CredentialParameterName = name,
-                    CredentialValuePrefix = valuePrefix,
+                    Credentials =
+                    [
+                        new RouteCredential
+                        {
+                            CredentialId = credential.Id,
+                            Placement = placement,
+                            ParameterName = name,
+                            ValuePrefix = valuePrefix,
+                        },
+                    ],
                 });
 
             // The default shape, spelled out rather than relying on the record's defaults.

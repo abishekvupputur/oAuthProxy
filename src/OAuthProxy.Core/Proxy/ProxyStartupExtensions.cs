@@ -27,6 +27,7 @@ public static class ProxyStartupExtensions
         services.AddSingleton<GoogleOAuthService>();
         services.AddSingleton<OAuth2Service>();
         services.AddSingleton<AccessTokenProvider>();
+        services.AddSingleton<CredentialTestService>();
 
         // Registered as a singleton first, then handed to the hosting layer, so the UI can
         // resolve the same instance and clear a credential's retry backoff after a manual

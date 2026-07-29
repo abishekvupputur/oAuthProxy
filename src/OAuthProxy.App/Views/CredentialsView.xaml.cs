@@ -28,6 +28,14 @@ public partial class CredentialsView : UserControl
         }
     }
 
+    private void ApiKeyBox_PasswordChanged(object sender, System.Windows.RoutedEventArgs e)
+    {
+        if (DataContext is CredentialsViewModel vm)
+        {
+            vm.NewApiKey = ApiKeyBox.Password;
+        }
+    }
+
     /// <summary>
     /// PasswordBox.Password is not a DependencyProperty, so it cannot be bound and the flow
     /// above is one-way: box to view model. That left the box still showing the previous
@@ -37,14 +45,22 @@ public partial class CredentialsView : UserControl
     /// </summary>
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName != nameof(CredentialsViewModel.NewClientSecret)) return;
+        if (sender is not CredentialsViewModel vm) return;
 
         // Only ever clears, and only when the two have actually diverged. Pushing the view
         // model's value back into the box in general would fight the user's typing, since
         // every keystroke round-trips through here.
-        if (sender is CredentialsViewModel { NewClientSecret.Length: 0 } && ClientSecretBox.Password.Length > 0)
+        switch (e.PropertyName)
         {
-            ClientSecretBox.Clear();
+            case nameof(CredentialsViewModel.NewClientSecret)
+                when vm.NewClientSecret.Length == 0 && ClientSecretBox.Password.Length > 0:
+                ClientSecretBox.Clear();
+                break;
+
+            case nameof(CredentialsViewModel.NewApiKey)
+                when vm.NewApiKey.Length == 0 && ApiKeyBox.Password.Length > 0:
+                ApiKeyBox.Clear();
+                break;
         }
     }
 }

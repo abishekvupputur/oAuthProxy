@@ -147,4 +147,139 @@ public class RouteValidationTests
         Assert.NotNull(error);
         Assert.Contains("reserved", error);
     }
+
+    // ---- credential lists --------------------------------------------------------------------
+
+    private static RouteCredential Entry(
+        CredentialPlacement placement, string name, string prefix = "", Guid? credentialId = null) =>
+        new()
+        {
+            CredentialId = credentialId ?? Guid.NewGuid(),
+            Placement = placement,
+            ParameterName = name,
+            ValuePrefix = prefix,
+        };
+
+    [Fact]
+    public void ValidateCredentials_AcceptsAnEmptyList()
+    {
+        // A route that attaches nothing is a plain forwarding hop, not a half-finished route.
+        Assert.Null(RouteValidation.ValidateCredentials([]));
+    }
+
+    [Fact]
+    public void ValidateCredentials_AcceptsTwoQueryParameters()
+    {
+        Assert.Null(RouteValidation.ValidateCredentials([
+            Entry(CredentialPlacement.Query, "access_token"),
+            Entry(CredentialPlacement.Query, "api_key"),
+        ]));
+    }
+
+    [Fact]
+    public void ValidateCredentials_AcceptsAQueryParameterAlongsideSeveralHeaders()
+    {
+        Assert.Null(RouteValidation.ValidateCredentials([
+            Entry(CredentialPlacement.Query, "access_token"),
+            Entry(CredentialPlacement.Header, "Authorization", "Bearer "),
+            Entry(CredentialPlacement.Header, "X-Api-Key"),
+            Entry(CredentialPlacement.Header, "PRIVATE-TOKEN"),
+        ]));
+    }
+
+    [Fact]
+    public void ValidateCredentials_AcceptsHeaderQueryAndBodyTogether()
+    {
+        Assert.Null(RouteValidation.ValidateCredentials([
+            Entry(CredentialPlacement.Header, "Authorization", "Bearer "),
+            Entry(CredentialPlacement.Query, "access_token"),
+            Entry(CredentialPlacement.Body, "auth_token"),
+            Entry(CredentialPlacement.Body, "project_key"),
+        ]));
+    }
+
+    [Fact]
+    public void ValidateCredentials_AcceptsTheSameCredentialInTwoDifferentPlaces()
+    {
+        // A real pattern: an API that wants the token in a header for auth and echoed in the
+        // body for its own audit trail.
+        var id = Guid.NewGuid();
+
+        Assert.Null(RouteValidation.ValidateCredentials([
+            Entry(CredentialPlacement.Header, "Authorization", "Bearer ", id),
+            Entry(CredentialPlacement.Body, "access_token", credentialId: id),
+        ]));
+    }
+
+    [Theory]
+    [InlineData(CredentialPlacement.Header, "Authorization")]
+    [InlineData(CredentialPlacement.Query, "access_token")]
+    [InlineData(CredentialPlacement.Body, "token")]
+    public void ValidateCredentials_RejectsTwoCredentialsInTheSameSlot(CredentialPlacement placement, string name)
+    {
+        // The second silently overwrites the first, so the upstream sees one token while the UI
+        // shows two — there is no reading of that configuration that does what it says.
+        var error = RouteValidation.ValidateCredentials([Entry(placement, name), Entry(placement, name)]);
+
+        Assert.NotNull(error);
+        Assert.Contains("only one credential", error);
+    }
+
+    [Fact]
+    public void ValidateCredentials_TreatsHeaderNamesAsCaseInsensitive()
+    {
+        // HTTP does. An upstream cannot receive both "Authorization" and "authorization".
+        Assert.NotNull(RouteValidation.ValidateCredentials([
+            Entry(CredentialPlacement.Header, "Authorization", "Bearer "),
+            Entry(CredentialPlacement.Header, "authorization", "Bearer "),
+        ]));
+    }
+
+    [Theory]
+    [InlineData(CredentialPlacement.Query)]
+    [InlineData(CredentialPlacement.Body)]
+    public void ValidateCredentials_TreatsQueryAndBodyNamesAsCaseSensitive(CredentialPlacement placement)
+    {
+        // Plenty of APIs distinguish "Token" from "token"; refusing the pair would block a
+        // legitimate configuration.
+        Assert.Null(RouteValidation.ValidateCredentials([
+            Entry(placement, "Token"),
+            Entry(placement, "token"),
+        ]));
+    }
+
+    [Fact]
+    public void ValidateCredentials_IgnoresSurroundingWhitespaceWhenComparingSlots()
+    {
+        // Names are trimmed before they go on the wire, so " Authorization" and "Authorization"
+        // are the same header — comparing them raw would let a collision through.
+        Assert.NotNull(RouteValidation.ValidateCredentials([
+            Entry(CredentialPlacement.Header, "Authorization", "Bearer "),
+            Entry(CredentialPlacement.Header, " Authorization ", "Bearer "),
+        ]));
+    }
+
+    [Fact]
+    public void ValidateCredentials_RejectsAnEntryWithNoCredentialChosen()
+    {
+        var error = RouteValidation.ValidateCredentials([
+            new RouteCredential { CredentialId = Guid.Empty, ParameterName = "Authorization" },
+        ]);
+
+        Assert.NotNull(error);
+        Assert.Contains("Pick a credential", error);
+    }
+
+    [Fact]
+    public void ValidateCredentials_RejectsAListWhereAnyEntryIsUnusable()
+    {
+        // One bad entry is enough: the route as a whole cannot be put on the wire as configured.
+        var error = RouteValidation.ValidateCredentials([
+            Entry(CredentialPlacement.Header, "Authorization", "Bearer "),
+            Entry(CredentialPlacement.Header, "X-Evil", "value\r\nX-Admin: 1"),
+        ]);
+
+        Assert.NotNull(error);
+        Assert.Contains("control characters", error);
+    }
 }
