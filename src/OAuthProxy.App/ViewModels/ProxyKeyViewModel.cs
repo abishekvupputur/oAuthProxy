@@ -16,20 +16,6 @@ namespace OAuthProxy.App.ViewModels;
 /// </summary>
 public sealed partial class ProxyKeyViewModel : ObservableObject
 {
-
-    /// <summary>
-    /// False while the password manager is locked. Every command that writes to the vault is
-    /// gated on this, so the buttons grey out the moment it locks rather than staying clickable
-    /// and failing — ConfigStoreCache refuses the write either way, but an error the user could
-    /// not have avoided is a worse way to find out.
-    /// </summary>
-    [ObservableProperty]
-    private bool _canEdit = true;
-
-    partial void OnCanEditChanged(bool value)
-    {
-        RegenerateCommand.NotifyCanExecuteChanged();
-    }
     /// <summary>What the key belongs to, e.g. "route '/app/gmail'". Used in status messages.</summary>
     private readonly string _owner;
 
@@ -125,7 +111,7 @@ public sealed partial class ProxyKeyViewModel : ObservableObject
     /// Deliberately immediate and without a confirmation step: the only way to undo a leak is a
     /// new key, and the cost of an accidental click is re-copying it into one client's config.
     /// </summary>
-    [RelayCommand(CanExecute = nameof(CanEdit))]
+    [RelayCommand]
     private void Regenerate()
     {
         Key.Regenerate();

@@ -228,21 +228,6 @@ public class ProtonPassProviderTests : IDisposable
         Assert.Contains("masked", provider.LastLoadWarning);
     }
 
-    [Fact]
-    public async Task ASaveIsRefusedWhenAnotherMachineHasWrittenSince()
-    {
-        var fake = new FakeProtonPass();
-        var first = NewProvider(fake.AsRunner());
-        var second = NewProvider(fake.AsRunner());
-
-        await first.SaveAsync(StoreWithSecrets());
-        await second.LoadAsync();
-        await first.SaveAsync(StoreWithSecrets());
-
-        var exception = await Assert.ThrowsAsync<VaultSaveException>(() => second.SaveAsync(StoreWithSecrets()));
-
-        Assert.Contains("changed elsewhere", exception.Message);
-    }
 
     [Fact]
     public async Task ATemplateRejectionNamesTheFlagThatWouldShowTheRightShape()

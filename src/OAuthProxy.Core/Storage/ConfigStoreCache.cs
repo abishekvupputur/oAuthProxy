@@ -1,16 +1,22 @@
+using System.Text.Json;
 using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Vault;
 
 namespace OAuthProxy.Core.Storage;
 
 /// <summary>
-/// In-memory source of truth for the app's config, loaded once at host startup. UI, the
-/// proxy transform, and the refresh loop all read/write through this instead of reaching for
-/// the vault directly.
+/// The app's config, in memory, and the single place anything reads or changes it.
 ///
-/// Reads are free and writes are not: the vault is a subprocess and a network round trip, so
-/// everything on the request path reads <see cref="Current"/> and only deliberate edits and
-/// token refreshes go through <see cref="MutateAsync"/>/<see cref="SaveAsync"/>.
+/// Memory is authoritative while the app runs; the vault is where it is kept between runs. That
+/// split is what lets edits, token refreshes, and key rotations all go ahead when the password
+/// manager happens to be locked — the change takes effect immediately and
+/// <see cref="VaultSyncQueue"/> writes it out when the manager is reachable again.
+///
+/// Nothing is ever written to disk in the meantime. A pending change lives in this object and
+/// nowhere else, so the cost of never reaching the vault is bounded and stated: the change is lost
+/// when the app exits, and a credential whose token rotated in that window has to be reconnected.
+/// Only the newest token is ever useful, so there is nothing a local cache could usefully hold
+/// that would not also be a copy of the user's secrets sitting outside their password manager.
 /// </summary>
 public sealed class ConfigStoreCache
 {
@@ -19,13 +25,21 @@ public sealed class ConfigStoreCache
     private bool _initialized;
 
     /// <summary>
-    /// Held across the whole serialize-and-write, and by callers while they mutate the store.
-    /// Three threads touch this object — the WPF dispatcher (UI edits), the token refresh
-    /// loop, and thread-pool threads serving proxied requests. Without this, a UI-thread
-    /// Credentials.Add() landing mid-serialization throws "Collection was modified" out of
-    /// SaveAsync, which used to escape the refresh loop and stop the entire host.
+    /// Guards the object graph while it is read or changed. Three threads touch it — the WPF
+    /// dispatcher (UI edits), the token refresh loop, and thread-pool threads serving proxied
+    /// requests. Without it, a UI-thread Credentials.Add() landing mid-serialization throws
+    /// "Collection was modified" out of the refresh loop and stops the entire host.
+    ///
+    /// Deliberately *not* held across a vault write. That takes seconds — a subprocess, a network
+    /// round trip, sometimes a biometric prompt — and holding the lock through it would freeze
+    /// every edit and every proxied request behind it. Writers take a snapshot under the lock and
+    /// hand that to the vault instead.
     /// </summary>
-    private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly SemaphoreSlim _lock = new(1, 1);
+
+    /// <summary>Bumped on every change; compared against <see cref="_syncedVersion"/>.</summary>
+    private long _version;
+    private long _syncedVersion;
 
     public ConfigStoreCache(IConfigVault vault)
     {
@@ -36,26 +50,17 @@ public sealed class ConfigStoreCache
 
     public bool IsInitialized => _initialized;
 
+    /// <summary>True when changes have been made that the vault does not have yet.</summary>
+    public bool HasPendingChanges => Interlocked.Read(ref _version) > Interlocked.Read(ref _syncedVersion);
+
+    /// <summary>When the oldest still-unsynced change was made, for "waiting since" in the UI.</summary>
+    public DateTimeOffset? PendingSince { get; private set; }
+
     /// <summary>
-    /// Whether the vault will currently accept a write. Flipped by the health monitor when the
-    /// password manager locks or signs out, and back on recovery.
-    ///
-    /// Read-only is a real mode rather than an error to retry past, because there is nowhere else
-    /// for a change to live: holding an edit in memory until the vault reopens would mean the UI
-    /// showing something as saved that a restart would lose.
+    /// Raised whenever the pending state changes. The queue and the UI both listen; Core stays
+    /// MVVM-free, so this is a plain event and the UI marshals it.
     /// </summary>
-    public VaultAccess Access { get; private set; } = VaultAccess.Writable;
-
-    /// <summary>Raised on the thread that changed it — the UI marshals if it needs to.</summary>
-    public event Action<VaultAccess>? AccessChanged;
-
-    public void SetAccess(VaultAccess access)
-    {
-        if (Access == access) return;
-
-        Access = access;
-        AccessChanged?.Invoke(access);
-    }
+    public event Action? PendingChanged;
 
     /// <summary>
     /// Loads the store and issues any missing endpoint keys. Idempotent: startup calls this
@@ -67,21 +72,13 @@ public sealed class ConfigStoreCache
     {
         if (_initialized) return;
 
-        var loaded = await _vault.LoadAsync(ct);
-        _current = loaded;
+        _current = await _vault.LoadAsync(ct);
         _initialized = true;
 
-        // Every route and funnel needs its own key. This covers a store written before
-        // per-endpoint keys existed (where the single Settings.LocalApiKey was the only secret,
-        // and is now ignored) as well as any record that somehow reached disk without one.
-        //
-        // The generated values must be persisted here and nowhere else — if they only ever lived
-        // in memory, every restart would produce different keys and every client would break at
-        // random.
-        if (BackfillKeys(loaded) > 0)
-        {
-            await SaveAsync(ct);
-        }
+        // A route or funnel can reach the vault without a key — created by hand in the password
+        // manager, or restored from an item whose key item is gone. Without this the access guard
+        // has nothing to compare against and every request to that endpoint is refused.
+        if (BackfillKeys(_current) > 0) MarkChanged();
     }
 
     /// <summary>
@@ -107,131 +104,122 @@ public sealed class ConfigStoreCache
     }
 
     /// <summary>
-    /// Persists the current store. Safe to call concurrently — writes are serialized, and the
-    /// snapshot is taken under the same lock callers use via <see cref="MutateAsync"/>.
-    /// </summary>
-    public async Task SaveAsync(CancellationToken ct = default)
-    {
-        RequireWritable();
-
-        await _writeLock.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            await _vault.SaveAsync(_current, ct).ConfigureAwait(false);
-            IsOutOfSync = false;
-        }
-        finally
-        {
-            _writeLock.Release();
-        }
-    }
-
-    /// <summary>
-    /// Refuses a write while the vault is locked, before anything is mutated.
+    /// Applies a change and queues it for the vault. Returns as soon as the change is live in
+    /// memory — it does not wait for the write.
     ///
-    /// Deliberately not a queue. The vault is the only copy of the config, so a change parked in
-    /// memory for an indefinite period is one the user believes is saved and a restart would lose.
-    /// The UI disables every write command on the same signal, so reaching this is a backstop
-    /// rather than something a user should normally be able to do.
-    /// </summary>
-    private void RequireWritable()
-    {
-        if (Access == VaultAccess.ReadOnly) throw new VaultLockedException(_vault.Kind);
-    }
-
-    /// <summary>
-    /// Applies a mutation and persists it as one atomic unit. Every write path should use this
-    /// rather than mutating <see cref="Current"/> and then calling <see cref="SaveAsync"/>
-    /// separately — that leaves a window where another thread serializes a half-applied edit.
-    ///
-    /// If the write fails without reaching the vault the mutation is undone, so memory never
-    /// claims something the vault does not have. Previously a failed save left the edit applied in
-    /// memory: the UI showed the new credential, the proxy routed to it, and it vanished at the
-    /// next restart — silent data loss the user only discovered hours later.
-    ///
-    /// A save that failed *part way* is the one case where rolling back is wrong. Saving the store
-    /// is several vault items, so a mid-save failure leaves some of them durable; reverting memory
-    /// would make the next successful save delete records that are already safely stored. Memory
-    /// stays as the newest truth, <see cref="IsOutOfSync"/> is raised, and the user is offered a
-    /// retry or a reload rather than having the choice made for them.
+    /// This is the difference between the proxy working and not working while a password manager
+    /// is locked. Blocking here would mean an agent's route could not be edited, a proxy key could
+    /// not be rotated, and an expiring token could not be refreshed, all because of something the
+    /// user may be nowhere near. The change takes effect now; the queue makes it durable when it
+    /// can, and the UI says plainly that it has not yet.
     /// </summary>
     public async Task MutateAsync(Action<ConfigStore> mutate, CancellationToken ct = default)
     {
-        // Checked before the lock and before the mutation runs, so a refused write leaves the
-        // store exactly as it was rather than relying on the rollback below to undo it.
-        RequireWritable();
-
-        await _writeLock.WaitAsync(ct).ConfigureAwait(false);
+        await _lock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var rollback = Snapshot(_current);
             mutate(_current);
-
-            try
-            {
-                await _vault.SaveAsync(_current, ct).ConfigureAwait(false);
-                IsOutOfSync = false;
-            }
-            catch (VaultSaveException ex) when (ex.PartiallyApplied)
-            {
-                IsOutOfSync = true;
-                throw;
-            }
-            catch
-            {
-                RestoreInto(_current, rollback);
-                throw;
-            }
         }
         finally
         {
-            _writeLock.Release();
+            _lock.Release();
+        }
+
+        MarkChanged();
+    }
+
+    /// <summary>
+    /// Queues the current store for the vault, for callers that changed <see cref="Current"/> in
+    /// place — the OAuth flows, which mutate a credential over minutes and cannot hold a lock.
+    /// </summary>
+    public Task SaveAsync(CancellationToken ct = default)
+    {
+        MarkChanged();
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Records that the store has moved on, and wakes the queue.</summary>
+    private void MarkChanged()
+    {
+        Interlocked.Increment(ref _version);
+        PendingSince ??= DateTimeOffset.UtcNow;
+
+        PendingChanged?.Invoke();
+        SyncRequested?.Invoke();
+    }
+
+    /// <summary>Raised when there is something new to write. <see cref="VaultSyncQueue"/> listens.</summary>
+    internal event Action? SyncRequested;
+
+    /// <summary>
+    /// A detached copy of the store, plus the version it represents. Taken under the lock and
+    /// deep-cloned so the vault write that follows cannot see a half-applied edit, and so callers
+    /// can keep editing while it is in flight.
+    /// </summary>
+    internal async Task<(ConfigStore Store, long Version)> SnapshotForSyncAsync(CancellationToken ct = default)
+    {
+        await _lock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var json = JsonSerializer.Serialize(_current, VaultRedaction.FullOptions);
+            var clone = JsonSerializer.Deserialize<ConfigStore>(json, VaultRedaction.FullOptions) ?? new ConfigStore();
+
+            return (clone, Interlocked.Read(ref _version));
+        }
+        finally
+        {
+            _lock.Release();
         }
     }
 
     /// <summary>
-    /// True when a save reached the vault and failed part way, so some records are stored and some
-    /// are not. Cleared by the next successful save or by <see cref="ReloadAsync"/>.
+    /// Records that everything up to <paramref name="version"/> is now in the vault. Edits made
+    /// while the write was in flight have a higher version and stay pending, so a change is never
+    /// marked saved because an earlier one succeeded.
     /// </summary>
-    public bool IsOutOfSync { get; private set; }
+    internal void MarkSynced(long version)
+    {
+        Interlocked.Exchange(ref _syncedVersion, version);
+
+        if (!HasPendingChanges) PendingSince = null;
+
+        PendingChanged?.Invoke();
+    }
 
     /// <summary>
-    /// Discards the in-memory store and re-reads the vault. The escape hatch for the two cases the
-    /// app cannot resolve on its own: a half-applied save, and a secret edited in the password
-    /// manager's own UI, which nothing here can be notified about.
+    /// Discards the in-memory store and re-reads the vault — the escape hatch for a secret edited
+    /// in the password manager's own UI, which nothing here can be notified about.
     ///
-    /// Callers must reload their view models afterwards — this replaces the contents of the
-    /// existing <see cref="ConfigStore"/> lists, so bindings to the store itself survive, but
-    /// bindings to individual records do not.
+    /// Callers must reload their view models afterwards: this replaces the contents of the
+    /// existing lists, so bindings to the store itself survive but bindings to individual records
+    /// do not.
     /// </summary>
     public async Task ReloadAsync(CancellationToken ct = default)
     {
-        await _writeLock.WaitAsync(ct).ConfigureAwait(false);
+        var loaded = await _vault.LoadAsync(ct).ConfigureAwait(false);
+
+        await _lock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var loaded = await _vault.LoadAsync(ct).ConfigureAwait(false);
             RestoreInto(_current, Snapshot(loaded));
-            IsOutOfSync = false;
         }
         finally
         {
-            _writeLock.Release();
+            _lock.Release();
         }
+
+        // Memory now matches the vault exactly, so anything that was pending has been deliberately
+        // thrown away rather than saved.
+        Interlocked.Exchange(ref _syncedVersion, Interlocked.Read(ref _version));
+        PendingSince = null;
+        PendingChanged?.Invoke();
     }
 
     /// <summary>
-    /// Membership of every list plus the settings scalars — which is exactly what callers
-    /// change through <see cref="MutateAsync"/> (add/remove a credential, upstream, route, MCP
-    /// source, or funnel; set a port or key).
-    ///
-    /// Deliberately shallow, and restored *into* the existing instances rather than by swapping
-    /// <see cref="Current"/> for a clone. The view models hold direct references to individual
-    /// <see cref="CredentialRecord"/>/<see cref="RouteMapping"/> objects and to the store
-    /// itself; handing back a fresh object graph would leave every one of those bindings
-    /// pointing at an orphan, so a rollback meant to protect data would quietly detach the UI
-    /// from it. The trade-off: an in-place field edit of a record that was already in the store
-    /// is not undone — that reverts on next load instead, which is visible and recoverable,
-    /// unlike a vanished credential.
+    /// Membership of every list plus the settings scalars, restored <em>into</em> the existing
+    /// instances rather than by swapping <see cref="Current"/> for a clone. The view models hold
+    /// direct references to individual records and to the store itself; handing back a fresh
+    /// object graph would leave every one of those bindings pointing at an orphan.
     /// </summary>
     private sealed record StoreSnapshot(
         List<CredentialRecord> Credentials,
@@ -270,25 +258,6 @@ public sealed class ConfigStoreCache
     {
         target.Clear();
         target.AddRange(source);
-    }
-
-    /// <summary>
-    /// Waits for any in-flight write to finish. Some UI toggles start a save without awaiting
-    /// it (a checkbox setter is synchronous), and shutdown ends in Environment.Exit — which
-    /// would otherwise kill the process mid-write and silently drop the change.
-    /// </summary>
-    public async Task FlushAsync(TimeSpan timeout)
-    {
-        using var cts = new CancellationTokenSource(timeout);
-        try
-        {
-            await _writeLock.WaitAsync(cts.Token).ConfigureAwait(false);
-            _writeLock.Release();
-        }
-        catch (OperationCanceledException)
-        {
-            // A stuck write must not be able to block exit.
-        }
     }
 
     public CredentialRecord? GetCredential(Guid id) =>

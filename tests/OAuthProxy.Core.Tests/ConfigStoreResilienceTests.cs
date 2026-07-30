@@ -5,8 +5,11 @@ using OAuthProxy.Core.Vault;
 namespace OAuthProxy.Core.Tests;
 
 /// <summary>
-/// The store is the only copy of the config — there is no local cache to fall back on — so the
-/// behaviour that matters most is what happens when a save fails. These pin it.
+/// The in-memory store: what it accepts, and what it considers still owing to the vault.
+///
+/// Note what is deliberately absent — there are no rollback tests any more. A mutation no longer
+/// waits for a write, so there is no failed write to undo at the point of the edit; the change is
+/// simply pending until the sync queue lands it. <see cref="Vault.DeferredSyncTests"/> covers that.
 /// </summary>
 public class ConfigStoreResilienceTests
 {
@@ -37,19 +40,17 @@ public class ConfigStoreResilienceTests
         // Never-expiring, so a backfill cannot silently lock someone out on a timer.
         Assert.Null(routeKey.ExpiresUtc);
 
-        // And they must be persisted here rather than only held in memory, or the next launch
-        // would issue different ones.
-        var reloaded = await vault.LoadAsync();
-        Assert.Equal(routeKey.Value, reloaded.Routes[0].Key.Value);
-        Assert.Equal(funnelKey.Value, reloaded.McpFunnels[0].Key.Value);
+        // And they are owed to the vault immediately. Left un-pending they would only ever live in
+        // memory, and the next launch would issue different ones — every configured client
+        // breaking at random.
+        Assert.True(cache.HasPendingChanges);
     }
 
     [Fact]
     public async Task Initialize_KeepsTheSameEndpointKeysAcrossRestarts()
     {
-        // The failure this guards against: a generated-by-default key looks "already set" to
-        // the backfill, so it never reaches the vault and the next launch invents a different
-        // one — every configured client starts getting 403 at random.
+        // The failure this guards against: a generated-by-default key looks "already set" to the
+        // backfill, so it never reaches the vault and the next launch invents a different one.
         var seed = new ConfigStore();
         seed.Routes.Add(new RouteMapping { PathPrefix = "/app/one" });
 
@@ -59,15 +60,20 @@ public class ConfigStoreResilienceTests
 
         var firstRun = new ConfigStoreCache(vault);
         await firstRun.InitializeAsync();
-        var originalKey = firstRun.Current.Routes[0].Key.Value;
+        await vault.SaveAsync(firstRun.Current);
 
+        var originalKey = firstRun.Current.Routes[0].Key.Value;
         Assert.False(string.IsNullOrEmpty(originalKey));
 
         for (var restart = 0; restart < 3; restart++)
         {
             var laterRun = new ConfigStoreCache(vault);
             await laterRun.InitializeAsync();
+
             Assert.Equal(originalKey, laterRun.Current.Routes[0].Key.Value);
+
+            // Nothing to backfill this time, so nothing is owed.
+            Assert.False(laterRun.HasPendingChanges);
         }
     }
 
@@ -135,91 +141,32 @@ public class ConfigStoreResilienceTests
                 ClientSecret = "secret",
             }))));
 
-        var savers = Enumerable.Range(0, 25).Select(_ => Task.Run(() => cache.SaveAsync()));
+        // Snapshots taken concurrently must never observe a half-applied edit either — that is
+        // exactly what the sync queue does on its own thread while the UI keeps writing.
+        var readers = Enumerable.Range(0, 25).Select(_ => Task.Run(() => cache.SnapshotForSyncAsync()));
 
-        await Task.WhenAll(writers.Concat(savers));
+        await Task.WhenAll(writers.Concat<Task>(readers));
 
         Assert.Equal(25, cache.Current.Credentials.Count);
-        var reloaded = await vault.LoadAsync();
-        Assert.Equal(25, reloaded.Credentials.Count);
     }
 
     [Fact]
-    public async Task MutateAsync_WhenTheSaveFailsBeforeWriting_UndoesTheMutation()
+    public async Task ASnapshotIsDetachedFromTheLiveStore()
     {
-        // The original failure: a failed write left the edit applied in memory. The UI showed the
-        // new credential and the proxy routed to it, then it vanished at the next restart —
-        // silent data loss discovered hours later.
-        var cache = new ConfigStoreCache(InMemoryVault.ThatFailsBeforeWriting());
+        // The vault write runs outside the lock against this snapshot, so it has to be a real
+        // copy. Sharing references would let an edit made mid-write be serialized halfway.
+        var cache = new ConfigStoreCache(InMemoryVault.Empty());
+        await cache.InitializeAsync();
 
-        var existing = new CredentialRecord { Name = "keep", ClientId = "id", ClientSecret = "secret" };
-        cache.Current.Credentials.Add(existing);
+        await cache.MutateAsync(store =>
+            store.Credentials.Add(new CredentialRecord { Name = "original", ClientId = "id", ClientSecret = "s" }));
 
-        await Assert.ThrowsAnyAsync<Exception>(() => cache.MutateAsync(store =>
-            store.Credentials.Add(new CredentialRecord { Name = "doomed", ClientId = "id", ClientSecret = "secret" })));
+        var (snapshot, _) = await cache.SnapshotForSyncAsync();
 
-        var survivor = Assert.Single(cache.Current.Credentials);
-        Assert.Equal("keep", survivor.Name);
+        await cache.MutateAsync(store => store.Credentials[0].Name = "renamed");
 
-        // Restored in place rather than by swapping in a clone: the view models hold direct
-        // references to these records, so a fresh object graph would leave every binding
-        // pointing at an orphan.
-        Assert.Same(existing, survivor);
-
-        Assert.False(cache.IsOutOfSync);
-    }
-
-    [Fact]
-    public async Task MutateAsync_WhenTheSaveFailsPartWayThrough_KeepsTheMutationAndReportsOutOfSync()
-    {
-        // The mirror image of the test above, and the reason the two cases cannot share a code
-        // path. Saving the store is several vault items; when some of them are already durable,
-        // reverting memory would make the next successful save delete records that are safely
-        // stored. Memory stays ahead, and the user is told rather than silently corrected.
-        var cache = new ConfigStoreCache(InMemoryVault.ThatFailsHalfway());
-
-        await Assert.ThrowsAsync<VaultSaveException>(() => cache.MutateAsync(store =>
-            store.Credentials.Add(new CredentialRecord { Name = "half-saved", ClientId = "id", ClientSecret = "secret" })));
-
-        var kept = Assert.Single(cache.Current.Credentials);
-        Assert.Equal("half-saved", kept.Name);
-        Assert.True(cache.IsOutOfSync);
-    }
-
-    [Fact]
-    public async Task MutateAsync_WhenTheSaveFails_UndoesSettingsChangesToo()
-    {
-        var cache = new ConfigStoreCache(InMemoryVault.ThatFailsBeforeWriting());
-        var originalPort = cache.Current.Settings.ListenPort;
-
-        await Assert.ThrowsAnyAsync<Exception>(() => cache.MutateAsync(store =>
-        {
-            store.Settings.ListenPort = 9999;
-            store.Settings.McpFunnelEnabled = true;
-        }));
-
-        Assert.Equal(originalPort, cache.Current.Settings.ListenPort);
-        Assert.False(cache.Current.Settings.McpFunnelEnabled);
-    }
-
-    [Fact]
-    public async Task MutateAsync_WhenTheSaveFails_UndoesMcpFunnelChangesToo()
-    {
-        // The rollback snapshot names every list explicitly, so a list added to ConfigStore
-        // without being added there is silently exempt from rollback — exactly the silent
-        // data-loss bug this whole mechanism exists to prevent, reintroduced quietly.
-        var cache = new ConfigStoreCache(InMemoryVault.ThatFailsBeforeWriting());
-
-        await Assert.ThrowsAnyAsync<Exception>(() => cache.MutateAsync(store =>
-        {
-            store.McpSources.Add(new McpSourceRecord { Name = "doomed", Alias = "d", Url = "https://example.com/mcp" });
-            store.McpFunnels.Add(new McpFunnelRecord { Name = "doomed", Slug = "doomed" });
-            store.Settings.McpFunnelEnabled = true;
-        }));
-
-        Assert.Empty(cache.Current.McpSources);
-        Assert.Empty(cache.Current.McpFunnels);
-        Assert.False(cache.Current.Settings.McpFunnelEnabled);
+        Assert.Equal("original", snapshot.Credentials[0].Name);
+        Assert.Equal("renamed", cache.Current.Credentials[0].Name);
     }
 
     [Fact]
@@ -258,6 +205,9 @@ public class ConfigStoreResilienceTests
             });
         });
 
+        var (snapshot, _) = await cache.SnapshotForSyncAsync();
+        await vault.SaveAsync(snapshot);
+
         var reloaded = await vault.LoadAsync();
 
         Assert.True(reloaded.Settings.McpFunnelEnabled);
@@ -274,36 +224,25 @@ public class ConfigStoreResilienceTests
     }
 
     [Fact]
-    public async Task MutateAsync_WhenTheSaveSucceeds_KeepsTheMutation()
+    public async Task ReloadAsync_DiscardsInMemoryStateAndClearsWhatWasOwed()
     {
-        var vault = InMemoryVault.Empty();
-        var cache = new ConfigStoreCache(vault);
-        await cache.InitializeAsync();
-
-        await cache.MutateAsync(store =>
-            store.Credentials.Add(new CredentialRecord { Name = "kept", ClientId = "id", ClientSecret = "secret" }));
-
-        Assert.Single(cache.Current.Credentials);
-        Assert.Single((await vault.LoadAsync()).Credentials);
-    }
-
-    [Fact]
-    public async Task ReloadAsync_DiscardsInMemoryStateAndClearsOutOfSync()
-    {
-        // The escape hatch from a half-applied save, and from a secret edited in the password
-        // manager's own UI — neither of which the app can resolve on its own.
+        // The escape hatch for a secret edited in the password manager's own UI, which nothing
+        // here can be notified about.
         var seed = new ConfigStore();
         seed.Credentials.Add(new CredentialRecord { Name = "in-vault", ClientId = "id", ClientSecret = "secret" });
 
         var cache = new ConfigStoreCache(InMemoryVault.Empty().Seeded(seed));
         await cache.InitializeAsync();
 
-        cache.Current.Credentials.Add(new CredentialRecord { Name = "only-in-memory", ClientId = "id", ClientSecret = "s" });
+        await cache.MutateAsync(store =>
+            store.Credentials.Add(new CredentialRecord { Name = "only-in-memory", ClientId = "id", ClientSecret = "s" }));
 
         await cache.ReloadAsync();
 
         var survivor = Assert.Single(cache.Current.Credentials);
         Assert.Equal("in-vault", survivor.Name);
-        Assert.False(cache.IsOutOfSync);
+
+        // The pending change was thrown away deliberately, so nothing is still owed.
+        Assert.False(cache.HasPendingChanges);
     }
 }

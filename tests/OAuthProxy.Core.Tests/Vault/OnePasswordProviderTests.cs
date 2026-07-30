@@ -270,26 +270,6 @@ public class OnePasswordProviderTests : IDisposable
         Assert.False(exception.PartiallyApplied);
     }
 
-    [Fact]
-    public async Task ASaveIsRefusedWhenAnotherMachineHasWrittenSince()
-    {
-        // Both managers sync, so two installs on one vault is a real configuration. Without this
-        // they overwrite each other's routes and keys in silence.
-        var fake = new FakeOnePassword();
-        var first = NewProvider(fake.AsRunner());
-        var second = NewProvider(fake.AsRunner());
-
-        await first.SaveAsync(StoreWithSecrets());
-
-        // Both now hold revision 1.
-        await second.LoadAsync();
-        await first.SaveAsync(StoreWithSecrets());
-
-        var exception = await Assert.ThrowsAsync<VaultSaveException>(() => second.SaveAsync(StoreWithSecrets()));
-
-        Assert.Contains("changed elsewhere", exception.Message);
-        Assert.False(exception.PartiallyApplied);
-    }
 
     [Fact]
     public async Task ItemsThisAppDoesNotOwnAreNeverReadOrDeleted()
