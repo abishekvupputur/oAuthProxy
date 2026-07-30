@@ -8,21 +8,22 @@ namespace OAuthProxy.Core.Vault;
 /// The store, backed by the Proton Pass CLI (<c>pass-cli</c>).
 ///
 /// Shaped by one constraint the 1Password provider does not have: <c>pass-cli item update</c>
-/// takes its values as <c>--field NAME=VALUE</c> arguments, and there is no documented way to feed
-/// it a secret any other way. A Windows process command line is readable by any process in the
-/// session, so using it would publish every client secret and token this app touches.
+/// takes its values as <c>--field name=value</c> arguments and offers no other way in. A Windows
+/// process command line is readable by any process in the session, so using it would publish every
+/// client secret and token this app touches.
 ///
-/// <c>pass-cli item create</c> does accept a template on stdin (<c>--from-template -</c>). So this
-/// provider never updates: a changed record is written as a new item, the note is rewritten to
-/// point at it, and only then is the old item deleted. The ordering is what keeps the invariant —
-/// the note never references an item that does not exist. The cost is that Proton Pass item
-/// history for these entries is a chain of separate items rather than revisions of one, which is
-/// a fair price for not putting secrets in the process table.
+/// <c>item create</c> does accept a template on stdin (<c>--from-template -</c>), so this provider
+/// never updates. A changed record is written as a new item, the note is rewritten to point at it,
+/// and only then is the old item deleted. That ordering keeps the invariant — the note never
+/// references an item that is gone. The cost is that Proton Pass history for these entries is a
+/// chain of items rather than revisions of one, which is a fair price for keeping secrets off the
+/// command line.
 ///
-/// **Unverified surface.** The template JSON shape below is inferred from the documented flags;
-/// the CLI's own <c>--get-template</c> is the authority. Every place that depends on it is marked,
-/// and a mismatch fails loudly with a message naming that flag rather than silently writing
-/// items nothing can read back.
+/// The wire shapes below were taken from a real pass-cli 2.2.3 (<c>--get-template</c> for writes,
+/// observed output for reads), not inferred. Two of them are asymmetric and easy to get wrong:
+/// a template writes <c>field_name</c>/<c>field_type</c>/<c>value</c> while a read returns
+/// <c>name</c> plus a <c>{"Text"|"Hidden": value}</c> wrapper, and <c>--show-secrets</c> moves the
+/// title from the top level down into <c>content.title</c>.
 /// </summary>
 /// <param name="exePathOverride">
 /// Skips the search for the binary. For tests, which must not depend on whether the real CLI
@@ -34,12 +35,8 @@ public sealed class ProtonPassVaultProvider(
     ActivityLog activityLog,
     string? exePathOverride = null) : IConfigVault
 {
-    /// <summary>
-    /// What Proton Pass substitutes for a secret it declines to print. If this comes back instead
-    /// of a value, the read has silently failed and treating it as the secret would write the
-    /// literal placeholder into the app's config.
-    /// </summary>
-    private const string ConcealedPlaceholder = "<concealed by Proton Pass>";
+    /// <summary>Section every custom field goes in, so the Proton Pass UI groups them together.</summary>
+    private const string SectionName = "OAuthProxy";
 
     private string? _exePath;
     private string? _shareId;
@@ -109,7 +106,7 @@ public sealed class ProtonPassVaultProvider(
                 partiallyApplied: false);
         }
 
-        // `vault create` output is not reliably a share id, so re-probe rather than parse it.
+        // `vault create` does not report the share id, so re-list rather than parse its output.
         var listed = await RunAsync(["vault", "list", "--output", "json"], ct: ct);
         _shareId = listed.Succeeded ? FindShareId(listed.StdOut) : null;
 
@@ -127,20 +124,25 @@ public sealed class ProtonPassVaultProvider(
 
         await RequireVaultAsync(ct);
 
-        var items = await ListOwnedItemsAsync(ct);
+        // One call for the whole vault, secrets included. `item list --show-secrets` returns full
+        // contents, so there is no reason to fetch items one at a time — which on a store with a
+        // dozen credentials would be a dozen extra subprocess launches on the startup path.
+        var items = await ListAsync(withSecrets: true, ct);
 
-        var noteSummary = items.FirstOrDefault(i => i.Title == VaultItemNaming.ConfigTitle);
-        if (noteSummary is null)
+        var note = items.FirstOrDefault(i => i.Title == VaultItemNaming.ConfigTitle);
+        if (note is null)
         {
             _loadedRevision = 0;
             return new ConfigStore();
         }
 
-        var noteItem = await GetItemAsync(noteSummary.ItemId, ct);
-        var document = VaultDocument.TryParse(noteItem?.Field(VaultFields.NoteContent) ?? "");
+        var document = VaultDocument.TryParse(note.Contents.Field(VaultFields.NoteContent) ?? "");
 
         if (document is null)
         {
+            // The note is free text the user can open and edit in Proton Pass, so a broken one is
+            // a mistake rather than corruption. Coming up empty is recoverable; refusing to start
+            // is not, and the old configuration is still in the vault to be repaired.
             LastLoadWarning = $"The '{VaultItemNaming.ConfigTitle}' item could not be read as configuration, "
                               + "so OAuthProxy started with nothing. The item has not been changed.";
             _loadedRevision = 0;
@@ -155,9 +157,8 @@ public sealed class ProtonPassVaultProvider(
 
         _loadedRevision = document.Revision;
 
-        var secrets = await ResolveSecretsAsync(document.Index, items, ct);
         var warnings = new List<string>();
-        var store = VaultMapper.ComposeStore(document, secrets, warnings);
+        var store = VaultMapper.ComposeStore(document, ResolveSecrets(document.Index, items), warnings);
 
         if (warnings.Count > 0)
         {
@@ -171,10 +172,10 @@ public sealed class ProtonPassVaultProvider(
     {
         await RequireVaultAsync(ct);
 
-        var items = await ListOwnedItemsAsync(ct);
-        var noteSummary = items.FirstOrDefault(i => i.Title == VaultItemNaming.ConfigTitle);
+        var existing = await ListAsync(withSecrets: true, ct);
+        var previousNote = existing.FirstOrDefault(i => i.Title == VaultItemNaming.ConfigTitle);
 
-        var previousIndex = await ReadIndexAsync(noteSummary, ct);
+        var previousIndex = ReadIndexAndGuardRevision(previousNote);
         var index = new VaultIndex();
 
         var written = 0;
@@ -184,14 +185,14 @@ public sealed class ProtonPassVaultProvider(
         {
             ct.ThrowIfCancellationRequested();
 
-            var existingId = item.Spec.ItemId ?? FindByRecord(items, item.Role, item.RecordId);
+            var current = FindCurrent(existing, item, previousIndex);
 
-            // Unchanged items are left exactly as they are. Without this every save would rewrite
-            // every secret, which on this backend means deleting and recreating them — turning a
-            // port change into a full churn of the user's vault.
-            if (existingId is not null && await IsUnchangedAsync(existingId, item, ct))
+            // Unchanged records are left alone. On this backend a rewrite means deleting and
+            // recreating the user's vault entry, so saving a store whose secrets have not moved
+            // must not churn it — a port change would otherwise replace every credential item.
+            if (current is not null && IsUnchanged(current, item))
             {
-                index.For(item.Role)[item.RecordId] = existingId;
+                index.For(item.Role)[item.RecordId] = current.ItemId;
                 continue;
             }
 
@@ -209,18 +210,16 @@ public sealed class ProtonPassVaultProvider(
             }
         }
 
-        // The note goes after every secret item and before any deletion, so at no point does it
-        // reference something that is gone. A crash before it leaves unreferenced new items; a
-        // crash after leaves superseded old ones. Both are swept by the next save.
+        // After every secret item and before any deletion, so at no point does the note reference
+        // something that is gone. A crash before it leaves unreferenced new items; a crash after
+        // leaves superseded old ones. The next save sweeps both.
         try
         {
-            var note = VaultMapper.BuildConfigNote(store, index, _loadedRevision + 1);
-            var newNoteId = await CreateItemAsync(note, ct);
+            var noteSpec = VaultMapper.BuildConfigNote(store, index, _loadedRevision + 1);
+            await CreateItemAsync(noteSpec, ct);
             _loadedRevision++;
 
-            if (noteSummary is not null) await DeleteItemAsync(noteSummary.ItemId, noteSummary.Title, ct);
-
-            activityLog.Log($"VAULT configuration saved to Proton Pass (item {newNoteId})");
+            if (previousNote is not null) await DeleteItemAsync(previousNote.ItemId, previousNote.Title, ct);
         }
         catch (Exception ex) when (ex is VaultCliException or VaultSaveException)
         {
@@ -230,20 +229,21 @@ public sealed class ProtonPassVaultProvider(
                 ex);
         }
 
-        await ReconcileAsync(items, index, ct);
+        await ReconcileAsync(existing, index, ct);
     }
 
     // ---- CLI calls ------------------------------------------------------------------------------
 
     /// <summary>
-    /// Creates an item from a template on stdin — the only documented write path that does not put
-    /// the value in an argument.
+    /// Creates an item from a template on stdin — the only write path that keeps the value out of
+    /// an argument. Returns the new item id, which the CLI prints bare rather than as JSON.
     /// </summary>
     private async Task<string> CreateItemAsync(VaultItemSpec spec, CancellationToken ct)
     {
+        var type = TypeName(spec.Category);
+
         var result = await RunAsync(
-            ["item", "create", TypeName(spec.Category), "--share-id", _shareId!, "--from-template", "-",
-             "--output", "json"],
+            ["item", "create", type, "--share-id", _shareId!, "--from-template", "-"],
             stdin: BuildTemplate(spec).ToJsonString(),
             timeout: CliRunner.WriteTimeout,
             ct: ct);
@@ -252,19 +252,25 @@ public sealed class ProtonPassVaultProvider(
         {
             throw new VaultSaveException(
                 $"{result.FirstErrorLine()} (if this mentions the template format, compare it with "
-                + $"`pass-cli item create {TypeName(spec.Category)} --get-template`)",
+                + $"`pass-cli item create {type} --get-template`)",
                 partiallyApplied: false);
         }
 
-        return ReadString(JsonNode.Parse(result.StdOut), "itemId")
-               ?? ReadString(JsonNode.Parse(result.StdOut), "id")
-               ?? throw new VaultSaveException(
-                   "Proton Pass created the item but did not report its id.", partiallyApplied: false);
+        var itemId = result.StdOut.Trim();
+
+        return itemId.Length > 0
+            ? itemId
+            : throw new VaultSaveException(
+                "Proton Pass created the item but did not report its id.", partiallyApplied: false);
     }
 
-    private async Task<List<VaultItemSummary>> ListOwnedItemsAsync(CancellationToken ct)
+    private async Task<List<ProtonItem>> ListAsync(bool withSecrets, CancellationToken ct)
     {
-        var result = await RunAsync(["item", "list", "--share-id", _shareId!, "--output", "json"], ct: ct);
+        string[] args = withSecrets
+            ? ["item", "list", "--share-id", _shareId!, "--output", "json", "--show-secrets"]
+            : ["item", "list", "--share-id", _shareId!, "--output", "json"];
+
+        var result = await RunAsync(args, ct: ct);
 
         if (!result.Succeeded)
         {
@@ -272,76 +278,98 @@ public sealed class ProtonPassVaultProvider(
                 $"Could not list the '{VaultConstants.VaultName}' vault: {result.FirstErrorLine()}");
         }
 
-        var items = new List<VaultItemSummary>();
-
-        foreach (var node in JsonNode.Parse(result.StdOut) as JsonArray ?? [])
-        {
-            var id = ReadString(node, "itemId") ?? ReadString(node, "id");
-            var title = ReadString(node, "title") ?? ReadString(node, "name");
-
-            // Only items this app owns. The rest of the vault is the user's and is never read,
-            // never written, and never a candidate for deletion.
-            if (id is not null && title is not null && VaultItemNaming.IsOwned(title))
-            {
-                items.Add(new VaultItemSummary(id, title));
-            }
-        }
-
-        return items;
-    }
-
-    private async Task<VaultItemContents?> GetItemAsync(string itemId, CancellationToken ct)
-    {
-        var result = await RunAsync(
-            ["item", "view", "--share-id", _shareId!, "--item-id", itemId, "--output", "json"], ct: ct);
-
-        // A miss is normal: listing and fetching are separate calls, and an item can be removed
-        // between them by the user or by another machine.
-        if (!result.Succeeded) return null;
-
-        if (JsonNode.Parse(result.StdOut) is not JsonObject node) return null;
-
-        var fields = new Dictionary<string, string>(StringComparer.Ordinal);
+        var items = new List<ProtonItem>();
         var concealed = 0;
 
-        void Record(string name, string? value)
+        foreach (var node in JsonNode.Parse(result.StdOut)?["items"] as JsonArray ?? [])
         {
-            if (value is null) return;
-
-            if (value == ConcealedPlaceholder)
+            if (ParseItem(node, ref concealed) is { } item && VaultItemNaming.IsOwned(item.Title))
             {
-                // Storing the placeholder would put the literal string "<concealed by Proton
-                // Pass>" into the app's config as if it were the secret, and every request using
-                // it would fail against the upstream with nothing to explain why.
-                concealed++;
-                return;
-            }
-
-            fields[name] = value;
-        }
-
-        // Built-in slots first, then anything under a fields/customFields collection.
-        Record(VaultFields.Username, ReadString(node, "username"));
-        Record(VaultFields.Password, ReadString(node, "password"));
-        Record(VaultFields.Website, (node["urls"] as JsonArray)?.FirstOrDefault()?.GetValue<string>());
-        Record(VaultFields.NoteContent, ReadString(node, "content") ?? ReadString(node, "note"));
-
-        foreach (var field in (node["fields"] as JsonArray) ?? (node["customFields"] as JsonArray) ?? [])
-        {
-            if (ReadString(field, "name") is { Length: > 0 } name)
-            {
-                Record(name, ReadString(field, "value"));
+                // Only items this app owns. The rest of the vault is the user's and is never read,
+                // never written, and never a candidate for deletion.
+                items.Add(item);
             }
         }
 
         if (concealed > 0)
         {
-            LastLoadWarning = "Proton Pass returned masked values rather than the stored secrets. "
-                              + "OAuthProxy cannot use a masked value; check whether this pass-cli "
-                              + "version needs a flag to reveal secrets in JSON output.";
+            // Storing the placeholder would put the literal string into the app's config as if it
+            // were the secret, and every request using it would fail against the upstream with
+            // nothing to explain why.
+            LastLoadWarning = "Proton Pass returned masked values rather than the stored secrets, "
+                              + "so some credentials loaded without them.";
         }
 
-        return new VaultItemContents(itemId, ReadString(node, "title") ?? "", fields);
+        return items;
+    }
+
+    /// <summary>
+    /// One item from <c>item list --output json</c>, with or without <c>--show-secrets</c>. The
+    /// two shapes differ: without secrets the title is top level and there is no content; with
+    /// them the title moves into <c>content.title</c> and the payload hangs off a type-tagged
+    /// wrapper.
+    /// </summary>
+    private static ProtonItem? ParseItem(JsonNode? node, ref int concealed)
+    {
+        var itemId = ReadString(node, "id");
+        if (itemId is null) return null;
+
+        var fields = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        if (node?["content"] is not JsonObject content)
+        {
+            return ReadString(node, "title") is { } listedTitle
+                ? new ProtonItem(itemId, listedTitle, new VaultItemContents(itemId, listedTitle, fields))
+                : null;
+        }
+
+        var title = ReadString(content, "title") ?? "";
+
+        // The note slot carries the config document for a note item, and a human-readable caption
+        // for everything else. Both land here; only the config note is ever read back.
+        if (ReadString(content, "note") is { Length: > 0 } note) fields[VaultFields.NoteContent] = note;
+
+        var payload = content["content"];
+
+        if (payload?["Login"] is JsonObject login)
+        {
+            Record(fields, VaultFields.Username, ReadString(login, "username"), ref concealed);
+            Record(fields, VaultFields.Password, ReadString(login, "password"), ref concealed);
+            Record(fields, VaultFields.Website, (login["urls"] as JsonArray)?.FirstOrDefault()?.GetValue<string>(),
+                ref concealed);
+        }
+        else if (payload?["Custom"] is JsonObject custom)
+        {
+            foreach (var section in custom["sections"] as JsonArray ?? [])
+            {
+                foreach (var field in section?["section_fields"] as JsonArray ?? [])
+                {
+                    var name = ReadString(field, "name");
+                    if (name is null) continue;
+
+                    // Reads wrap the value in its type — {"Text": "..."} or {"Hidden": "..."} —
+                    // while writes use a flat field_type/value pair. Neither side is wrong; they
+                    // just are not the same shape.
+                    var wrapper = field?["content"];
+                    Record(fields, name, ReadString(wrapper, "Text") ?? ReadString(wrapper, "Hidden"), ref concealed);
+                }
+            }
+        }
+
+        return new ProtonItem(itemId, title, new VaultItemContents(itemId, title, fields));
+    }
+
+    private static void Record(Dictionary<string, string> fields, string name, string? value, ref int concealed)
+    {
+        if (string.IsNullOrEmpty(value)) return;
+
+        if (value.Contains("concealed by Proton Pass", StringComparison.OrdinalIgnoreCase))
+        {
+            concealed++;
+            return;
+        }
+
+        fields[name] = value;
     }
 
     private async Task DeleteItemAsync(string itemId, string title, CancellationToken ct)
@@ -360,10 +388,10 @@ public sealed class ProtonPassVaultProvider(
     }
 
     /// <summary>
-    /// Deletes every owned item that is not the one the note now points at: records that are gone,
-    /// and the superseded predecessors of records that were rewritten.
+    /// Deletes every owned item the note no longer points at: records that are gone, and the
+    /// superseded predecessors of records that were rewritten.
     /// </summary>
-    private async Task ReconcileAsync(List<VaultItemSummary> before, VaultIndex index, CancellationToken ct)
+    private async Task ReconcileAsync(List<ProtonItem> before, VaultIndex index, CancellationToken ct)
     {
         var keep = index.Credentials.Values
             .Concat(index.RouteKeys.Values)
@@ -374,122 +402,141 @@ public sealed class ProtonPassVaultProvider(
         {
             if (!VaultItemNaming.TryParse(item.Title, out var role, out _)) continue;
 
-            // The old config note is deleted by SaveAsync itself, once its replacement exists.
+            // The previous config note is deleted by SaveAsync itself, once its replacement exists.
             if (role == VaultItemRole.Config || keep.Contains(item.ItemId)) continue;
 
             await DeleteItemAsync(item.ItemId, item.Title, ct);
         }
     }
 
-    /// <summary>
-    /// Whether the stored item already carries exactly what would be written. Compares values
-    /// rather than a stored fingerprint, because on this backend a needless rewrite costs the user
-    /// a deleted and recreated vault entry — and one extra read is cheaper than that.
-    ///
-    /// The caption is excluded on both sides. It is decoration written for whoever browses the
-    /// vault, and a proxy key's includes its remaining lifetime, so comparing it would make every
-    /// expiring key look changed on every save and churn the user's vault for nothing.
-    /// </summary>
-    private async Task<bool> IsUnchangedAsync(string itemId, VaultSecretItem item, CancellationToken ct)
-    {
-        var existing = await GetItemAsync(itemId, ct);
-        if (existing is null || existing.Title != item.Spec.Title) return false;
-
-        var expected = item.Spec.Fields.Where(f => f.Name != VaultFields.NoteContent).ToList();
-
-        foreach (var field in expected)
-        {
-            if (existing.Field(field.Name) != field.Value) return false;
-        }
-
-        // A field in the vault that is not being written means something was removed — a
-        // disconnected credential's token — which is a change that has to be applied.
-        var stored = existing.Fields.Keys.Where(name => name != VaultFields.NoteContent);
-
-        return !stored.Except(expected.Select(f => f.Name)).Any();
-    }
-
-    // ---- Templates and parsing ------------------------------------------------------------------
+    // ---- Templates and lookups --------------------------------------------------------------------
 
     /// <summary>
-    /// The item as a create template.
+    /// The item as a create template, in the shape <c>--get-template</c> reports for its type.
     ///
-    /// **This is the shape that needs verifying against <c>pass-cli item create &lt;type&gt;
-    /// --get-template</c>.** Everything else in this provider is built on documented flags; this
-    /// is inferred. It is one method on purpose, so correcting it is a local change.
+    /// The type choice is forced by what each template can carry. A login has no custom fields at
+    /// all, so a credential — which needs a client id, a secret, an API key, two tokens and their
+    /// timestamps — has to be a custom item. A proxy key is a single secret, so it stays a login,
+    /// where Proton Pass gives it the usual conceal-and-copy treatment.
     /// </summary>
     private JsonNode BuildTemplate(VaultItemSpec spec)
     {
-        var template = new JsonObject
+        var template = new JsonObject { ["title"] = spec.Title };
+
+        switch (spec.Category)
         {
-            ["title"] = spec.Title,
-            ["type"] = TypeName(spec.Category),
-        };
+            case VaultItemCategory.SecureNote:
+                template["note"] = spec.Field(VaultFields.NoteContent) ?? "";
+                return template;
 
-        var custom = new JsonArray();
+            case VaultItemCategory.Password:
+                // The login template has no note field, so the caption is dropped here rather
+                // than smuggled somewhere it would be read back as data.
+                template["username"] = "";
+                template["password"] = spec.Field(VaultFields.Password) ?? "";
+                return template;
 
-        foreach (var field in spec.Fields)
-        {
-            switch (field.Name)
-            {
-                case VaultFields.Username:
-                    template["username"] = field.Value;
-                    break;
+            default:
+                var fields = new JsonArray();
 
-                case VaultFields.Password:
-                    template["password"] = field.Value;
-                    break;
-
-                case VaultFields.Website:
-                    template["urls"] = new JsonArray { field.Value };
-                    break;
-
-                case VaultFields.NoteContent:
-                    // A note item carries its body here; a login item uses the same slot for the
-                    // free-text note beneath it.
-                    template["content"] = field.Value;
-                    template["note"] = field.Value;
-                    break;
-
-                default:
-                    custom.Add(new JsonObject
+                foreach (var field in spec.Fields)
+                {
+                    fields.Add(new JsonObject
                     {
-                        ["name"] = field.Name,
+                        ["field_name"] = field.Name,
+                        ["field_type"] = field.Concealed ? "hidden" : "text",
                         ["value"] = field.Value,
-                        ["hidden"] = field.Concealed,
                     });
-                    break;
-            }
+                }
+
+                template["note"] = spec.Caption ?? "";
+                template["sections"] = new JsonArray
+                {
+                    new JsonObject { ["section_name"] = SectionName, ["fields"] = fields },
+                };
+
+                return template;
         }
-
-        if (custom.Count > 0) template["fields"] = custom;
-
-        if (spec.Caption is { Length: > 0 } caption && template["note"] is null)
-        {
-            template["note"] = caption;
-        }
-
-        return template;
     }
 
     private static string TypeName(VaultItemCategory category) => category switch
     {
         VaultItemCategory.SecureNote => "note",
-        VaultItemCategory.Login => "login",
-
-        // Proton Pass has no bare-password type; a login with no username is the closest thing,
-        // and keeps the value in the slot the UI conceals and offers to copy.
         VaultItemCategory.Password => "login",
-        _ => "note",
+        _ => "custom",
     };
 
-    private async Task<VaultIndex> ReadIndexAsync(VaultItemSummary? noteSummary, CancellationToken ct)
+    /// <summary>
+    /// Whether the stored item already carries what would be written.
+    ///
+    /// Compared against <see cref="WritableFields"/> rather than the whole spec, because not every
+    /// template can hold every field: a login has nowhere to put a record id, so a proxy key's is
+    /// dropped on the way in and absent on the way out. Comparing it would make every proxy key
+    /// look changed on every save and churn the user's vault forever.
+    ///
+    /// The caption is excluded for the same reason it is written but never read: it is decoration,
+    /// and a proxy key's includes its remaining lifetime.
+    /// </summary>
+    private static bool IsUnchanged(ProtonItem current, VaultSecretItem item)
     {
-        if (noteSummary is null) return new VaultIndex();
+        if (current.Title != item.Spec.Title) return false;
 
-        var note = await GetItemAsync(noteSummary.ItemId, ct);
-        var document = VaultDocument.TryParse(note?.Field(VaultFields.NoteContent) ?? "");
+        var expected = WritableFields(item.Spec)
+            .Where(f => f.Value.Length > 0)
+            .ToList();
 
+        foreach (var field in expected)
+        {
+            if (current.Contents.Field(field.Name) != field.Value) return false;
+        }
+
+        // A field in the vault that is not being written means something was removed — a
+        // disconnected credential's token — which is a change that has to be applied.
+        var stored = current.Contents.Fields
+            .Where(f => f.Key != VaultFields.NoteContent && f.Value.Length > 0)
+            .Select(f => f.Key);
+
+        return !stored.Except(expected.Select(f => f.Name)).Any();
+    }
+
+    /// <summary>
+    /// The fields <see cref="BuildTemplate"/> will actually store for this item's type. Kept
+    /// beside it, because the two drifting apart is what makes an item rewrite itself on every
+    /// save with nothing visibly wrong.
+    /// </summary>
+    private static IEnumerable<VaultItemField> WritableFields(VaultItemSpec spec) => spec.Category switch
+    {
+        VaultItemCategory.SecureNote => spec.Fields.Where(f => f.Name == VaultFields.NoteContent),
+        VaultItemCategory.Password => spec.Fields.Where(f => f.Name == VaultFields.Password),
+        _ => spec.Fields.Where(f => f.Name != VaultFields.NoteContent),
+    };
+
+    private static ProtonItem? FindCurrent(List<ProtonItem> existing, VaultSecretItem item, VaultIndex index)
+    {
+        if (index.Find(item.Role, item.RecordId) is { } indexed
+            && existing.FirstOrDefault(i => i.ItemId == indexed) is { } byIndex)
+        {
+            return byIndex;
+        }
+
+        // The index is only a cache. An item recreated by hand has an id the note has never seen,
+        // and without this fallback the save would add a second item claiming the same record.
+        return existing.FirstOrDefault(i =>
+            VaultItemNaming.TryParse(i.Title, out var role, out var id)
+            && role == item.Role && id == item.RecordId);
+    }
+
+    /// <summary>
+    /// The index from the note that is about to be replaced, and the point at which a concurrent
+    /// write is caught. Both managers sync, so two installs pointed at one vault is a real
+    /// configuration — and without this they would overwrite each other's routes and keys in
+    /// silence, a failure mode the single local file never had.
+    /// </summary>
+    private VaultIndex ReadIndexAndGuardRevision(ProtonItem? note)
+    {
+        if (note is null) return new VaultIndex();
+
+        var document = VaultDocument.TryParse(note.Contents.Field(VaultFields.NoteContent) ?? "");
         if (document is null) return new VaultIndex();
 
         if (document.Revision != _loadedRevision)
@@ -504,51 +551,39 @@ public sealed class ProtonPassVaultProvider(
         return document.Index;
     }
 
-    private async Task<Dictionary<(VaultItemRole, Guid), VaultItemContents>> ResolveSecretsAsync(
-        VaultIndex index, List<VaultItemSummary> items, CancellationToken ct)
+    private static Dictionary<(VaultItemRole, Guid), VaultItemContents> ResolveSecrets(
+        VaultIndex index, List<ProtonItem> items)
     {
-        var wanted = new Dictionary<(VaultItemRole, Guid), string>();
+        var byId = items.ToDictionary(i => i.ItemId, i => i.Contents, StringComparer.Ordinal);
+        var resolved = new Dictionary<(VaultItemRole, Guid), VaultItemContents>();
 
         foreach (var role in new[] { VaultItemRole.Credential, VaultItemRole.RouteKey, VaultItemRole.FunnelKey })
         {
-            foreach (var (recordId, itemId) in index.For(role)) wanted[(role, recordId)] = itemId;
+            foreach (var (recordId, itemId) in index.For(role))
+            {
+                if (byId.TryGetValue(itemId, out var contents)) resolved[(role, recordId)] = contents;
+            }
         }
 
-        // The index is only a cache. Anything it missed is recovered from the guid in the title.
+        // Anything the index missed, recovered from the guid in the title.
         foreach (var item in items)
         {
             if (!VaultItemNaming.TryParse(item.Title, out var role, out var id)) continue;
             if (role == VaultItemRole.Config) continue;
 
-            wanted.TryAdd((role, id), item.ItemId);
-        }
-
-        var resolved = new Dictionary<(VaultItemRole, Guid), VaultItemContents>();
-
-        foreach (var ((role, id), itemId) in wanted)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            if (await GetItemAsync(itemId, ct) is { } contents) resolved[(role, id)] = contents;
+            resolved.TryAdd((role, id), item.Contents);
         }
 
         return resolved;
     }
 
-    private static string? FindByRecord(List<VaultItemSummary> items, VaultItemRole role, Guid recordId) =>
-        items.FirstOrDefault(i =>
-            VaultItemNaming.TryParse(i.Title, out var itemRole, out var id)
-            && itemRole == role && id == recordId)?.ItemId;
-
     private static string? FindShareId(string vaultListJson)
     {
-        foreach (var node in JsonNode.Parse(vaultListJson) as JsonArray ?? [])
+        foreach (var node in JsonNode.Parse(vaultListJson)?["vaults"] as JsonArray ?? [])
         {
-            var name = ReadString(node, "name") ?? ReadString(node, "vaultName");
-
-            if (string.Equals(name, VaultConstants.VaultName, StringComparison.Ordinal))
+            if (string.Equals(ReadString(node, "name"), VaultConstants.VaultName, StringComparison.Ordinal))
             {
-                return ReadString(node, "shareId") ?? ReadString(node, "id");
+                return ReadString(node, "share_id");
             }
         }
 
@@ -596,4 +631,7 @@ public sealed class ProtonPassVaultProvider(
             _exePath ?? throw new VaultCliException("The Proton Pass CLI has not been located yet."),
             args, stdin, env, timeout, ct);
     }
+
+    /// <summary>An item as this provider needs it: its id, its title, and its fields flattened.</summary>
+    private sealed record ProtonItem(string ItemId, string Title, VaultItemContents Contents);
 }
