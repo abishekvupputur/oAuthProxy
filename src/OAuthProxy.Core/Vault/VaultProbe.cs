@@ -39,6 +39,8 @@ public static partial class VaultProbe
         ProtonPassPathVariable,
         "pass-cli.exe",
         [
+            // Where the Proton Pass installer actually puts it.
+            Path.Combine(Env("LOCALAPPDATA"), "Programs", "ProtonPass", "pass-cli.exe"),
             Path.Combine(Env("LOCALAPPDATA"), "Microsoft", "WinGet", "Links", "pass-cli.exe"),
             Path.Combine(Env("ProgramFiles"), "Proton", "Pass CLI", "pass-cli.exe"),
             Path.Combine(Env("USERPROFILE"), ".cargo", "bin", "pass-cli.exe"),
@@ -48,9 +50,9 @@ public static partial class VaultProbe
     /// Env override, then PATH, then the places installers actually use.
     /// </summary>
     /// <param name="pathValue">
-    /// The PATH to search, defaulting to this process's. A parameter so tests can point it at a
-    /// directory of stubs without mutating the real one — which the rest of the suite, and the
-    /// .NET runtime underneath it, are entitled to rely on.
+    /// The PATH to search, defaulting to this process's plus the User and Machine ones. A
+    /// parameter so tests can point it at a directory of stubs without mutating the real one —
+    /// which the rest of the suite, and the .NET runtime underneath it, are entitled to rely on.
     /// </param>
     public static string? Find(
         string environmentVariable,
@@ -65,10 +67,7 @@ public static partial class VaultProbe
             return File.Exists(overridden) ? overridden : null;
         }
 
-        var searchPath = pathValue ?? Environment.GetEnvironmentVariable("PATH") ?? "";
-
-        foreach (var directory in searchPath
-                 .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        foreach (var directory in SearchDirectories(pathValue))
         {
             string candidate;
             try
@@ -87,6 +86,58 @@ public static partial class VaultProbe
 
         return wellKnownPaths.FirstOrDefault(File.Exists);
     }
+
+    /// <summary>
+    /// Every directory worth looking in, in order.
+    ///
+    /// The process PATH alone is not enough, and getting this wrong produces the worst possible
+    /// version of the setup page. Installing a CLI updates the User PATH, but a process that was
+    /// already running — Explorer, and so everything launched from it — keeps the PATH it started
+    /// with. So the app says "not installed" about a binary that is plainly installed, and
+    /// "Check again" cannot fix it because the stale PATH outlives the check. Reading the User and
+    /// Machine values directly is what makes that button work without a sign-out.
+    /// </summary>
+    private static IEnumerable<string> SearchDirectories(string? pathValue)
+    {
+        if (pathValue is not null)
+        {
+            foreach (var directory in Split(pathValue)) yield return directory;
+            yield break;
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var source in new[]
+                 {
+                     Environment.GetEnvironmentVariable("PATH"),
+                     ReadPath(EnvironmentVariableTarget.User),
+                     ReadPath(EnvironmentVariableTarget.Machine),
+                 })
+        {
+            foreach (var directory in Split(source))
+            {
+                if (seen.Add(directory)) yield return directory;
+            }
+        }
+    }
+
+    private static string? ReadPath(EnvironmentVariableTarget target)
+    {
+        try
+        {
+            return OperatingSystem.IsWindows() ? Environment.GetEnvironmentVariable("PATH", target) : null;
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException)
+        {
+            // Reading the Machine value touches the registry, which a locked-down profile can
+            // refuse. The process PATH is still there to fall back on.
+            return null;
+        }
+    }
+
+    private static string[] Split(string? value) =>
+        (value ?? "").Split(Path.PathSeparator,
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     /// <summary>
     /// Pulls a version out of whatever the CLI prints for --version. Both print a bare semver

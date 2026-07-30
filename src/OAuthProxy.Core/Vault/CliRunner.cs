@@ -48,6 +48,12 @@ public sealed class CliRunner(ActivityLog activityLog) : ICliRunner
             RedirectStandardError = true,
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
+
+            // UTF8Encoding(false) rather than Encoding.UTF8, which emits a byte-order mark. These
+            // CLIs read a JSON template from stdin, and a BOM ahead of the opening brace is not
+            // valid JSON — pass-cli rejects it with "expected value at line 1 column 1", which
+            // reads like a bug in the template rather than three invisible bytes in front of it.
+            StandardInputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
         };
 
         // ArgumentList, not a joined Arguments string: .NET applies the exact quoting rules the
