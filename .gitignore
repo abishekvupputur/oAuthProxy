@@ -30,8 +30,9 @@ packages/
 *.log
 
 # Local secrets / state.
-# The real credential store is DPAPI-encrypted at %AppData%\OAuthProxy\store.dat and is
-# never inside the repo, but this guards against a copy ever being dropped here.
+# Configuration now lives in the user's password manager, not on disk, so there is no store file
+# to leak. Kept anyway: it still catches a pre-2.0 store.dat copied in for reference, and any
+# other stray blob someone drops here.
 *.dat
 local.settings.json
 
