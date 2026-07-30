@@ -2,59 +2,52 @@ using OAuthProxy.Core.Diagnostics;
 using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Proxy;
 using OAuthProxy.Core.Storage;
+using OAuthProxy.Core.Vault;
 using Yarp.ReverseProxy.Configuration;
 
 namespace OAuthProxy.Core.Tests;
 
 /// <summary>
-/// Two things used to happen at startup with nothing said about either: an unreadable store
-/// took every credential, route, and upstream with it (and issued a new API key, so every
-/// configured client started getting 403), and a plain-http endpoint stored by an older build
-/// kept putting tokens and client secrets on the wire in cleartext.
+/// Two things can go wrong at startup with nothing said about either: the vault hands back a
+/// store that is missing secrets, and a plain-http endpoint keeps putting tokens and client
+/// secrets on the wire in cleartext. Both are silent failures without these.
 /// </summary>
 public class StartupDiagnosticsTests : IDisposable
 {
-    private readonly string _storePath = Path.Combine(Path.GetTempPath(), $"oauthproxy-test-{Guid.NewGuid()}.dat");
     private readonly string _logPath = Path.Combine(Path.GetTempPath(), $"oauthproxy-test-logs-{Guid.NewGuid()}");
 
     [Fact]
-    public async Task Startup_AfterAStoreIsQuarantined_SaysSoInTheActivityLog()
+    public async Task Startup_WhenTheVaultReportsAnIncompleteLoad_SaysSoInTheActivityLog()
     {
-        // Not DPAPI-protected, so Unprotect throws - the shape of a profile copied from another
-        // machine, or a file truncated by a hard power loss.
-        await File.WriteAllBytesAsync(_storePath, [0x00, 0x01, 0x02, 0x03, 0x04]);
+        // A credential whose secret item is gone loads looking perfectly healthy and then fails
+        // against the upstream hours later. The load warning is the only chance to say so.
+        const string Warning = "1 credential loaded without its client secret";
 
-        var (activityLog, secureStore) = await RunStartupAsync();
+        var activityLog = await RunStartupAsync(InMemoryVault.Empty().WithLoadWarning(Warning));
 
-        Assert.NotNull(secureStore.QuarantinedFilePath);
-
-        var lines = activityLog.GetRecent(100);
-        Assert.Contains(lines, line => line.Contains("could not be read and was renamed"));
-        Assert.Contains(lines, line => line.Contains("new local API key has been generated"));
+        Assert.Contains(activityLog.GetRecent(100), line => line.Contains(Warning));
     }
 
     [Fact]
-    public async Task Startup_WithACleanStore_SaysNothingAboutQuarantine()
+    public async Task Startup_WithACleanLoad_SaysNothingAboutIt()
     {
-        var (activityLog, secureStore) = await RunStartupAsync();
+        var activityLog = await RunStartupAsync(InMemoryVault.Empty());
 
-        Assert.Null(secureStore.QuarantinedFilePath);
-        Assert.DoesNotContain(activityLog.GetRecent(100), line => line.Contains("renamed"));
+        Assert.DoesNotContain(activityLog.GetRecent(100), line => line.Contains("loaded without"));
     }
 
     [Fact]
     public async Task Startup_WithAPlainHttpUpstream_WarnsThatTheTokenWouldTravelInCleartext()
     {
-        // Validation only ever ran when a record was added, so anything stored by an older
-        // build was never re-checked.
+        // Validation runs when a record is added, but the vault can also be edited directly in
+        // the password manager, which bypasses it entirely.
         var store = new ConfigStore();
-        store.Upstreams.Add(new UpstreamRecord { Name = "legacy", BaseUrl = "http://api.example.com" });
-        await new SecureStore(_storePath).SaveAsync(store);
+        store.Upstreams.Add(new UpstreamRecord { Name = "insecure", BaseUrl = "http://api.example.com" });
 
-        var (activityLog, _) = await RunStartupAsync();
+        var activityLog = await RunStartupAsync(InMemoryVault.Empty().Seeded(store));
 
         Assert.Contains(activityLog.GetRecent(100), line =>
-            line.Contains("STARTUP WARNING") && line.Contains("legacy") && line.Contains("cleartext"));
+            line.Contains("STARTUP WARNING") && line.Contains("insecure") && line.Contains("cleartext"));
     }
 
     [Fact]
@@ -63,17 +56,16 @@ public class StartupDiagnosticsTests : IDisposable
         var store = new ConfigStore();
         store.Credentials.Add(new CredentialRecord
         {
-            Name = "legacy-credential",
+            Name = "insecure-credential",
             ClientId = "id",
             ClientSecret = "secret",
             TokenEndpoint = "http://idp.example.com/token",
         });
-        await new SecureStore(_storePath).SaveAsync(store);
 
-        var (activityLog, _) = await RunStartupAsync();
+        var activityLog = await RunStartupAsync(InMemoryVault.Empty().Seeded(store));
 
         Assert.Contains(activityLog.GetRecent(100), line =>
-            line.Contains("STARTUP WARNING") && line.Contains("legacy-credential"));
+            line.Contains("STARTUP WARNING") && line.Contains("insecure-credential"));
     }
 
     [Fact]
@@ -84,36 +76,26 @@ public class StartupDiagnosticsTests : IDisposable
 
         // Plain http is fine for a local development upstream - it never leaves the machine.
         store.Upstreams.Add(new UpstreamRecord { Name = "local-dev", BaseUrl = "http://127.0.0.1:8080" });
-        await new SecureStore(_storePath).SaveAsync(store);
 
-        var (activityLog, _) = await RunStartupAsync();
+        var activityLog = await RunStartupAsync(InMemoryVault.Empty().Seeded(store));
 
         Assert.DoesNotContain(activityLog.GetRecent(100), line => line.Contains("STARTUP WARNING"));
     }
 
-    private async Task<(ActivityLog ActivityLog, SecureStore SecureStore)> RunStartupAsync()
+    private async Task<ActivityLog> RunStartupAsync(IConfigVault vault)
     {
         var activityLog = new ActivityLog(_logPath);
-        var secureStore = new SecureStore(_storePath);
-        var cache = new ConfigStoreCache(secureStore);
+        var cache = new ConfigStoreCache(vault);
         var notifier = new ProxyConfigChangeNotifier(cache, new InMemoryConfigProvider([], []), activityLog);
 
-        await new ConfigStoreInitializerHostedService(cache, secureStore, notifier, activityLog)
+        await new ConfigStoreInitializerHostedService(cache, vault, notifier, activityLog)
             .StartAsync(CancellationToken.None);
 
-        return (activityLog, secureStore);
+        return activityLog;
     }
 
     public void Dispose()
     {
-        foreach (var file in Directory.EnumerateFiles(
-                     Path.GetDirectoryName(_storePath)!,
-                     Path.GetFileName(_storePath) + "*"))
-        {
-            try { File.Delete(file); } catch { /* best effort */ }
-        }
-
         try { Directory.Delete(_logPath, recursive: true); } catch { /* best effort */ }
     }
 }
-

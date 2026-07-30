@@ -12,6 +12,7 @@ using OAuthProxy.Core.Mcp;
 using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Proxy;
 using OAuthProxy.Core.Storage;
+using OAuthProxy.Core.Vault;
 
 namespace OAuthProxy.Core.Tests;
 
@@ -31,7 +32,6 @@ public class ProxyMethodPlacementMatrixTests : IAsyncLifetime
     private const string ApiKey = "matrix-test-key-0123456789";
     private const string Token = "MATRIX-ACCESS-TOKEN";
 
-    private readonly string _storePath = Path.Combine(Path.GetTempPath(), $"oauthproxy-matrix-{Guid.NewGuid()}.dat");
     private readonly string _logPath = Path.Combine(Path.GetTempPath(), $"oauthproxy-matrix-logs-{Guid.NewGuid()}");
 
     private WebApplication _upstream = null!;
@@ -109,7 +109,7 @@ public class ProxyMethodPlacementMatrixTests : IAsyncLifetime
         proxyBuilder.WebHost.UseUrls("http://127.0.0.1:0");
         proxyBuilder.Logging.ClearProviders();
         proxyBuilder.Services.AddOAuthProxy();
-        proxyBuilder.Services.Replace(ServiceDescriptor.Singleton(_ => new SecureStore(_storePath)));
+        proxyBuilder.Services.Replace(ServiceDescriptor.Singleton<IConfigVault>(_ => new InMemoryVault()));
         proxyBuilder.Services.Replace(ServiceDescriptor.Singleton(_ => new ActivityLog(_logPath)));
 
         _proxy = proxyBuilder.Build();
@@ -187,10 +187,6 @@ public class ProxyMethodPlacementMatrixTests : IAsyncLifetime
         await _proxy.StopAsync();
         await _upstream.StopAsync();
 
-        foreach (var path in new[] { _storePath, _storePath + ".tmp" })
-        {
-            try { if (File.Exists(path)) File.Delete(path); } catch { /* best effort */ }
-        }
 
         try { Directory.Delete(_logPath, recursive: true); } catch { /* best effort */ }
     }

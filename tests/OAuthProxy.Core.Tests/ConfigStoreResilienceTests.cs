@@ -1,48 +1,28 @@
 using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Storage;
+using OAuthProxy.Core.Vault;
 
 namespace OAuthProxy.Core.Tests;
 
 /// <summary>
-/// Startup used to die on an unreadable store, and the dispatcher's catch-all then left a live
-/// process with no window and no tray icon. These pin the recovery behavior that replaced it.
+/// The store is the only copy of the config — there is no local cache to fall back on — so the
+/// behaviour that matters most is what happens when a save fails. These pin it.
 /// </summary>
-public class ConfigStoreResilienceTests : IDisposable
+public class ConfigStoreResilienceTests
 {
-    private readonly string _tempFile = Path.Combine(Path.GetTempPath(), $"oauthproxy-test-{Guid.NewGuid()}.dat");
-    private readonly string _blockerFile = Path.Combine(Path.GetTempPath(), $"oauthproxy-test-blocker-{Guid.NewGuid()}");
-
-    [Fact]
-    public async Task Load_UnreadableFile_QuarantinesItAndReturnsEmptyStore()
-    {
-        // Not DPAPI-protected, so Unprotect throws — same shape as a store copied from another
-        // machine or truncated by a power loss.
-        await File.WriteAllBytesAsync(_tempFile, [0x00, 0x01, 0x02, 0x03, 0x04]);
-
-        var secureStore = new SecureStore(_tempFile);
-        var loaded = await secureStore.LoadAsync();
-
-        Assert.Empty(loaded.Credentials);
-        Assert.NotNull(secureStore.QuarantinedFilePath);
-        Assert.True(File.Exists(secureStore.QuarantinedFilePath),
-            "the unreadable file should be kept aside, not deleted");
-        Assert.False(File.Exists(_tempFile));
-    }
-
     [Fact]
     public async Task Initialize_IssuesAKeyToEveryRouteAndFunnelThatHasNone()
     {
-        // A store written before per-endpoint keys existed: its routes and funnels have none, and
-        // the proxy-wide Settings.LocalApiKey they used to rely on is no longer read. Without a
-        // backfill the guard has nothing to compare against and every request would be refused.
-        var store = new ConfigStore();
-        store.Routes.Add(new RouteMapping { PathPrefix = "/app/legacy" });
-        store.McpFunnels.Add(new McpFunnelRecord { Name = "legacy", Slug = "legacy" });
+        // A route or funnel can reach the vault without a key: created by hand in the password
+        // manager, or restored from a vault item whose key item is gone. Without the backfill the
+        // access guard has nothing to compare against and every request to it is refused.
+        var seed = new ConfigStore();
+        seed.Routes.Add(new RouteMapping { PathPrefix = "/app/keyless" });
+        seed.McpFunnels.Add(new McpFunnelRecord { Name = "keyless", Slug = "keyless" });
 
-        var secureStore = new SecureStore(_tempFile);
-        await secureStore.SaveAsync(store);
+        var vault = InMemoryVault.Empty().Seeded(seed);
 
-        var cache = new ConfigStoreCache(secureStore);
+        var cache = new ConfigStoreCache(vault);
         await cache.InitializeAsync();
 
         var routeKey = cache.Current.Routes[0].Key;
@@ -54,11 +34,12 @@ public class ConfigStoreResilienceTests : IDisposable
         // Separately generated, or the whole point of per-endpoint keys is lost.
         Assert.NotEqual(routeKey.Value, funnelKey.Value);
 
-        // Never-expiring, so an upgrade cannot silently lock someone out on a timer.
+        // Never-expiring, so a backfill cannot silently lock someone out on a timer.
         Assert.Null(routeKey.ExpiresUtc);
 
-        // And they must survive a restart rather than being regenerated every launch.
-        var reloaded = await new SecureStore(_tempFile).LoadAsync();
+        // And they must be persisted here rather than only held in memory, or the next launch
+        // would issue different ones.
+        var reloaded = await vault.LoadAsync();
         Assert.Equal(routeKey.Value, reloaded.Routes[0].Key.Value);
         Assert.Equal(funnelKey.Value, reloaded.McpFunnels[0].Key.Value);
     }
@@ -67,13 +48,16 @@ public class ConfigStoreResilienceTests : IDisposable
     public async Task Initialize_KeepsTheSameEndpointKeysAcrossRestarts()
     {
         // The failure this guards against: a generated-by-default key looks "already set" to
-        // the backfill, so it never reaches disk and the next launch invents a different one —
-        // every configured client starts getting 403 at random.
+        // the backfill, so it never reaches the vault and the next launch invents a different
+        // one — every configured client starts getting 403 at random.
         var seed = new ConfigStore();
         seed.Routes.Add(new RouteMapping { PathPrefix = "/app/one" });
-        await new SecureStore(_tempFile).SaveAsync(seed);
 
-        var firstRun = new ConfigStoreCache(new SecureStore(_tempFile));
+        // One vault across all the "restarts", which is what a restart actually looks like: the
+        // process is new, the vault is not.
+        var vault = InMemoryVault.Empty().Seeded(seed);
+
+        var firstRun = new ConfigStoreCache(vault);
         await firstRun.InitializeAsync();
         var originalKey = firstRun.Current.Routes[0].Key.Value;
 
@@ -81,10 +65,29 @@ public class ConfigStoreResilienceTests : IDisposable
 
         for (var restart = 0; restart < 3; restart++)
         {
-            var laterRun = new ConfigStoreCache(new SecureStore(_tempFile));
+            var laterRun = new ConfigStoreCache(vault);
             await laterRun.InitializeAsync();
             Assert.Equal(originalKey, laterRun.Current.Routes[0].Key.Value);
         }
+    }
+
+    [Fact]
+    public async Task Initialize_IsIdempotent()
+    {
+        // Startup loads the store itself (it needs the listen port before Kestrel can bind) and
+        // ConfigStoreInitializerHostedService loads it again as the host starts. The second call
+        // must not re-read the vault, or any edit made in between is silently discarded.
+        var vault = InMemoryVault.Empty();
+        var cache = new ConfigStoreCache(vault);
+
+        await cache.InitializeAsync();
+        await cache.MutateAsync(store =>
+            store.Credentials.Add(new CredentialRecord { Name = "added", ClientId = "id", ClientSecret = "secret" }));
+
+        await cache.InitializeAsync();
+
+        Assert.Single(cache.Current.Credentials);
+        Assert.True(cache.IsInitialized);
     }
 
     [Fact]
@@ -120,7 +123,8 @@ public class ConfigStoreResilienceTests : IDisposable
         // The original failure: the UI thread adding a credential while the refresh loop was
         // serializing the same store threw "Collection was modified" out of the refresh loop,
         // which stopped the host and silently killed the proxy.
-        var cache = new ConfigStoreCache(new SecureStore(_tempFile));
+        var vault = InMemoryVault.Empty();
+        var cache = new ConfigStoreCache(vault);
         await cache.InitializeAsync();
 
         var writers = Enumerable.Range(0, 25).Select(i => Task.Run(() =>
@@ -136,17 +140,17 @@ public class ConfigStoreResilienceTests : IDisposable
         await Task.WhenAll(writers.Concat(savers));
 
         Assert.Equal(25, cache.Current.Credentials.Count);
-        var reloaded = await new SecureStore(_tempFile).LoadAsync();
+        var reloaded = await vault.LoadAsync();
         Assert.Equal(25, reloaded.Credentials.Count);
     }
 
     [Fact]
-    public async Task MutateAsync_WhenTheSaveFails_UndoesTheMutation()
+    public async Task MutateAsync_WhenTheSaveFailsBeforeWriting_UndoesTheMutation()
     {
-        // The original failure: a failed write (full disk, file locked by antivirus) left the
-        // edit applied in memory. The UI showed the new credential and the proxy routed to it,
-        // then it vanished at the next restart - silent data loss discovered hours later.
-        var cache = new ConfigStoreCache(UnwritableStore());
+        // The original failure: a failed write left the edit applied in memory. The UI showed the
+        // new credential and the proxy routed to it, then it vanished at the next restart —
+        // silent data loss discovered hours later.
+        var cache = new ConfigStoreCache(InMemoryVault.ThatFailsBeforeWriting());
 
         var existing = new CredentialRecord { Name = "keep", ClientId = "id", ClientSecret = "secret" };
         cache.Current.Credentials.Add(existing);
@@ -161,12 +165,31 @@ public class ConfigStoreResilienceTests : IDisposable
         // references to these records, so a fresh object graph would leave every binding
         // pointing at an orphan.
         Assert.Same(existing, survivor);
+
+        Assert.False(cache.IsOutOfSync);
+    }
+
+    [Fact]
+    public async Task MutateAsync_WhenTheSaveFailsPartWayThrough_KeepsTheMutationAndReportsOutOfSync()
+    {
+        // The mirror image of the test above, and the reason the two cases cannot share a code
+        // path. Saving the store is several vault items; when some of them are already durable,
+        // reverting memory would make the next successful save delete records that are safely
+        // stored. Memory stays ahead, and the user is told rather than silently corrected.
+        var cache = new ConfigStoreCache(InMemoryVault.ThatFailsHalfway());
+
+        await Assert.ThrowsAsync<VaultSaveException>(() => cache.MutateAsync(store =>
+            store.Credentials.Add(new CredentialRecord { Name = "half-saved", ClientId = "id", ClientSecret = "secret" })));
+
+        var kept = Assert.Single(cache.Current.Credentials);
+        Assert.Equal("half-saved", kept.Name);
+        Assert.True(cache.IsOutOfSync);
     }
 
     [Fact]
     public async Task MutateAsync_WhenTheSaveFails_UndoesSettingsChangesToo()
     {
-        var cache = new ConfigStoreCache(UnwritableStore());
+        var cache = new ConfigStoreCache(InMemoryVault.ThatFailsBeforeWriting());
         var originalPort = cache.Current.Settings.ListenPort;
 
         await Assert.ThrowsAnyAsync<Exception>(() => cache.MutateAsync(store =>
@@ -185,7 +208,7 @@ public class ConfigStoreResilienceTests : IDisposable
         // The rollback snapshot names every list explicitly, so a list added to ConfigStore
         // without being added there is silently exempt from rollback — exactly the silent
         // data-loss bug this whole mechanism exists to prevent, reintroduced quietly.
-        var cache = new ConfigStoreCache(UnwritableStore());
+        var cache = new ConfigStoreCache(InMemoryVault.ThatFailsBeforeWriting());
 
         await Assert.ThrowsAnyAsync<Exception>(() => cache.MutateAsync(store =>
         {
@@ -200,9 +223,10 @@ public class ConfigStoreResilienceTests : IDisposable
     }
 
     [Fact]
-    public async Task McpFunnelConfiguration_SurvivesARoundTripToDisk()
+    public async Task McpFunnelConfiguration_SurvivesARoundTripToTheVault()
     {
-        var cache = new ConfigStoreCache(new SecureStore(_tempFile));
+        var vault = InMemoryVault.Empty();
+        var cache = new ConfigStoreCache(vault);
         await cache.InitializeAsync();
 
         var source = new McpSourceRecord
@@ -234,7 +258,7 @@ public class ConfigStoreResilienceTests : IDisposable
             });
         });
 
-        var reloaded = await new SecureStore(_tempFile).LoadAsync();
+        var reloaded = await vault.LoadAsync();
 
         Assert.True(reloaded.Settings.McpFunnelEnabled);
 
@@ -252,35 +276,34 @@ public class ConfigStoreResilienceTests : IDisposable
     [Fact]
     public async Task MutateAsync_WhenTheSaveSucceeds_KeepsTheMutation()
     {
-        var cache = new ConfigStoreCache(new SecureStore(_tempFile));
+        var vault = InMemoryVault.Empty();
+        var cache = new ConfigStoreCache(vault);
         await cache.InitializeAsync();
 
         await cache.MutateAsync(store =>
             store.Credentials.Add(new CredentialRecord { Name = "kept", ClientId = "id", ClientSecret = "secret" }));
 
         Assert.Single(cache.Current.Credentials);
-        Assert.Single((await new SecureStore(_tempFile).LoadAsync()).Credentials);
+        Assert.Single((await vault.LoadAsync()).Credentials);
     }
 
-    /// <summary>
-    /// A store whose parent "directory" is really a file, so Directory.CreateDirectory throws
-    /// and every save fails - without needing to mock a sealed dependency.
-    /// </summary>
-    private SecureStore UnwritableStore()
+    [Fact]
+    public async Task ReloadAsync_DiscardsInMemoryStateAndClearsOutOfSync()
     {
-        File.WriteAllText(_blockerFile, "not a directory");
-        return new SecureStore(Path.Combine(_blockerFile, "store.dat"));
-    }
+        // The escape hatch from a half-applied save, and from a secret edited in the password
+        // manager's own UI — neither of which the app can resolve on its own.
+        var seed = new ConfigStore();
+        seed.Credentials.Add(new CredentialRecord { Name = "in-vault", ClientId = "id", ClientSecret = "secret" });
 
-    public void Dispose()
-    {
-        try { File.Delete(_blockerFile); } catch { /* best effort */ }
+        var cache = new ConfigStoreCache(InMemoryVault.Empty().Seeded(seed));
+        await cache.InitializeAsync();
 
-        foreach (var file in Directory.EnumerateFiles(
-                     Path.GetDirectoryName(_tempFile)!,
-                     Path.GetFileName(_tempFile) + "*"))
-        {
-            try { File.Delete(file); } catch { /* best effort */ }
-        }
+        cache.Current.Credentials.Add(new CredentialRecord { Name = "only-in-memory", ClientId = "id", ClientSecret = "s" });
+
+        await cache.ReloadAsync();
+
+        var survivor = Assert.Single(cache.Current.Credentials);
+        Assert.Equal("in-vault", survivor.Name);
+        Assert.False(cache.IsOutOfSync);
     }
 }

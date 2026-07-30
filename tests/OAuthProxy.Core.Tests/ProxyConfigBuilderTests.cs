@@ -140,31 +140,6 @@ public class ProxyConfigBuilderTests
     }
 
     [Fact]
-    public void Build_LegacySingleCredentialFields_AreTranslatedIntoTheCredentialList()
-    {
-        // An in-memory route (or a store not yet normalized) may still carry the superseded
-        // scalar fields. They have to keep producing exactly the route they always did.
-        var upstream = new UpstreamRecord { Name = "api", BaseUrl = "https://api.test" };
-        var credentialId = Guid.NewGuid();
-        var route = new RouteMapping
-        {
-            PathPrefix = "/app/api",
-            UpstreamId = upstream.Id,
-            CredentialId = credentialId,
-            CredentialPlacement = CredentialPlacement.Query,
-            CredentialParameterName = "access_token",
-            CredentialValuePrefix = "",
-        };
-
-        var (routes, _) = ProxyConfigBuilder.Build([route], [upstream]);
-
-        var read = Assert.Single(ProxyConfigBuilder.ReadCredentials(Assert.Single(routes).Metadata!));
-        Assert.Equal(credentialId, read.CredentialId);
-        Assert.Equal(CredentialPlacement.Query, read.Placement);
-        Assert.Equal("access_token", read.ParameterName);
-    }
-
-    [Fact]
     public void ReadCredentials_WithoutTheMetadataKey_YieldsNothing()
     {
         // The only safe reading of metadata this build cannot interpret is "attach nothing".

@@ -5,6 +5,7 @@ using OAuthProxy.Core.Auth;
 using OAuthProxy.Core.Diagnostics;
 using OAuthProxy.Core.Mcp;
 using OAuthProxy.Core.Storage;
+using OAuthProxy.Core.Vault;
 using Yarp.ReverseProxy.Configuration;
 using Yarp.ReverseProxy.Transforms.Builder;
 
@@ -20,7 +21,12 @@ public static class ProxyStartupExtensions
     public static IServiceCollection AddOAuthProxy(this IServiceCollection services)
     {
         services.AddSingleton<ActivityLog>();
-        services.AddSingleton<SecureStore>();
+
+        // Placeholder backend. The real one is chosen at startup once the setup gate knows which
+        // password manager is installed and unlocked, and is registered over this — so the app
+        // always has *an* IConfigVault to resolve, and an unconfigured one is empty rather than null.
+        services.AddSingleton<IConfigVault, InMemoryVault>();
+
         services.AddSingleton<ConfigStoreCache>();
         services.AddHostedService<ConfigStoreInitializerHostedService>();
 

@@ -84,7 +84,7 @@ public class PerEndpointKeyEndToEndTests : IAsyncLifetime
     {
         PathPrefix = prefix,
         UpstreamId = upstreamId,
-        CredentialId = credentialId,
+        Credentials = [RouteCredential.For(credentialId, CredentialPlacement.Header)],
         StripPrefix = true,
         Key = new ProxyKey { Value = key },
     };

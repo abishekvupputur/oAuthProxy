@@ -56,11 +56,6 @@ public sealed partial class RouteItemViewModel : ObservableObject
         // rather than let it look active. A missing credential still routes, unauthenticated.
         IsBroken = upstream is null;
 
-        // Stores are normalized on load, but a route object built in memory may still carry the
-        // superseded single-credential fields. Folding them in here means the editor below only
-        // ever deals with the list, and an edit cannot leave the two representations disagreeing.
-        Route.Normalize();
-
         foreach (var credential in Route.Credentials)
         {
             Credentials.Add(Wrap(credential));

@@ -42,7 +42,7 @@ public class McpFunnelRouteSourceTests : IAsyncLifetime
             // RouteValidation refuses it. "/mcpsrv" is a different segment and stays allowed.
             PathPrefix = "/mcpsrv",
             UpstreamId = upstreamRecord.Id,
-            CredentialId = credential.Id,
+            Credentials = [RouteCredential.For(credential.Id, CredentialPlacement.Header)],
             StripPrefix = true,
         };
 

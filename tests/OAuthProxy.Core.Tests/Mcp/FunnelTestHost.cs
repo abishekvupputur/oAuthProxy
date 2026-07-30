@@ -12,6 +12,7 @@ using OAuthProxy.Core.Mcp;
 using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Proxy;
 using OAuthProxy.Core.Storage;
+using OAuthProxy.Core.Vault;
 
 namespace OAuthProxy.Core.Tests.Mcp;
 
@@ -25,15 +26,13 @@ internal sealed class FunnelTestHost : IAsyncDisposable
     public const string ApiKey = "funnel-test-key-0123456789";
 
     private readonly WebApplication _proxy;
-    private readonly string _storePath;
     private readonly string _logPath;
     private readonly List<McpClient> _clients = [];
 
-    private FunnelTestHost(WebApplication proxy, string baseUrl, string storePath, string logPath)
+    private FunnelTestHost(WebApplication proxy, string baseUrl, string logPath)
     {
         _proxy = proxy;
         BaseUrl = baseUrl;
-        _storePath = storePath;
         _logPath = logPath;
     }
 
@@ -50,14 +49,13 @@ internal sealed class FunnelTestHost : IAsyncDisposable
 
     public static async Task<FunnelTestHost> StartAsync()
     {
-        var storePath = Path.Combine(Path.GetTempPath(), $"oauthproxy-funnel-{Guid.NewGuid()}.dat");
         var logPath = Path.Combine(Path.GetTempPath(), $"oauthproxy-funnel-logs-{Guid.NewGuid()}");
 
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         builder.Logging.ClearProviders();
         builder.Services.AddOAuthProxy();
-        builder.Services.Replace(ServiceDescriptor.Singleton(_ => new SecureStore(storePath)));
+        builder.Services.Replace(ServiceDescriptor.Singleton<IConfigVault>(_ => new InMemoryVault()));
         builder.Services.Replace(ServiceDescriptor.Singleton(_ => new ActivityLog(logPath)));
 
         var proxy = builder.Build();
@@ -85,7 +83,7 @@ internal sealed class FunnelTestHost : IAsyncDisposable
         var baseUrl = proxy.Services.GetRequiredService<IServer>()
             .Features.Get<IServerAddressesFeature>()!.Addresses.First();
 
-        var host = new FunnelTestHost(proxy, baseUrl, storePath, logPath);
+        var host = new FunnelTestHost(proxy, baseUrl, logPath);
         await host.Cache.MutateAsync(store =>
         {
             store.Settings.McpFunnelEnabled = true;
@@ -228,10 +226,6 @@ internal sealed class FunnelTestHost : IAsyncDisposable
         await _proxy.StopAsync();
         await _proxy.DisposeAsync();
 
-        foreach (var path in new[] { _storePath, _storePath + ".tmp" })
-        {
-            try { if (File.Exists(path)) File.Delete(path); } catch { /* best effort */ }
-        }
 
         try { Directory.Delete(_logPath, recursive: true); } catch { /* best effort */ }
     }

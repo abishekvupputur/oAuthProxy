@@ -10,6 +10,7 @@ using OAuthProxy.Core.Diagnostics;
 using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Proxy;
 using OAuthProxy.Core.Storage;
+using OAuthProxy.Core.Vault;
 
 namespace OAuthProxy.Core.Tests;
 
@@ -40,8 +41,7 @@ public class LocalAccessGuardTests : IAsyncLifetime
                     {
                         services.AddSingleton<ActivityLog>(_ =>
                             new ActivityLog(Path.Combine(Path.GetTempPath(), $"oauthproxy-test-logs-{Guid.NewGuid()}")));
-                        services.AddSingleton(_ => new SecureStore(
-                            Path.Combine(Path.GetTempPath(), $"oauthproxy-test-{Guid.NewGuid()}.dat")));
+                        services.AddSingleton<IConfigVault>(_ => new InMemoryVault());
                         services.AddSingleton<ConfigStoreCache>();
                     })
                     .Configure(app =>

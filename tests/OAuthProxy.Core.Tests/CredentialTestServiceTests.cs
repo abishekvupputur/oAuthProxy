@@ -7,6 +7,7 @@ using OAuthProxy.Core.Auth;
 using OAuthProxy.Core.Diagnostics;
 using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Storage;
+using OAuthProxy.Core.Vault;
 
 namespace OAuthProxy.Core.Tests;
 
@@ -23,7 +24,6 @@ public class CredentialTestServiceTests : IAsyncLifetime
 {
     private const string Key = "GOOD-API-KEY";
 
-    private readonly string _storePath = Path.Combine(Path.GetTempPath(), $"oauthproxy-credtest-{Guid.NewGuid()}.dat");
     private readonly string _logPath = Path.Combine(Path.GetTempPath(), $"oauthproxy-credtest-logs-{Guid.NewGuid()}");
 
     private WebApplication _api = null!;
@@ -83,7 +83,7 @@ public class CredentialTestServiceTests : IAsyncLifetime
             .Addresses.First().TrimEnd('/');
 
         var activityLog = new ActivityLog(_logPath);
-        _cache = new ConfigStoreCache(new SecureStore(_storePath));
+        _cache = new ConfigStoreCache(new InMemoryVault());
         await _cache.InitializeAsync();
 
         var oAuth2Service = new OAuth2Service(new GoogleOAuthService(activityLog), activityLog);
@@ -94,11 +94,6 @@ public class CredentialTestServiceTests : IAsyncLifetime
     {
         _service.Dispose();
         await _api.StopAsync();
-
-        foreach (var path in new[] { _storePath, _storePath + ".tmp" })
-        {
-            try { if (File.Exists(path)) File.Delete(path); } catch { /* best effort */ }
-        }
 
         try { Directory.Delete(_logPath, recursive: true); } catch { /* best effort */ }
     }

@@ -43,8 +43,8 @@ public static class ProxyConfigBuilder
             // reject the whole config update and keep the previous one, so a single bad prefix
             // would take every *other* route's pending edit down with it. Dropping it means the
             // rest still apply and the count this method returns is the count that took effect.
-            // Newly created prefixes are already blocked in the UI; this catches stores written
-            // before that check existed.
+            // Newly created prefixes are already blocked in the UI; this catches a route edited
+            // straight into the vault from the password manager, which bypasses that check.
             if (!RouteValidation.IsValidPathPrefix(mapping.PathPrefix)) continue;
 
             // Same fail-closed treatment for the credential list. A header name that is not a
@@ -52,7 +52,7 @@ public static class ProxyConfigBuilder
             // slot cannot be put on the wire as configured — serving the route anyway would send
             // something other than what the UI shows, which looks like a working route that
             // quietly authenticates wrongly.
-            var credentials = mapping.EffectiveCredentials;
+            var credentials = mapping.Credentials;
             if (!RouteValidation.IsValidCredentialSet(credentials)) continue;
 
             var routeId = mapping.Id.ToString();
