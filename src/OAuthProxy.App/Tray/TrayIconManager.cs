@@ -37,7 +37,15 @@ public sealed class TrayIconManager(AutostartService autostartService) : IDispos
     /// Invoked after the tray menu changes the autostart setting, so the Settings tab can
     /// re-read it rather than keep showing a stale checkbox.
     /// </param>
-    public void Initialize(MainWindow mainWindow, Action? onAutostartChanged = null)
+    /// <param name="confirmExit">
+    /// Asked before shutting down, and may refuse. Exit is the moment an unsaved change stops
+    /// existing, so it is the one thing here that needs a way to say no — and it has to happen
+    /// before Shutdown(), since OnExit runs when there is no longer any way back.
+    /// </param>
+    public void Initialize(
+        MainWindow mainWindow,
+        Action? onAutostartChanged = null,
+        Func<bool>? confirmExit = null)
     {
         _mainWindow = mainWindow;
         _onAutostartChanged = onAutostartChanged;
@@ -68,7 +76,10 @@ public sealed class TrayIconManager(AutostartService autostartService) : IDispos
         contextMenu.Items.Add(startupItem);
 
         contextMenu.Items.Add(new ToolStripSeparator());
-        contextMenu.Items.Add("Exit", null, (_, _) => Application.Current.Shutdown());
+        contextMenu.Items.Add("Exit", null, (_, _) =>
+        {
+            if (confirmExit is null || confirmExit()) Application.Current.Shutdown();
+        });
 
         _notifyIcon = new NotifyIcon
         {

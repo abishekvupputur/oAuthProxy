@@ -11,24 +11,6 @@ namespace OAuthProxy.App.ViewModels;
 
 public sealed partial class CredentialsViewModel : ObservableObject
 {
-
-    /// <summary>
-    /// False while the password manager is locked. Every command that writes to the vault is
-    /// gated on this, so the buttons grey out the moment it locks rather than staying clickable
-    /// and failing — ConfigStoreCache refuses the write either way, but an error the user could
-    /// not have avoided is a worse way to find out.
-    /// </summary>
-    [ObservableProperty]
-    private bool _canEdit = true;
-
-    partial void OnCanEditChanged(bool value)
-    {
-        SaveCredentialCommand.NotifyCanExecuteChanged();
-        DeleteCredentialCommand.NotifyCanExecuteChanged();
-        ConnectCommand.NotifyCanExecuteChanged();
-        DisconnectCommand.NotifyCanExecuteChanged();
-        RefreshNowCommand.NotifyCanExecuteChanged();
-    }
     private readonly ConfigStoreCache _configStoreCache;
     private readonly OAuth2Service _oAuth2Service;
     private readonly TokenRefreshService _tokenRefreshService;
@@ -210,7 +192,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
         }
     }
 
-    [RelayCommand(CanExecute = nameof(CanEdit))]
+    [RelayCommand]
     private async Task SaveCredentialAsync()
     {
         if (SelectedKind == CredentialKind.ApiKey)
@@ -473,7 +455,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
         ApplyPresetDefaults(SelectedPreset);
     }
 
-    [RelayCommand(CanExecute = nameof(CanEdit))]
+    [RelayCommand]
     private async Task DeleteCredentialAsync(CredentialItemViewModel? item)
     {
         if (item is null) return;
@@ -482,7 +464,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
         Credentials.Remove(item);
     }
 
-    [RelayCommand(CanExecute = nameof(CanEdit))]
+    [RelayCommand]
     private async Task ConnectAsync(CredentialItemViewModel? item)
     {
         if (item is null) return;
@@ -523,7 +505,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
         item.Refresh();
     }
 
-    [RelayCommand(CanExecute = nameof(CanEdit))]
+    [RelayCommand]
     private async Task DisconnectAsync(CredentialItemViewModel? item)
     {
         if (item is null) return;
@@ -540,7 +522,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
         _activityLog.Log($"DISCONNECT '{item.Name}' — stored token cleared");
     }
 
-    [RelayCommand(CanExecute = nameof(CanEdit))]
+    [RelayCommand]
     private async Task RefreshNowAsync(CredentialItemViewModel? item)
     {
         if (item is null) return;

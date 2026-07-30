@@ -175,7 +175,7 @@ public sealed class ProtonPassVaultProvider(
         var existing = await ListAsync(withSecrets: true, ct);
         var previousNote = existing.FirstOrDefault(i => i.Title == VaultItemNaming.ConfigTitle);
 
-        var previousIndex = ReadIndexAndGuardRevision(previousNote);
+        var previousIndex = ReadIndex(previousNote);
         var index = new VaultIndex();
 
         var written = 0;
@@ -527,29 +527,18 @@ public sealed class ProtonPassVaultProvider(
     }
 
     /// <summary>
-    /// The index from the note that is about to be replaced, and the point at which a concurrent
-    /// write is caught. Both managers sync, so two installs pointed at one vault is a real
-    /// configuration — and without this they would overwrite each other's routes and keys in
-    /// silence, a failure mode the single local file never had.
+    /// The index from the note that is about to be replaced.
+    ///
+    /// Deliberately does not compare revisions. This app assumes a single instance, and the sync
+    /// queue re-reads and rewrites whenever it can — so a guard here would turn a lock that lifted
+    /// at an awkward moment into a save that refuses and retries forever, which is a worse outcome
+    /// than the concurrent write it would be guarding against. The revision is still stamped into
+    /// the note, so a second writer is at least visible after the fact.
     /// </summary>
-    private VaultIndex ReadIndexAndGuardRevision(ProtonItem? note)
-    {
-        if (note is null) return new VaultIndex();
-
-        var document = VaultDocument.TryParse(note.Contents.Field(VaultFields.NoteContent) ?? "");
-        if (document is null) return new VaultIndex();
-
-        if (document.Revision != _loadedRevision)
-        {
-            throw new VaultSaveException(
-                $"The configuration in '{VaultConstants.VaultName}' was changed elsewhere"
-                + (string.IsNullOrEmpty(document.WrittenBy) ? "" : $" (by {document.WrittenBy})")
-                + ". Reload from the vault before saving, or your changes will overwrite theirs.",
-                partiallyApplied: false);
-        }
-
-        return document.Index;
-    }
+    private static VaultIndex ReadIndex(ProtonItem? note) =>
+        note is not null && VaultDocument.TryParse(note.Contents.Field(VaultFields.NoteContent) ?? "") is { } document
+            ? document.Index
+            : new VaultIndex();
 
     private static Dictionary<(VaultItemRole, Guid), VaultItemContents> ResolveSecrets(
         VaultIndex index, List<ProtonItem> items)

@@ -12,6 +12,7 @@ using OAuthProxy.Core.Mcp;
 using OAuthProxy.Core.Platform;
 using OAuthProxy.Core.Proxy;
 using OAuthProxy.Core.Storage;
+using OAuthProxy.Core.Vault;
 
 namespace OAuthProxy.App;
 
@@ -128,7 +129,8 @@ public partial class App : Application
         _trayIconManager = _webApp.Services.GetRequiredService<TrayIconManager>();
         _trayIconManager.Initialize(
             mainWindow,
-            onAutostartChanged: () => Dispatcher.Invoke(settingsViewModel.Reload));
+            onAutostartChanged: () => Dispatcher.Invoke(settingsViewModel.Reload),
+            confirmExit: ConfirmExitWithUnsavedChanges);
         _trayIconManager.SetState(TrayState.Starting);
         mainWindow.HiddenWhileGated += () => _trayIconManager.NotifyIdleWhileGated();
 
@@ -204,6 +206,58 @@ public partial class App : Application
         _trayIconManager?.SetState(TrayState.Running);
     }
 
+    /// <summary>
+    /// Asks before quitting with changes that are only in memory. Returns true when it is safe to
+    /// proceed.
+    ///
+    /// This is the one place the deferred-sync design can actually cost the user something. Edits
+    /// and token refreshes go ahead while the password manager is locked, and nothing is written
+    /// to disk in the meantime, so exiting is the moment they stop existing — and a credential
+    /// whose token rotated in that window needs reconnecting. Worth one dialog.
+    ///
+    /// Called from the tray's Exit rather than from OnExit, because OnExit runs after shutdown is
+    /// already committed and there is no way back from it.
+    /// </summary>
+    private bool ConfirmExitWithUnsavedChanges()
+    {
+        var configStoreCache = _webApp?.Services.GetService<ConfigStoreCache>();
+        if (configStoreCache is null || !configStoreCache.HasPendingChanges) return true;
+
+        // One last attempt first. The manager is often unlocked by now — the user may have
+        // unlocked it for something else entirely — and warning about losing changes that could
+        // simply have been written would be a poor way to find that out.
+        if (_webApp!.Services.GetService<VaultSyncQueue>() is { } syncQueue)
+        {
+            try
+            {
+                Task.Run(() => syncQueue.FlushAsync(TimeSpan.FromSeconds(15))).Wait(TimeSpan.FromSeconds(20));
+            }
+            catch
+            {
+                // The confirmation below is what actually protects the user.
+            }
+
+            if (!configStoreCache.HasPendingChanges) return true;
+        }
+
+        var manager = VaultLockGuidance.DisplayName(
+            _webApp.Services.GetService<VaultGateService>()?.Status.Selected ?? VaultBackendKind.None);
+
+        var answer = MessageBox.Show(
+            $"Some changes have not been saved to {manager} yet."
+            + $"{Environment.NewLine}{Environment.NewLine}"
+            + "They are only in memory, so exiting now discards them — and any credential whose "
+            + "token was refreshed while it was locked will need to be reconnected."
+            + $"{Environment.NewLine}{Environment.NewLine}"
+            + $"Unlock {manager} and choose Cancel to save them first.",
+            "OAuthProxy — unsaved changes",
+            MessageBoxButton.OKCancel,
+            MessageBoxImage.Warning,
+            MessageBoxResult.Cancel);
+
+        return answer == MessageBoxResult.OK;
+    }
+
     private static void ReportStartupFailure(Exception ex)
     {
         // The host may be half-built, so don't count on resolving ActivityLog from it.
@@ -261,17 +315,13 @@ public partial class App : Application
                 // Wait() with its own timeout is the actual backstop.
                 Task.Run(async () =>
                 {
-                    // Settings toggles kick off a save without awaiting it, and this method
-                    // ends in Environment.Exit — so without draining first, flipping a
-                    // checkbox and immediately choosing Exit lost the change.
-                    //
-                    // The budget is 20s rather than the 3s a local file write needed: a save is
-                    // now a CLI subprocess, a sync round trip, and possibly a biometric prompt.
-                    // Anything shorter is a guaranteed silent data loss on exit.
-                    var configStoreCache = _webApp.Services.GetService<ConfigStoreCache>();
-                    if (configStoreCache is not null)
+                    // Belt and braces. The tray's Exit already flushed and asked, but this method
+                    // also runs on paths that never went through it — a Windows shutdown, or the
+                    // startup-failure path — and it ends in Environment.Exit, which would
+                    // otherwise kill the process mid-write.
+                    if (_webApp.Services.GetService<VaultSyncQueue>() is { } syncQueue)
                     {
-                        await configStoreCache.FlushAsync(TimeSpan.FromSeconds(20));
+                        await syncQueue.FlushAsync(TimeSpan.FromSeconds(20));
                     }
 
                     await _webApp.StopAsync(TimeSpan.FromSeconds(5));

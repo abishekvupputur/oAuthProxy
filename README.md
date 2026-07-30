@@ -503,23 +503,30 @@ overwrites them on its next save, so use **Reload from vault** after editing by 
 
 ### While the vault is locked
 
-OAuthProxy **stops editing and stops refreshing OAuth tokens**. Nothing is queued for later: the
-vault is the only copy, so a change held in memory is one you would believe was saved and a restart
-would lose.
+**Everything keeps working.** Edits, OAuth token refreshes, and proxy-key rotation all go ahead
+against the in-memory configuration, and OAuthProxy writes them to the vault as soon as your
+password manager is reachable again. A locked manager never takes a route down and never blocks
+the UI.
 
-That means:
+A banner appears while anything is unsaved, with an **I've unlocked it — save now** button. The
+sync also retries on its own, so unlocking is usually enough.
 
-- Routes using an **API key** keep working normally.
-- Routes using **OAuth** keep working until their current access token expires — usually up to an
-  hour — and then fail with `vault locked` until you unlock.
-- Every editing button is greyed out. Copying a key you can already see still works.
+**The catch, stated plainly.** Nothing is written to disk while it waits — a pending change lives
+in memory and nowhere else, because a spill file would be a copy of your secrets sitting outside
+your password manager, which is the thing this app exists to avoid. So:
 
-Refusing to refresh is deliberate, and it is protecting something. A refresh rotates the refresh
-token at the provider; if that succeeded while the vault could not record the result, the
-replacement would exist only in memory and the next restart would lose the grant permanently. An
-access token that expires until you unlock is the far smaller cost.
+> If OAuthProxy exits while changes are still unsaved, those changes are gone. Any credential
+> whose token was refreshed in that window has to be reconnected, because the refresh token in the
+> vault is the one the provider has already replaced.
 
-The banner tells you how long you have before the first token expires.
+Choosing **Exit** from the tray while anything is pending makes one last attempt to save and then
+warns you before quitting, so this should never happen by accident. A machine shutdown or a crash
+gives no such warning.
+
+This is a deliberate trade. The alternative — refusing to save or refresh until the vault is
+reachable — breaks every OAuth route the moment its access token ages out, which happens far more
+often than exiting mid-lock. Only the newest token is ever useful, so there is nothing worth
+keeping that a reconnect cannot restore.
 
 **Keeping it available.** The option that weakens nothing is a token — a 1Password service account
 or a Proton Pass personal access token, scoped to `threeEyedRaven` — so nothing has to stay
@@ -529,9 +536,10 @@ holds your secrets decrypted. OAuthProxy never changes those settings for you.
 
 ### Using one vault from two machines
 
-Both managers sync, so two OAuthProxy installs can end up pointed at the same vault. Each save
-checks the configuration's revision first and refuses if the other machine has written since this
-one loaded, rather than silently overwriting it. Use **Reload from vault** and redo the edit.
+OAuthProxy assumes it is the only thing writing to `threeEyedRaven`. Both managers sync, so two
+installs pointed at one vault will overwrite each other's changes — last writer wins, with no
+warning. Each save stamps the machine name and a revision into the config item, so you can at least
+tell after the fact. Run it on one machine at a time.
 
 ---
 
@@ -541,7 +549,7 @@ Logs are the only thing OAuthProxy writes to disk, under `%AppData%\OAuthProxy\`
 
 | Path | Contents |
 |---|---|
-| `logsctivity-YYYYMMDD.log` | Proxied requests and responses, connects, refreshes, route reloads, vault operations. Rotates every 2 days, auto-deletes after ~10 |
+| `logs\activity-YYYYMMDD.log` | Proxied requests and responses, connects, refreshes, route reloads, vault operations. Rotates every 2 days, auto-deletes after ~10 |
 | `logs\errors.log` | Unhandled exceptions and provider errors with stack traces |
 
 The Settings tab can open either log, open the folder, or prune old ones.

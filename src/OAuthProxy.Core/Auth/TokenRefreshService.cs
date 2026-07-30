@@ -3,7 +3,6 @@ using Microsoft.Extensions.Logging;
 using OAuthProxy.Core.Diagnostics;
 using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Storage;
-using OAuthProxy.Core.Vault;
 
 namespace OAuthProxy.Core.Auth;
 
@@ -63,23 +62,12 @@ public sealed class TokenRefreshService(
     /// <summary>One pass of the loop. Internal so its vault gate can be tested without a 60s wait.</summary>
     internal async Task RefreshDueCredentialsAsync(CancellationToken ct)
     {
-        // Nothing is attempted while the vault cannot record the outcome. A refresh rotates the
-        // refresh token at the provider, and a rotated token that only exists in memory is a grant
-        // lost for good the moment the app restarts — the user would have to reconnect from
-        // scratch, having done nothing wrong. Not refreshing leaves the old token valid and
-        // durable, so the cost is an access token that expires until the vault reopens.
-        //
-        // Returning before the scan matters: _backoff must not be touched. A credential that was
-        // never attempted has not failed, and recording one here would push a perfectly healthy
-        // grant into an hour-long backoff for something that was never its fault.
-        if (configStoreCache.Access == VaultAccess.ReadOnly)
-        {
-            ReportPausedOnce();
-            return;
-        }
-
-        _reportedPaused = false;
-
+        // Refreshing proceeds whether or not the vault is reachable. Only the newest token is ever
+        // needed, so a refresh that cannot be written yet still leaves the proxy working — the new
+        // token is in memory and the sync queue persists it when the manager comes back. The cost
+        // is bounded and understood: if the app exits with that write still pending, the grant is
+        // gone and the credential has to be reconnected. Refusing to refresh would instead break
+        // every OAuth route the moment its token aged out, which is the more common outcome.
         var now = DateTimeOffset.UtcNow;
 
         // Snapshot the list so edits to Credentials during iteration (e.g. a delete from
@@ -130,31 +118,6 @@ public sealed class TokenRefreshService(
 
         PruneBackoffForDeletedCredentials();
     }
-
-    /// <summary>
-    /// Says once per lock that refreshing has stopped, and how long there is before it shows.
-    /// The loop ticks every 60 seconds, so saying it each time would bury the activity log — and
-    /// the one thing worth knowing is when a route is about to start failing.
-    /// </summary>
-    private void ReportPausedOnce()
-    {
-        if (_reportedPaused) return;
-        _reportedPaused = true;
-
-        var soonest = configStoreCache.Current.Credentials
-            .Where(c => c.Token is not null)
-            .Select(c => c.Token!.ExpiresAtUtc)
-            .DefaultIfEmpty()
-            .Min();
-
-        var detail = soonest == default
-            ? "no OAuth credentials are affected"
-            : $"the first token expires {soonest.ToLocalTime():g}";
-
-        activityLog.Log($"REFRESH paused — the vault is locked, so tokens are not being refreshed ({detail})");
-    }
-
-    private bool _reportedPaused;
 
     private bool IsDueForAttempt(Guid credentialId, DateTimeOffset now) =>
         !_backoff.TryGetValue(credentialId, out var state) || now >= state.NextAttemptUtc;

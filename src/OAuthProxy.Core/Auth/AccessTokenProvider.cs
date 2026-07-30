@@ -1,7 +1,6 @@
 using OAuthProxy.Core.Diagnostics;
 using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Storage;
-using OAuthProxy.Core.Vault;
 
 namespace OAuthProxy.Core.Auth;
 
@@ -43,19 +42,6 @@ public sealed class AccessTokenProvider(
         if (!token.IsExpiringWithin(RefreshMargin))
         {
             return token.AccessToken;
-        }
-
-        // Expired, and the vault cannot record a new token. Refreshing anyway would rotate the
-        // refresh token at the provider with nowhere durable to put the replacement, losing the
-        // grant for good at the next restart. Returning null instead reports the credential as
-        // unusable, which the transform already knows how to surface — a temporary, explainable
-        // failure rather than a permanent one.
-        if (configStoreCache.Access == VaultAccess.ReadOnly)
-        {
-            activityLog.Log(
-                $"REFRESH '{credential.Name}' needs refreshing but the vault is locked — not attempted");
-
-            return null;
         }
 
         // Nothing to refresh with, or a previous attempt already established the grant is

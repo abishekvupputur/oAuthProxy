@@ -36,10 +36,10 @@ public static class ProxyStartupExtensions
         services.AddSingleton<ConfigStoreCache>();
         services.AddHostedService<ConfigStoreInitializerHostedService>();
 
-        // Registered as a singleton first so the UI can force an immediate re-check after a save
-        // fails, rather than leaving the user to wait out a tick to learn why.
-        services.AddSingleton<VaultHealthMonitor>();
-        services.AddHostedService(sp => sp.GetRequiredService<VaultHealthMonitor>());
+        // Registered as a singleton first so the UI can read its state and push a sync on demand;
+        // AddHostedService<T>() alone would create an instance nothing else could reach.
+        services.AddSingleton<VaultSyncQueue>();
+        services.AddHostedService(sp => sp.GetRequiredService<VaultSyncQueue>());
 
         services.AddSingleton<GoogleOAuthService>();
         services.AddSingleton<OAuth2Service>();

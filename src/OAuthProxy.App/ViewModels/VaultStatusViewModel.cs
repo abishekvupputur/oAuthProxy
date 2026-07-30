@@ -7,17 +7,17 @@ using OAuthProxy.Core.Vault;
 namespace OAuthProxy.App.ViewModels;
 
 /// <summary>
-/// Turns the store's read-only state into something the window can show, and pushes it into every
-/// view model that owns a command capable of writing.
+/// The banner above the tabs: whether everything is in the vault, and if not, what that means.
 ///
-/// Core stays MVVM-free — it raises a plain event — so the translation into observable properties
-/// and the marshalling onto the UI thread both belong here.
+/// Its whole job is to keep one promise honest. Edits and token refreshes succeed immediately
+/// whether or not the password manager is reachable, so without this the UI would show changes as
+/// applied while the vault had never heard of them — and exiting would lose them with no warning.
 /// </summary>
 public sealed partial class VaultStatusViewModel : ObservableObject
 {
     private readonly ConfigStoreCache _configStoreCache;
+    private readonly VaultSyncQueue _syncQueue;
     private readonly VaultGateService _gate;
-    private readonly VaultHealthMonitor _healthMonitor;
     private readonly Dispatcher _dispatcher;
 
     private readonly CredentialsViewModel _credentials;
@@ -27,16 +27,16 @@ public sealed partial class VaultStatusViewModel : ObservableObject
 
     public VaultStatusViewModel(
         ConfigStoreCache configStoreCache,
+        VaultSyncQueue syncQueue,
         VaultGateService gate,
-        VaultHealthMonitor healthMonitor,
         CredentialsViewModel credentials,
         RoutesViewModel routes,
         McpFunnelViewModel funnels,
         SettingsViewModel settings)
     {
         _configStoreCache = configStoreCache;
+        _syncQueue = syncQueue;
         _gate = gate;
-        _healthMonitor = healthMonitor;
         _credentials = credentials;
         _routes = routes;
         _funnels = funnels;
@@ -44,42 +44,49 @@ public sealed partial class VaultStatusViewModel : ObservableObject
 
         _dispatcher = Dispatcher.CurrentDispatcher;
 
-        // The monitor runs on a thread-pool thread, so every touch of a bound property below has
-        // to be marshalled — WPF throws on a cross-thread property change, and it would do it from
-        // inside a background service where nothing is watching.
-        _configStoreCache.AccessChanged += access => _dispatcher.BeginInvoke(() => Apply(access));
+        // Both fire from thread-pool threads — the sync pump and the refresh loop — so every
+        // touch of a bound property has to be marshalled. WPF throws on a cross-thread property
+        // change, and it would do it from inside a background service where nothing is watching.
+        _syncQueue.StateChanged += _ => _dispatcher.BeginInvoke(Apply);
+        _configStoreCache.PendingChanged += () => _dispatcher.BeginInvoke(Apply);
 
-        Apply(_configStoreCache.Access);
+        Apply();
     }
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsDegraded))]
-    private bool _isWritable = true;
+    private bool _hasPendingChanges;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsDegraded))]
-    private bool _isOutOfSync;
+    [NotifyPropertyChangedFor(nameof(IsWaitingForUnlock))]
+    private VaultSyncState _state = VaultSyncState.Synced;
 
     [ObservableProperty] private string _headline = "";
     [ObservableProperty] private string _detail = "";
 
-    /// <summary>The per-manager advice, shown behind "Why can't I edit?".</summary>
+    /// <summary>The per-manager advice, shown behind "How do I stop this happening?".</summary>
     [ObservableProperty] private string _guidance = "";
 
-    public bool IsDegraded => !IsWritable || IsOutOfSync;
+    /// <summary>
+    /// Shown only while something is actually unsaved. A banner that appeared for a syncing state
+    /// nobody needs to act on would train the user to ignore it.
+    /// </summary>
+    public bool IsDegraded => HasPendingChanges && State != VaultSyncState.Syncing;
 
-    /// <summary>Re-probes now, for the "I've unlocked it" button.</summary>
+    public bool IsWaitingForUnlock => State == VaultSyncState.WaitingForUnlock;
+
+    /// <summary>Pushes now, for when the user has just unlocked their manager.</summary>
     [RelayCommand]
-    private async Task CheckAgainAsync()
+    private async Task SyncNowAsync()
     {
-        await Task.Run(() => _healthMonitor.CheckAsync());
-        Apply(_configStoreCache.Access);
+        await _syncQueue.FlushAsync(TimeSpan.FromSeconds(30));
+        Apply();
     }
 
     /// <summary>
-    /// Discards in-memory state and re-reads the vault. The only way out of a half-applied save,
-    /// and of a secret edited in the password manager's own UI — neither of which the app can
-    /// resolve on its own, since there is no change feed to watch.
+    /// Discards in-memory state and re-reads the vault — the way out of a secret edited in the
+    /// password manager's own UI, which nothing here can be notified about.
     /// </summary>
     [RelayCommand]
     private async Task ReloadFromVaultAsync()
@@ -91,74 +98,62 @@ public sealed partial class VaultStatusViewModel : ObservableObject
         _funnels.Reload();
         _settings.Reload();
 
-        Apply(_configStoreCache.Access);
+        Apply();
     }
 
-    private void Apply(VaultAccess access)
+    private void Apply()
     {
-        IsWritable = access == VaultAccess.Writable;
-        IsOutOfSync = _configStoreCache.IsOutOfSync;
+        HasPendingChanges = _configStoreCache.HasPendingChanges;
+        State = _syncQueue.State;
 
         var manager = VaultLockGuidance.DisplayName(_gate.Status.Selected);
 
-        _credentials.CanEdit = IsWritable;
-        _routes.CanEdit = IsWritable;
-        _funnels.CanEdit = IsWritable;
-        _settings.CanEdit = IsWritable;
-
-        if (!IsWritable)
+        if (!HasPendingChanges)
         {
-            Headline = $"{manager} is locked — editing and token refresh are paused.";
-            Detail = DescribeWhatBreaksNext();
-            Guidance = VaultLockGuidance.StayingUnlockedSteps(_gate.Status.Selected);
-            return;
-        }
-
-        if (IsOutOfSync)
-        {
-            Headline = "Some changes reached the vault and some did not.";
-            Detail = "Retry the save, or reload from the vault to discard what did not.";
+            Headline = "";
+            Detail = "";
             Guidance = "";
             return;
         }
 
-        Headline = "";
-        Detail = "";
-        Guidance = "";
+        Guidance = VaultLockGuidance.StayingUnlockedSteps(_gate.Status.Selected);
+
+        Headline = State switch
+        {
+            VaultSyncState.WaitingForUnlock => $"Waiting for {manager} — your changes are not saved yet.",
+            VaultSyncState.Failed => $"{manager} refused the last save.",
+            _ => "Saving to your password manager…",
+        };
+
+        // The consequence, not just the state. "Not saved" alone reads as a spinner; what the user
+        // needs to know is that quitting now throws the changes away.
+        Detail = State switch
+        {
+            VaultSyncState.WaitingForUnlock =>
+                $"Unlock {manager} and they will be saved automatically. "
+                + "Everything keeps working in the meantime — but if OAuthProxy exits first, these "
+                + "changes are lost, and any credential whose token was refreshed will need reconnecting."
+                + PendingFor(),
+
+            VaultSyncState.Failed =>
+                (_syncQueue.LastError ?? "The vault rejected the change.")
+                + " Your changes are still here and will be retried.",
+
+            _ => "",
+        };
     }
 
-    /// <summary>
-    /// How long there is before the lock actually costs something. Without this the banner is a
-    /// warning with no stakes; with it the user can tell "fix this now" from "fix it later".
-    /// </summary>
-    private string DescribeWhatBreaksNext()
+    private string PendingFor()
     {
-        var expiring = _configStoreCache.Current.Credentials
-            .Where(c => c.Token is not null)
-            .Select(c => c.Token!.ExpiresAtUtc)
-            .OrderBy(expiry => expiry)
-            .ToList();
+        if (_configStoreCache.PendingSince is not { } since) return "";
 
-        if (expiring.Count == 0)
-        {
-            return "No OAuth credentials are affected. API-key routes keep working normally.";
-        }
+        var waiting = DateTimeOffset.UtcNow - since;
+        if (waiting < TimeSpan.FromMinutes(1)) return "";
 
-        var soonest = expiring[0];
+        var span = waiting.TotalHours >= 1
+            ? $"{(int)waiting.TotalHours} hour(s)"
+            : $"{(int)waiting.TotalMinutes} minute(s)";
 
-        if (soonest <= DateTimeOffset.UtcNow)
-        {
-            return "At least one OAuth token has already expired, so routes using it are failing. "
-                   + "API-key routes are unaffected.";
-        }
-
-        var remaining = soonest - DateTimeOffset.UtcNow;
-
-        var span = remaining.TotalHours >= 1
-            ? $"{(int)remaining.TotalHours} hour(s)"
-            : $"{Math.Max(1, (int)remaining.TotalMinutes)} minute(s)";
-
-        return $"OAuth routes keep working for about {span}, until the first token expires. "
-               + "API-key routes are unaffected.";
+        return $" Waiting for {span}.";
     }
 }

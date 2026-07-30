@@ -36,15 +36,15 @@
                                TextWrapping="Wrap" Margin="0,2,0,0"/>
 
                     <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-                        <Button Content="I've unlocked it — check again" Margin="0,0,8,0"
-                                Command="{Binding CheckAgainCommand}"/>
-                        <Button Content="Reload from vault" Style="{StaticResource GhostButtonStyle}"
+                        <Button Content="I've unlocked it — save now" Margin="0,0,8,0"
+                                Command="{Binding SyncNowCommand}"/>
+                        <Button Content="Discard and reload from vault" Style="{StaticResource GhostButtonStyle}"
                                 Command="{Binding ReloadFromVaultCommand}"/>
                     </StackPanel>
 
-                    <Expander Header="Why can't I edit?" Margin="0,8,0,0"
+                    <Expander Header="How do I stop this happening?" Margin="0,8,0,0"
                               Foreground="{StaticResource MutedTextBrush}"
-                              Visibility="{Binding IsWritable, Converter={StaticResource InverseBoolToVisibilityConverter}}">
+                              Visibility="{Binding IsWaitingForUnlock, Converter={StaticResource BoolToVisibilityConverter}}">
                         <TextBlock Text="{Binding Guidance}" Style="{StaticResource HintTextStyle}"
                                    TextWrapping="Wrap" Margin="0,6,0,0"/>
                     </Expander>

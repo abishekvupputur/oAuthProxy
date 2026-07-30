@@ -439,20 +439,11 @@ public sealed class OnePasswordVaultProvider(
         var note = await GetItemAsync(noteSummary.ItemId, ct);
         var document = VaultDocument.TryParse(note?.Field(VaultFields.NoteContent) ?? "");
 
-        if (document is null) return new VaultIndex();
-
-        // The revision guard. Both managers sync, so another machine may have written since this
-        // one loaded — and overwriting it silently is how two installs quietly destroy each
-        // other's routes and keys.
-        if (document.Revision != _loadedRevision)
-        {
-            throw new VaultSaveException(
-                $"The configuration in '{VaultConstants.VaultName}' was changed elsewhere"
-                + (string.IsNullOrEmpty(document.WrittenBy) ? "" : $" (by {document.WrittenBy})")
-                + ". Reload from the vault before saving, or your changes will overwrite theirs.",
-                partiallyApplied: false);
-        }
-
+        // Deliberately no revision comparison. This app assumes a single instance, and the sync
+        // queue re-reads and rewrites whenever it can — so a guard here would turn a lock that
+        // lifted at an awkward moment into a save that refuses and retries forever, a worse
+        // outcome than the concurrent write it would be guarding against. The revision is still
+        // stamped into the note, so a second writer is at least visible after the fact.
         return document.Index;
     }
 

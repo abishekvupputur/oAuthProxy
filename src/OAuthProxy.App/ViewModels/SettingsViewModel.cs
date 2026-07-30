@@ -11,20 +11,6 @@ namespace OAuthProxy.App.ViewModels;
 
 public sealed partial class SettingsViewModel : ObservableObject
 {
-
-    /// <summary>
-    /// False while the password manager is locked. Every command that writes to the vault is
-    /// gated on this, so the buttons grey out the moment it locks rather than staying clickable
-    /// and failing — ConfigStoreCache refuses the write either way, but an error the user could
-    /// not have avoided is a worse way to find out.
-    /// </summary>
-    [ObservableProperty]
-    private bool _canEdit = true;
-
-    partial void OnCanEditChanged(bool value)
-    {
-        SavePortCommand.NotifyCanExecuteChanged();
-    }
     private const int VisibleLogLines = 20;
 
     private readonly ConfigStoreCache _configStoreCache;
@@ -130,7 +116,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
     }
 
-    [RelayCommand(CanExecute = nameof(CanEdit))]
+    [RelayCommand]
     private async Task SavePortAsync()
     {
         if (ListenPort is < 1 or > 65535)
