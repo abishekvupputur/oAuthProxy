@@ -196,6 +196,59 @@ public class ProtonPassProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task IdsArePassedAsAttachedFlagsSoLeadingHyphensAreNotReadAsArguments()
+    {
+        // Proton Pass ids are base64url, so roughly one in sixty starts with a hyphen. Passed as
+        // two arguments, the CLI reads "--item-id -0_TRk…" as an unknown flag and refuses:
+        // "error: unexpected argument '-0' found". The delete then fails silently on every save,
+        // leaving an orphaned item behind — which is how one route ended up with two key items.
+        var fake = new FakeProtonPass();
+        var runner = fake.AsRunner();
+        var provider = NewProvider(runner);
+        var store = StoreWithSecrets();
+
+        await provider.SaveAsync(store);
+        store.Credentials.RemoveAt(0);
+        await provider.SaveAsync(store);
+
+        Assert.All(runner.Invocations, invocation =>
+            Assert.DoesNotContain(invocation.Args, arg => arg is "--share-id" or "--item-id"));
+
+        Assert.Contains(runner.AllArguments, arg => arg.StartsWith("--share-id=", StringComparison.Ordinal));
+        Assert.Contains(runner.AllArguments, arg => arg.StartsWith("--item-id=", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ADuplicateItemClaimingTheSameRecordIsSweptOnTheNextSave()
+    {
+        // Whatever leaves one behind — a delete that failed, a hand-made copy — the next save has
+        // to converge. Two items claiming one route key is worse than untidy: the proxy accepts
+        // only the indexed one, and the other looks equally valid in the password manager.
+        var fake = new FakeProtonPass();
+        var provider = NewProvider(fake.AsRunner());
+        var store = StoreWithSecrets();
+
+        await provider.SaveAsync(store);
+
+        var routeId = store.Routes[0].Id;
+        fake.ForgeDuplicate(VaultItemNaming.ForRouteKey(routeId, store.Routes[0].PathPrefix), "STALE-KEY");
+
+        Assert.Equal(2, CountRouteKeyItems(fake, routeId));
+
+        store.Settings.ListenPort = 5999;
+        await provider.SaveAsync(store);
+
+        Assert.Equal(1, CountRouteKeyItems(fake, routeId));
+        Assert.Equal(RouteKeyValue, (await provider.LoadAsync()).Routes[0].Key.Value);
+    }
+
+    private static int CountRouteKeyItems(FakeProtonPass fake, Guid routeId) =>
+        fake.Items.Count(item =>
+            VaultItemNaming.TryParse(item["title"]?.GetValue<string>() ?? "", out var role, out var id)
+            && role == VaultItemRole.RouteKey
+            && id == routeId);
+
+    [Fact]
     public async Task DeletingACredentialDeletesItsItem()
     {
         var provider = NewProvider(new FakeProtonPass().AsRunner());

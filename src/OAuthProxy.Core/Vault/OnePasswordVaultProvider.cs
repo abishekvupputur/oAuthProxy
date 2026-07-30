@@ -444,7 +444,11 @@ public sealed class OnePasswordVaultProvider(
         // lifted at an awkward moment into a save that refuses and retries forever, a worse
         // outcome than the concurrent write it would be guarding against. The revision is still
         // stamped into the note, so a second writer is at least visible after the fact.
-        return document.Index;
+        //
+        // An unreadable note yields an empty index rather than throwing: the guids in the item
+        // titles are enough to reconnect everything, and refusing to save would strand the user
+        // with a broken note they could only fix by hand.
+        return document?.Index ?? new VaultIndex();
     }
 
     private async Task<Dictionary<(VaultItemRole, Guid), VaultItemContents>> ResolveSecretsAsync(

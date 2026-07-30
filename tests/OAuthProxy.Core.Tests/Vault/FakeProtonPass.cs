@@ -36,6 +36,23 @@ public sealed class FakeProtonPass
 
     public IReadOnlyCollection<JsonObject> Items => _items.Values;
 
+    /// <summary>
+    /// Plants a second item claiming a record that already has one — what a failed delete used to
+    /// leave behind, and what any save must converge away from.
+    /// </summary>
+    public void ForgeDuplicate(string title, string password)
+    {
+        var id = $"-forged{_nextId++}_x";
+
+        _items[id] = new JsonObject
+        {
+            ["title"] = title,
+            ["username"] = "",
+            ["password"] = password,
+            ["__type"] = "login",
+        };
+    }
+
     public FakeCliRunner AsRunner()
     {
         var runner = new FakeCliRunner();
@@ -45,7 +62,7 @@ public sealed class FakeProtonPass
             ["--version"] => Ok(Version),
             ["vault", "list", ..] => Ok(VaultListJson()),
             ["vault", "create", ..] => CreateVault(),
-            ["item", "list", ..] => Ok(ItemListJson(args.Contains("--show-secrets"))),
+            ["item", "list", ..] => Ok(ItemListJson(HasFlag(args, "--show-secrets"))),
             ["item", "create", var type, ..] => CreateItem(runner, type),
             ["item", "delete", ..] => DeleteItem(args),
             _ => null,
@@ -58,11 +75,32 @@ public sealed class FakeProtonPass
 
     private static CliResult Fail(string stderr) => new(1, "", stderr);
 
-    private static string? ValueAfter(IReadOnlyList<string> args, string flag)
+    /// <summary>
+    /// Reads a flag's value the way clap does — and refuses the detached form when the value looks
+    /// like a flag, which is exactly how the real CLI behaves.
+    ///
+    /// This is not pedantry. Proton Pass ids are base64url, so about one in sixty starts with a
+    /// hyphen, and `--item-id -0_TRk...` is rejected with "unexpected argument '-0' found". A fake
+    /// that quietly accepted it would let a delete-can-never-succeed bug pass every test while
+    /// orphaning an item on every save against the real thing.
+    /// </summary>
+    private static string? ValueOf(IReadOnlyList<string> args, string flag)
     {
+        foreach (var arg in args)
+        {
+            if (arg.StartsWith(flag + "=", StringComparison.Ordinal)) return arg[(flag.Length + 1)..];
+        }
+
         var index = args.ToList().IndexOf(flag);
-        return index >= 0 && index + 1 < args.Count ? args[index + 1] : null;
+        if (index < 0 || index + 1 >= args.Count) return null;
+
+        var value = args[index + 1];
+        return value.StartsWith('-') ? null : value;
     }
+
+    /// <summary>True when a flag was passed at all, in either form.</summary>
+    private static bool HasFlag(IReadOnlyList<string> args, string flag) =>
+        args.Any(a => a == flag || a.StartsWith(flag + "=", StringComparison.Ordinal));
 
     private CliResult CreateVault()
     {
@@ -200,7 +238,9 @@ public sealed class FakeProtonPass
 
         template["__type"] = type;
 
-        var id = $"item-{_nextId++}";
+        // Leading hyphen on purpose: real ids are base64url and roughly one in sixty
+        // looks like this, which is what broke deletes passed as two arguments.
+        var id = $"-item{_nextId++}_x";
         _items[id] = template;
 
         // The real CLI prints the bare item id, not JSON.
@@ -209,10 +249,14 @@ public sealed class FakeProtonPass
 
     private CliResult DeleteItem(IReadOnlyList<string> args)
     {
-        var id = ValueAfter(args, "--item-id");
+        var id = ValueOf(args, "--item-id");
 
-        return id is not null && _items.Remove(id)
-            ? Ok($"Item {id} deleted successfully")
-            : Fail("item not found");
+        if (id is null)
+        {
+            // What clap actually says when a base64url id starting with '-' is passed detached.
+            return Fail("error: unexpected argument found");
+        }
+
+        return _items.Remove(id) ? Ok($"Item {id} deleted successfully") : Fail("item not found");
     }
 }
