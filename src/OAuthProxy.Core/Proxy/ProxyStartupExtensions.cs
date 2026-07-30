@@ -21,6 +21,7 @@ public static class ProxyStartupExtensions
     public static IServiceCollection AddOAuthProxy(this IServiceCollection services)
     {
         services.AddSingleton<ActivityLog>();
+        services.AddSingleton<ICliRunner, CliRunner>();
 
         // Placeholder backend. The real one is chosen at startup once the setup gate knows which
         // password manager is installed and unlocked, and is registered over this — so the app

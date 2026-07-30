@@ -1,0 +1,163 @@
+using System.Diagnostics;
+using System.Text;
+using OAuthProxy.Core.Diagnostics;
+
+namespace OAuthProxy.Core.Vault;
+
+/// <summary>
+/// Runs a password-manager CLI as a child process.
+///
+/// Two rules shape everything here.
+///
+/// **No secret ever goes in an argument.** A Windows process command line is readable by any
+/// other process in the same session — no API call, no permission, just an enumeration. That is
+/// strictly worse than the DPAPI file this replaced, so a design that put a client secret in
+/// argv would be a downgrade wearing a password manager's clothes. Secrets travel on stdin (as
+/// JSON item templates) or in the child's environment block, which is not enumerable the same way.
+///
+/// **No captured stdout is ever logged.** The output of any get/list is item contents. Logging
+/// records the command, the exit code, and how long it took; on failure it adds the first line of
+/// stderr, which these CLIs use for diagnostics rather than data.
+/// </summary>
+public sealed class CliRunner(ActivityLog activityLog) : ICliRunner
+{
+    /// <summary>Reads are quick. A hung one means something is badly wrong, not slow.</summary>
+    public static readonly TimeSpan ReadTimeout = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// Writes get much longer: a write can sit waiting on a Windows Hello prompt the user has not
+    /// noticed yet, and killing that would look like a random save failure.
+    /// </summary>
+    public static readonly TimeSpan WriteTimeout = TimeSpan.FromSeconds(45);
+
+    public async Task<CliResult> RunAsync(
+        string exePath,
+        IReadOnlyList<string> args,
+        string? stdin = null,
+        IReadOnlyDictionary<string, string>? env = null,
+        TimeSpan? timeout = null,
+        CancellationToken ct = default)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = exePath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+        };
+
+        // ArgumentList, not a joined Arguments string: .NET applies the exact quoting rules the
+        // Windows command-line parser expects. Hand-rolled quoting is where argument-injection
+        // bugs live, and a vault name or route prefix is user-controlled text.
+        foreach (var arg in args) startInfo.ArgumentList.Add(arg);
+
+        if (env is not null)
+        {
+            foreach (var (key, value) in env) startInfo.Environment[key] = value;
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        var effectiveTimeout = timeout ?? ReadTimeout;
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(effectiveTimeout);
+
+        using var process = new Process { StartInfo = startInfo };
+
+        try
+        {
+            process.Start();
+        }
+        catch (Exception ex)
+        {
+            activityLog.LogError($"VAULT {Describe(exePath, args)} could not start", ex);
+            throw new VaultCliException($"Could not run '{Path.GetFileName(exePath)}': {ex.Message}", ex);
+        }
+
+        // Start draining both pipes before writing stdin. A child that fills its stdout buffer
+        // blocks on the write, and if this side is still busy sending stdin neither can move —
+        // the classic redirected-process deadlock.
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(timeoutCts.Token);
+        var stderrTask = process.StandardError.ReadToEndAsync(timeoutCts.Token);
+
+        try
+        {
+            if (stdin is not null)
+            {
+                await process.StandardInput.WriteAsync(stdin.AsMemory(), timeoutCts.Token).ConfigureAwait(false);
+            }
+
+            // Closed unconditionally: a CLI reading a template from stdin waits for EOF, so
+            // skipping this on the no-stdin path would hang every such call.
+            process.StandardInput.Close();
+
+            await process.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
+
+            var result = new CliResult(
+                process.ExitCode,
+                await stdoutTask.ConfigureAwait(false),
+                await stderrTask.ConfigureAwait(false));
+
+            Log(exePath, args, result, stopwatch.ElapsedMilliseconds);
+            return result;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // Timed out rather than cancelled by the caller. Kill the whole tree: `op` shells out
+            // to the desktop app and `pass-cli` can leave a helper behind, and an orphan holding
+            // the vault open would make every later call fail for no visible reason.
+            TryKill(process);
+
+            activityLog.Log($"VAULT {Describe(exePath, args)} timed out after {effectiveTimeout.TotalSeconds:0}s");
+            throw new VaultCliException(
+                $"'{Path.GetFileName(exePath)}' did not respond within {effectiveTimeout.TotalSeconds:0} seconds. "
+                + "If your password manager was waiting for you to unlock it, unlock it and try again.");
+        }
+        catch (OperationCanceledException)
+        {
+            TryKill(process);
+            throw;
+        }
+    }
+
+    private void Log(string exePath, IReadOnlyList<string> args, CliResult result, long elapsedMs)
+    {
+        // Deliberately no stdout: for a get or a list that is the item contents.
+        var message = $"VAULT {Describe(exePath, args)} -> exit {result.ExitCode} in {elapsedMs}ms";
+
+        if (!result.Succeeded && result.FirstErrorLine() is { Length: > 0 } error)
+        {
+            message += $" ({error})";
+        }
+
+        activityLog.Log(message);
+    }
+
+    /// <summary>
+    /// The command as it is safe to write down. Arguments are included because none of them may
+    /// contain a secret — that is the invariant this class exists to hold, and a test asserts it.
+    /// </summary>
+    private static string Describe(string exePath, IReadOnlyList<string> args) =>
+        $"{Path.GetFileNameWithoutExtension(exePath)} {string.Join(' ', args)}".TrimEnd();
+
+    private static void TryKill(Process process)
+    {
+        try
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+        }
+        catch
+        {
+            // Already gone, or not ours to kill. Nothing useful left to do.
+        }
+    }
+}
+
+/// <summary>The CLI could not be run, or did not answer in time. Distinct from a non-zero exit,
+/// which is a normal answer that callers interpret themselves.</summary>
+public sealed class VaultCliException(string message, Exception? innerException = null)
+    : Exception(message, innerException);
