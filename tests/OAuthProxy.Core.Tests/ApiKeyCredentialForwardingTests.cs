@@ -27,7 +27,7 @@ namespace OAuthProxy.Core.Tests;
 /// </summary>
 public class ApiKeyCredentialForwardingTests : IAsyncLifetime
 {
-    private const string ProxyKey = "api-key-fwd-test-key-0123456789";
+    private const string RouteProxyKey = "api-key-fwd-test-key-0123456789";
     private const string StaticKey = "STATIC-API-KEY";
     private const string OAuthToken = "OAUTH-ACCESS-TOKEN";
 
@@ -139,13 +139,14 @@ public class ApiKeyCredentialForwardingTests : IAsyncLifetime
 
         await cache.MutateAsync(store =>
         {
-            store.Settings.LocalApiKey = ProxyKey;
             store.Credentials.Add(apiKey);
             store.Credentials.Add(oauth);
             store.Credentials.Add(brokenKey);
             store.Credentials.Add(emptyKey);
             store.Upstreams.Add(upstreamRecord);
 
+            // One key value across every route here: these tests are about what reaches the
+            // upstream, not about which key opens which route (that is LocalAccessGuardTests).
             void AddRoute(string prefix, params RouteCredential[] credentials) =>
                 store.Routes.Add(new RouteMapping
                 {
@@ -153,6 +154,7 @@ public class ApiKeyCredentialForwardingTests : IAsyncLifetime
                     UpstreamId = upstreamRecord.Id,
                     StripPrefix = true,
                     Credentials = [.. credentials],
+                    Key = new ProxyKey { Value = RouteProxyKey },
                 });
 
             AddRoute(KeyInHeader, Entry(apiKey.Id, CredentialPlacement.Header, "X-Api-Key", ""));
@@ -239,7 +241,7 @@ public class ApiKeyCredentialForwardingTests : IAsyncLifetime
     public async Task AKeyContainingALineBreakIsNeverPutOnTheWire()
     {
         // Request splitting, aimed at the upstream: the CR/LF would end the header line and the
-        // rest would be read as a further header. Refused rather than sanitized — a silently
+        // rest would be read as a further header. Refused rather than sanitized â€” a silently
         // trimmed key is a key that does not work, reported as one that does.
         var seen = await GetAsync($"{BrokenKey}/resource");
 
@@ -254,7 +256,7 @@ public class ApiKeyCredentialForwardingTests : IAsyncLifetime
     public async Task ACredentialWithAnEmptyKeyForwardsUnauthenticatedRatherThanSendingABlankHeader()
     {
         // A blank header would be rejected by the upstream with a 401 that says nothing about
-        // the real problem — that no key was ever stored.
+        // the real problem â€” that no key was ever stored.
         var seen = await GetAsync($"{EmptyKey}/resource");
 
         Assert.Null(seen.Header("X-Api-Key"));
@@ -264,7 +266,7 @@ public class ApiKeyCredentialForwardingTests : IAsyncLifetime
     public async Task AStaticKeyReplacesACallerSuppliedHeaderOfTheSameName()
     {
         var request = new HttpRequestMessage(HttpMethod.Get, $"{KeyInHeader}/resource");
-        request.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, ProxyKey);
+        request.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, RouteProxyKey);
         request.Headers.Add("X-Api-Key", "CALLER-SUPPLIED");
 
         var response = await _client.SendAsync(request);
@@ -286,7 +288,7 @@ public class ApiKeyCredentialForwardingTests : IAsyncLifetime
     private async Task<Seen> GetAsync(string url)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, ProxyKey);
+        request.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, RouteProxyKey);
 
         var response = await _client.SendAsync(request);
         Assert.True(response.IsSuccessStatusCode, $"{response.StatusCode} / {_lastForwarderError}");
@@ -300,7 +302,7 @@ public class ApiKeyCredentialForwardingTests : IAsyncLifetime
         {
             Content = new StringContent(body, Encoding.UTF8, "application/json"),
         };
-        request.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, ProxyKey);
+        request.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, RouteProxyKey);
 
         var response = await _client.SendAsync(request);
         Assert.True(response.IsSuccessStatusCode, $"{response.StatusCode} / {_lastForwarderError}");
@@ -316,3 +318,4 @@ public class ApiKeyCredentialForwardingTests : IAsyncLifetime
         }
     }
 }
+

@@ -24,6 +24,15 @@ public sealed partial class RoutesViewModel : ObservableObject
     [ObservableProperty] private CredentialRecord? _newRouteCredential;
     [ObservableProperty] private bool _newRouteStripPrefix = true;
 
+    /// <summary>
+    /// How long the key issued to a new route stays valid. Defaults to never, matching what a
+    /// machine-local endpoint pointed at by a config file needs; anything shorter is a deliberate
+    /// choice the user makes here or changes later on the row.
+    /// </summary>
+    [ObservableProperty] private ProxyKeyLifetime _newRouteKeyLifetime = ProxyKeyLifetime.Never;
+
+    public IReadOnlyList<ProxyKeyLifetime> KeyLifetimes => ProxyKeyLifetime.All;
+
     // Bearer-in-a-header is the default here and in RouteCredential, so someone who never opens
     // these fields gets exactly the behaviour the app had before they existed.
     [ObservableProperty] private CredentialPlacement _newRouteCredentialPlacement = CredentialPlacement.Header;
@@ -290,6 +299,10 @@ public sealed partial class RoutesViewModel : ObservableObject
             StripPrefix = NewRouteStripPrefix,
             Enabled = true,
             Credentials = credentials,
+
+            // Issued here, with the record, rather than left for the load-time backfill: a key
+            // generated and saved in the same write can never differ between memory and disk.
+            Key = ProxyKey.Generate(NewRouteKeyLifetime.Duration),
         };
 
         await SaveAndRebuildAsync(store => store.Routes.Add(route));
@@ -297,10 +310,15 @@ public sealed partial class RoutesViewModel : ObservableObject
         Reload();
 
         NewRoutePathPrefix = "";
-        StatusMessage = credentials.Count == 0
+
+        var keyNote = $" Its own proxy key was generated ({route.Key.DescribeExpiry(DateTimeOffset.UtcNow)}) — "
+                      + "copy it from the route's row; no other route's key opens this one.";
+
+        StatusMessage = (credentials.Count == 0
             ? $"Route '{prefix}' added — no credential attached, requests are forwarded unauthenticated. "
               + "Use 'Add credential' on the route to attach one."
-            : $"Route '{prefix}' added — credential sent as {credentials[0].ToCredentialInjection().Describe()}.";
+            : $"Route '{prefix}' added — credential sent as {credentials[0].ToCredentialInjection().Describe()}.")
+            + keyNote;
     }
 
     [RelayCommand]

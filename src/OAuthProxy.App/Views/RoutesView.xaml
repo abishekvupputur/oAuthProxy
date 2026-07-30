@@ -60,7 +60,7 @@ Entries may reuse the same credential in different places, or use different cred
                        Visibility="{Binding HasNoRoutes, Converter={StaticResource BoolToVisibilityConverter}}"/>
 
             <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,6"
-                       Text="Select a route to change how its credential is sent."
+                       Text="Select a route to copy its proxy key or change how its credential is sent."
                        Visibility="{Binding HasRoutes, Converter={StaticResource BoolToVisibilityConverter}}"/>
 
             <DataGrid ItemsSource="{Binding Routes}" AutoGenerateColumns="False" IsReadOnly="True" Margin="0,0,0,18"
@@ -74,6 +74,13 @@ Entries may reuse the same credential in different places, or use different cred
                         <Border Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderSubtleBrush}"
                                 BorderThickness="0,1,0,0" Padding="12,10">
                             <StackPanel>
+                                <!-- The key that opens this route, first: it is what a caller
+                                     needs before anything below it matters. -->
+                                <ContentControl Content="{Binding Key}" ContentTemplate="{StaticResource ProxyKeyEditorTemplate}"/>
+
+                                <Border BorderBrush="{StaticResource BorderSubtleBrush}" BorderThickness="0,1,0,0"
+                                        Margin="0,10,0,10"/>
+
                                 <TextBlock Text="Credentials attached to this route" Style="{StaticResource FieldLabelStyle}"
                                            ToolTip="{StaticResource MultiCredentialHelpText}"/>
 
@@ -173,6 +180,22 @@ Entries may reuse the same credential in different places, or use different cred
                                     <TextBlock Text="⚠ upstream missing — this route is not served" FontSize="10"
                                                Foreground="{StaticResource ErrorBrush}" TextWrapping="Wrap"
                                                Visibility="{Binding IsBroken, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+
+                    <!-- Status only. The key itself is in the row details, where it can be shown,
+                         copied, and re-issued without a cell fighting for width. -->
+                    <DataGridTemplateColumn Header="PROXY KEY" Width="150">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <StackPanel VerticalAlignment="Center" ToolTip="{StaticResource ProxyKeyHelpText}">
+                                    <TextBlock Text="{Binding Key.ExpirySummary}" TextWrapping="Wrap" FontSize="10"
+                                               Foreground="{StaticResource MutedTextBrush}"/>
+                                    <TextBlock Text="⚠ expired — this route answers 403" FontSize="10" TextWrapping="Wrap"
+                                               Foreground="{StaticResource ErrorBrush}"
+                                               Visibility="{Binding Key.IsExpired, Converter={StaticResource BoolToVisibilityConverter}}"/>
                                 </StackPanel>
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
@@ -322,6 +345,17 @@ Entries may reuse the same credential in different places, or use different cred
                             </Grid>
                         </StackPanel>
                     </UniformGrid>
+                    <StackPanel Margin="0,0,0,8" HorizontalAlignment="Left">
+                        <TextBlock Text="Proxy key validity" Style="{StaticResource FieldLabelStyle}"
+                                   ToolTip="{StaticResource ProxyKeyExpiryHelpText}"/>
+                        <ComboBox Width="180" HorizontalAlignment="Left"
+                                  ItemsSource="{Binding KeyLifetimes}"
+                                  SelectedItem="{Binding NewRouteKeyLifetime, Mode=TwoWay}"
+                                  ToolTip="{StaticResource ProxyKeyExpiryHelpText}"/>
+                        <TextBlock Style="{StaticResource HintTextStyle}"
+                                   Text="The route gets its own key on creation — copy it from the route's row afterwards. Changeable at any time."/>
+                    </StackPanel>
+
                     <CheckBox Content="Strip path prefix before forwarding" IsChecked="{Binding NewRouteStripPrefix}"
                               ToolTip="{StaticResource StripPrefixHelpText}" Margin="0,0,0,4"/>
                     <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,10"

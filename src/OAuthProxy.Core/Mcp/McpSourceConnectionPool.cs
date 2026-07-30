@@ -168,9 +168,14 @@ public sealed class McpSourceConnectionPool : IAsyncDisposable
             var prefix = route.PathPrefix.TrimEnd('/');
             endpoint = new Uri($"http://127.0.0.1:{store.Settings.ListenPort}{prefix}");
 
-            // Read live rather than captured at construction, so regenerating the key in the
-            // Settings tab doesn't leave every funnel authenticating with a stale one.
-            headers[LocalAccessGuard.ApiKeyHeaderName] = store.Settings.LocalApiKey;
+            // The route's own key, not the funnel's: this hop is an ordinary call to that route,
+            // and the guard on the way back in accepts nothing else. Read live rather than
+            // captured at construction, so regenerating the key on the Routes tab doesn't leave
+            // every funnel authenticating with a stale one.
+            //
+            // A route whose key has expired fails here exactly as any other client would, with
+            // 403 from the guard. That is the point of an expiry the user set.
+            headers[LocalAccessGuard.ApiKeyHeaderName] = route.Key.Value;
 
             // Marks the request as originating from the funnel itself. The funnel gate refuses
             // anything already carrying it, which is what stops a source that resolves back to

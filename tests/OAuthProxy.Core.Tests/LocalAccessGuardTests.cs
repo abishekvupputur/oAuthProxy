@@ -21,6 +21,11 @@ public class LocalAccessGuardTests : IAsyncLifetime
 {
     private const string ValidKey = "test-key-abcdefghijklmnopqrstuvwxyz";
 
+    /// <summary>A second route's key, which must open that route and nothing else.</summary>
+    private const string OtherRouteKey = "other-route-key-zyxwvutsrqponmlkjihgfedcba";
+
+    private const string FunnelKey = "funnel-key-0123456789abcdefghijklmnop";
+
     private IHost _host = null!;
     private HttpClient _client = null!;
 
@@ -42,7 +47,39 @@ public class LocalAccessGuardTests : IAsyncLifetime
                     .Configure(app =>
                     {
                         var cache = app.ApplicationServices.GetRequiredService<ConfigStoreCache>();
-                        cache.Current.Settings.LocalApiKey = ValidKey;
+
+                        // There is no proxy-wide key any more: the guard authenticates against
+                        // the key of whichever route or funnel the path belongs to, so the store
+                        // needs those endpoints to exist before any request can be allowed.
+                        cache.Current.Routes.Add(new RouteMapping
+                        {
+                            PathPrefix = "/anything",
+                            UpstreamId = Guid.NewGuid(),
+                            Key = new ProxyKey { Value = ValidKey },
+                        });
+                        cache.Current.Routes.Add(new RouteMapping
+                        {
+                            PathPrefix = "/other",
+                            UpstreamId = Guid.NewGuid(),
+                            Key = new ProxyKey { Value = OtherRouteKey },
+                        });
+                        cache.Current.Routes.Add(new RouteMapping
+                        {
+                            PathPrefix = "/lapsed",
+                            UpstreamId = Guid.NewGuid(),
+                            Key = new ProxyKey
+                            {
+                                Value = ValidKey,
+                                CreatedUtc = DateTimeOffset.UtcNow.AddDays(-30),
+                                ExpiresUtc = DateTimeOffset.UtcNow.AddMinutes(-1),
+                            },
+                        });
+                        cache.Current.McpFunnels.Add(new McpFunnelRecord
+                        {
+                            Name = "agent",
+                            Slug = "agent",
+                            Key = new ProxyKey { Value = FunnelKey },
+                        });
 
                         app.UseLocalAccessGuard();
                         app.Run(async context =>
@@ -169,6 +206,97 @@ public class LocalAccessGuardTests : IAsyncLifetime
         var response = await _client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task AnotherRoutesKey_DoesNotOpenThisRoute()
+    {
+        // The point of per-endpoint keys. Under a single proxy-wide key, a client trusted with
+        // one route could spend the OAuth grant attached to every other one.
+        var request = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1/anything");
+        request.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, OtherRouteKey);
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task EachRouteIsOpenedByItsOwnKey()
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1/other/resource");
+        request.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, OtherRouteKey);
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task AFunnelIsOpenedOnlyByItsOwnKey()
+    {
+        var withFunnelKey = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1/mcp/agent");
+        withFunnelKey.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, FunnelKey);
+
+        Assert.Equal(HttpStatusCode.OK, (await _client.SendAsync(withFunnelKey)).StatusCode);
+
+        // A route's key must not reach the funnel: an agent handed a funnel is deliberately given
+        // a narrowed view of its sources, and the route keys behind it would bypass that.
+        var withRouteKey = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1/mcp/agent");
+        withRouteKey.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, ValidKey);
+
+        Assert.Equal(HttpStatusCode.Forbidden, (await _client.SendAsync(withRouteKey)).StatusCode);
+    }
+
+    [Fact]
+    public async Task AFunnelsKey_DoesNotOpenARoute()
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1/anything");
+        request.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, FunnelKey);
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task AnExpiredKey_IsRejectedEvenThoughTheValueMatches()
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1/lapsed/resource");
+        request.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, ValidKey);
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task APathBelongingToNoEndpoint_IsRejectedRatherThanAnnounced()
+    {
+        // Answered with the same 403 as a wrong key, so an unauthenticated caller cannot map
+        // which prefixes exist by watching status codes.
+        var request = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1/not-a-route");
+        request.Headers.Add(LocalAccessGuard.ApiKeyHeaderName, ValidKey);
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public void TheLongestMatchingPrefixOwnsThePath()
+    {
+        // Same choice ASP.NET routing makes downstream. If the shorter prefix won here, a request
+        // that will be served by /app/mail would be authenticated against /app's key.
+        var store = new ConfigStore();
+        store.Routes.Add(new RouteMapping { PathPrefix = "/app", Key = new ProxyKey { Value = "outer" } });
+        store.Routes.Add(new RouteMapping { PathPrefix = "/app/mail", Key = new ProxyKey { Value = "inner" } });
+
+        Assert.Equal("inner", LocalAccessGuard.ResolveTarget(store, "/app/mail/messages")?.Key.Value);
+        Assert.Equal("outer", LocalAccessGuard.ResolveTarget(store, "/app/other")?.Key.Value);
+
+        // Whole segments only — /application is a different area, not a child of /app.
+        Assert.Null(LocalAccessGuard.ResolveTarget(store, "/application"));
     }
 
     [Fact]

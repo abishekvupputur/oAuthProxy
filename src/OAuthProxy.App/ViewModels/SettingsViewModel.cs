@@ -4,7 +4,6 @@ using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using OAuthProxy.Core.Diagnostics;
-using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Platform;
 using OAuthProxy.Core.Storage;
 
@@ -23,11 +22,27 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private bool _startWithWindows;
     [ObservableProperty] private string _recentActivity = "";
     [ObservableProperty] private string _statusMessage = "Ready.";
-    [ObservableProperty] private string _localApiKey = "";
-    [ObservableProperty] private bool _isApiKeyVisible;
 
-    /// <summary>Masked unless the user asks to see it, so a shared screen doesn't leak it.</summary>
-    public string LocalApiKeyDisplay => IsApiKeyVisible ? LocalApiKey : new string('•', 32);
+    /// <summary>
+    /// Keys are per endpoint and live on the row that owns them, so this tab only says where to
+    /// find them. The counts make an empty install say something useful rather than pointing at
+    /// two tabs that have nothing on them yet.
+    /// </summary>
+    public string KeyLocationSummary
+    {
+        get
+        {
+            var store = _configStoreCache.Current;
+            var routes = store.Routes.Count;
+            var funnels = store.McpFunnels.Count;
+
+            return routes == 0 && funnels == 0
+                ? "No endpoints yet. Add a route on the Routes tab (or a funnel on the MCP Funnel tab) "
+                  + "and it is issued its own key."
+                : $"{routes} route(s) and {funnels} funnel(s), each with its own key. "
+                  + "Open the Routes or MCP Funnel tab and use the key controls on the row.";
+        }
+    }
 
     public SettingsViewModel(ConfigStoreCache configStoreCache, AutostartService autostartService, ActivityLog activityLog)
     {
@@ -37,7 +52,6 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         var settings = _configStoreCache.Current.Settings;
         _listenPort = settings.ListenPort;
-        _localApiKey = settings.LocalApiKey;
 
         // The registry is the single source of truth for autostart — it is what Windows
         // actually reads. The persisted Settings.StartWithWindows is kept only so the value
@@ -58,12 +72,11 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         var settings = _configStoreCache.Current.Settings;
         ListenPort = settings.ListenPort;
-        LocalApiKey = settings.LocalApiKey;
         StartWithWindows = _autostartService.IsEnabled();
-    }
 
-    partial void OnIsApiKeyVisibleChanged(bool value) => OnPropertyChanged(nameof(LocalApiKeyDisplay));
-    partial void OnLocalApiKeyChanged(string value) => OnPropertyChanged(nameof(LocalApiKeyDisplay));
+        // Routes and funnels can have been added on another tab since this one was last shown.
+        OnPropertyChanged(nameof(KeyLocationSummary));
+    }
 
     private void RefreshActivity()
     {
@@ -114,33 +127,6 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         await _configStoreCache.MutateAsync(store => store.Settings.ListenPort = ListenPort);
         StatusMessage = "Saved. Restart OAuthProxy for the new port to take effect.";
-    }
-
-    [RelayCommand]
-    private void ToggleApiKeyVisibility() => IsApiKeyVisible = !IsApiKeyVisible;
-
-    [RelayCommand]
-    private void CopyApiKey()
-    {
-        try
-        {
-            System.Windows.Clipboard.SetText(LocalApiKey);
-            StatusMessage = "Local API key copied. Send it as the 'X-Proxy-Key' header on every proxied request.";
-        }
-        catch (Exception ex)
-        {
-            StatusMessage = $"Could not copy to clipboard: {ex.Message}";
-        }
-    }
-
-    [RelayCommand]
-    private async Task RegenerateApiKeyAsync()
-    {
-        var newKey = AppSettings.GenerateApiKey();
-        await _configStoreCache.MutateAsync(store => store.Settings.LocalApiKey = newKey);
-        LocalApiKey = newKey;
-        _activityLog.Log("SETTINGS local API key regenerated — existing clients must be updated");
-        StatusMessage = "New key generated. Every client using the old key will now get 403 until updated.";
     }
 
     [RelayCommand]

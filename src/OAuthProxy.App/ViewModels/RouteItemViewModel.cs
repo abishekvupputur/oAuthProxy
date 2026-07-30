@@ -40,6 +40,14 @@ public sealed partial class RouteItemViewModel : ObservableObject
         _onChanged = onChanged;
         _onInvalid = onInvalid;
 
+        // Each route authenticates its own callers, so the key lives on the row rather than in
+        // Settings. Regenerating it here revokes exactly this route and nothing else.
+        Key = new ProxyKeyViewModel(
+            route.Key,
+            $"route '{route.PathPrefix}'",
+            message => _onChanged?.Invoke(this, message),
+            message => _onInvalid?.Invoke(message));
+
         UpstreamName = upstream?.Name ?? Missing;
         UpstreamBaseUrl = upstream?.BaseUrl ?? Missing;
         LocalUrl = $"http://127.0.0.1:{listenPort}{route.PathPrefix}";
@@ -70,6 +78,9 @@ public sealed partial class RouteItemViewModel : ObservableObject
     public RouteMapping Route { get; }
 
     public string PathPrefix => Route.PathPrefix;
+
+    /// <summary>This route's own proxy key — what its callers must present, and for how long.</summary>
+    public ProxyKeyViewModel Key { get; }
 
     /// <summary>Editable credential entries, in the order they are written onto the request.</summary>
     public ObservableCollection<RouteCredentialItemViewModel> Credentials { get; } = [];

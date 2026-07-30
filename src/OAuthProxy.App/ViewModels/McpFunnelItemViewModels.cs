@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using OAuthProxy.Core.Mcp;
 using OAuthProxy.Core.Models;
+using OAuthProxy.Core.Proxy;
 
 namespace OAuthProxy.App.ViewModels;
 
@@ -58,13 +59,31 @@ public sealed partial class McpFunnelItemViewModel : ObservableObject
 {
     private readonly Action<McpFunnelItemViewModel, string> _onChanged;
 
-    public McpFunnelItemViewModel(McpFunnelRecord funnel, int listenPort, int sourceCount, Action<McpFunnelItemViewModel, string> onChanged)
+    public McpFunnelItemViewModel(
+        McpFunnelRecord funnel,
+        int listenPort,
+        int sourceCount,
+        Action<McpFunnelItemViewModel, string> onChanged,
+        Action<string> onStatus)
     {
         Funnel = funnel;
         SourceCount = sourceCount;
         LocalUrl = $"http://127.0.0.1:{listenPort}{McpFunnelEndpoints.BasePath}/{funnel.Slug}";
         _onChanged = onChanged;
         _enabled = funnel.Enabled;
+
+        // Only this key opens this endpoint. Nothing a route or another funnel is configured with
+        // gets in here, so handing an agent this key grants it this funnel's tools and no more.
+        Key = new ProxyKeyViewModel(
+            funnel.Key,
+            $"funnel '{funnel.Name}'",
+            message => _onChanged(this, message),
+            onStatus);
+
+        Key.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName is nameof(ProxyKeyViewModel.Display)) OnPropertyChanged(nameof(LocalUrlWithKey));
+        };
     }
 
     public McpFunnelRecord Funnel { get; }
@@ -73,6 +92,16 @@ public sealed partial class McpFunnelItemViewModel : ObservableObject
     public string LocalUrl { get; }
     public int SourceCount { get; }
     public string SourceSummary => SourceCount == 1 ? "1 source" : $"{SourceCount} sources";
+
+    /// <summary>This funnel's own proxy key.</summary>
+    public ProxyKeyViewModel Key { get; }
+
+    /// <summary>
+    /// The endpoint with the key already in the query string, ready to paste into an MCP client
+    /// that cannot set headers — which is most of the ones driven by a JSON config file.
+    /// Follows the same masking as the key itself so it is not readable over a shoulder.
+    /// </summary>
+    public string LocalUrlWithKey => $"{LocalUrl}?{LocalAccessGuard.ApiKeyQueryName}={Key.Display}";
 
     [ObservableProperty] private bool _enabled;
 

@@ -143,16 +143,18 @@ public class ProxyMethodPlacementMatrixTests : IAsyncLifetime
 
         await cache.MutateAsync(store =>
         {
-            store.Settings.LocalApiKey = ApiKey;
             store.Credentials.Add(credential);
             store.Upstreams.Add(upstreamRecord);
 
+            // One key value across every route here: these tests are about what reaches the
+            // upstream, not about which key opens which route (that is LocalAccessGuardTests).
             void AddRoute(string prefix, CredentialPlacement placement, string name, string valuePrefix) =>
                 store.Routes.Add(new RouteMapping
                 {
                     PathPrefix = prefix,
                     UpstreamId = upstreamRecord.Id,
                     StripPrefix = true,
+                    Key = new ProxyKey { Value = ApiKey },
                     Credentials =
                     [
                         new RouteCredential

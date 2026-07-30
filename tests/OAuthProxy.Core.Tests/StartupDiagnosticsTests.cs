@@ -48,7 +48,6 @@ public class StartupDiagnosticsTests : IDisposable
         // Validation only ever ran when a record was added, so anything stored by an older
         // build was never re-checked.
         var store = new ConfigStore();
-        store.Settings.LocalApiKey = "key";
         store.Upstreams.Add(new UpstreamRecord { Name = "legacy", BaseUrl = "http://api.example.com" });
         await new SecureStore(_storePath).SaveAsync(store);
 
@@ -62,7 +61,6 @@ public class StartupDiagnosticsTests : IDisposable
     public async Task Startup_WithAPlainHttpTokenEndpoint_WarnsAboutTheCredential()
     {
         var store = new ConfigStore();
-        store.Settings.LocalApiKey = "key";
         store.Credentials.Add(new CredentialRecord
         {
             Name = "legacy-credential",
@@ -82,7 +80,6 @@ public class StartupDiagnosticsTests : IDisposable
     public async Task Startup_WithHttpsEndpointsAndLoopbackUpstreams_WarnsAboutNothing()
     {
         var store = new ConfigStore();
-        store.Settings.LocalApiKey = "key";
         store.Upstreams.Add(new UpstreamRecord { Name = "secure", BaseUrl = "https://api.example.com" });
 
         // Plain http is fine for a local development upstream - it never leaves the machine.
@@ -119,3 +116,4 @@ public class StartupDiagnosticsTests : IDisposable
         try { Directory.Delete(_logPath, recursive: true); } catch { /* best effort */ }
     }
 }
+

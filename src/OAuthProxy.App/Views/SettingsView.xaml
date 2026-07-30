@@ -28,23 +28,12 @@
 
             <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14">
                 <StackPanel>
-                    <TextBlock Text="Local API key" Style="{StaticResource SectionHeaderStyle}"/>
+                    <TextBlock Text="Proxy keys" Style="{StaticResource SectionHeaderStyle}"/>
                     <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,8" TextWrapping="Wrap"
-                               Text="Every proxied request must send this as the 'X-Proxy-Key' header (or a 'proxy_key' query parameter for clients that cannot set headers). Without it the proxy would attach your OAuth tokens for any program on this machine that knows the port."/>
-
-                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
-                        <TextBox Width="290" IsReadOnly="True" FontFamily="Cascadia Code, Consolas" FontSize="11"
-                                 Text="{Binding LocalApiKeyDisplay, Mode=OneWay}"/>
-                        <Button Content="Show" Margin="8,0,0,0" Width="60"
-                                Command="{Binding ToggleApiKeyVisibilityCommand}"/>
-                        <Button Content="Copy" Margin="6,0,0,0" Width="60" Command="{Binding CopyApiKeyCommand}"/>
-                    </StackPanel>
-
-                    <Button Content="Regenerate key" HorizontalAlignment="Left" Width="130"
-                            Style="{StaticResource GhostButtonStyle}"
-                            Command="{Binding RegenerateApiKeyCommand}"/>
-                    <TextBlock Text="Regenerating immediately breaks any client still using the old key."
-                               Style="{StaticResource HintTextStyle}" Margin="0,6,0,0"/>
+                               Text="Every proxied request must present the key of the endpoint it is calling, as the 'X-Proxy-Key' header or a 'proxy_key' query parameter. Without it the proxy would attach your OAuth tokens for any program on this machine that knows the port."/>
+                    <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,8" TextWrapping="Wrap"
+                               Text="There is no single key for the whole proxy. Each route and each MCP funnel has its own, with its own expiry — a key issued for one endpoint does not open any other, so a client that leaks it exposes only what that endpoint reaches."/>
+                    <TextBlock Text="{Binding KeyLocationSummary}" Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"/>
                 </StackPanel>
             </Border>
 

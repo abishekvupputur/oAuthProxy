@@ -129,16 +129,19 @@ public class ProxyForwardingTests : IAsyncLifetime
 
         await cache.MutateAsync(store =>
         {
-            store.Settings.LocalApiKey = ApiKey;
             store.Credentials.Add(credential);
             store.Upstreams.Add(upstreamRecord);
 
+            // Every route here is given the same key value on purpose: these tests are about
+            // what reaches the upstream, not about which key opens which route (that is
+            // LocalAccessGuardTests), so one constant keeps the requests below readable.
             void AddRoute(string prefix, CredentialPlacement placement, string name, string valuePrefix) =>
                 store.Routes.Add(new RouteMapping
                 {
                     PathPrefix = prefix,
                     UpstreamId = upstreamRecord.Id,
                     StripPrefix = true,
+                    Key = new ProxyKey { Value = ApiKey },
                     Credentials =
                     [
                         new RouteCredential

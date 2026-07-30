@@ -43,6 +43,15 @@ public sealed partial class McpFunnelViewModel : ObservableObject
     [ObservableProperty] private string _newFunnelName = "";
     [ObservableProperty] private string _newFunnelSlug = "";
 
+    /// <summary>
+    /// How long the key issued to a new funnel stays valid. Defaults to never, matching what a
+    /// machine-local endpoint pointed at by a config file needs; anything shorter is a deliberate
+    /// choice the user makes here or changes later on the row.
+    /// </summary>
+    [ObservableProperty] private ProxyKeyLifetime _newFunnelKeyLifetime = ProxyKeyLifetime.Never;
+
+    public IReadOnlyList<ProxyKeyLifetime> KeyLifetimes => ProxyKeyLifetime.All;
+
     [ObservableProperty] private McpFunnelItemViewModel? _selectedFunnel;
 
     [ObservableProperty] private string _statusMessage = "Ready.";
@@ -130,7 +139,11 @@ public sealed partial class McpFunnelViewModel : ObservableObject
         foreach (var funnel in store.McpFunnels)
         {
             Funnels.Add(new McpFunnelItemViewModel(
-                funnel, store.Settings.ListenPort, funnel.Sources.Count, OnFunnelEdited));
+                funnel,
+                store.Settings.ListenPort,
+                funnel.Sources.Count,
+                OnFunnelEdited,
+                message => StatusMessage = message));
         }
 
         NewSourceRoute = Routes.FirstOrDefault(r => r.Id == selectedRouteId);
@@ -310,10 +323,18 @@ public sealed partial class McpFunnelViewModel : ObservableObject
             return;
         }
 
-        var funnel = new McpFunnelRecord { Name = NewFunnelName.Trim(), Slug = slug };
+        // Issued here, with the record, rather than left for the load-time backfill: a key that is
+        // generated and saved in the same write can never differ between memory and disk.
+        var funnel = new McpFunnelRecord
+        {
+            Name = NewFunnelName.Trim(),
+            Slug = slug,
+            Key = ProxyKey.Generate(NewFunnelKeyLifetime.Duration),
+        };
 
         await PersistAsync(s => s.McpFunnels.Add(funnel),
-            $"Funnel '{funnel.Name}' added at /mcp/{slug} — now choose which sources it pools.");
+            $"Funnel '{funnel.Name}' added at /mcp/{slug} with its own proxy key ({funnel.Key.DescribeExpiry(DateTimeOffset.UtcNow)}) "
+            + "— now choose which sources it pools, then copy the key from its row.");
 
         NewFunnelName = "";
         NewFunnelSlug = "";

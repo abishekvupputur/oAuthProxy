@@ -11,6 +11,13 @@ public sealed class RouteMapping
     public bool Enabled { get; set; } = true;
 
     /// <summary>
+    /// The secret a caller must present to use this route, and nothing else. It does not open any
+    /// other route and it does not open a funnel — see <see cref="ProxyKey"/> for why the proxy
+    /// no longer has one key for everything.
+    /// </summary>
+    public ProxyKey Key { get; set; } = new();
+
+    /// <summary>
     /// Every credential this route attaches, each with its own placement. Empty is legitimate
     /// and means "forward without attaching anything" — the route is then an ordinary reverse
     /// proxy hop. See <see cref="RouteCredential"/>.

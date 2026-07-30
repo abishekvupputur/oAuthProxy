@@ -42,7 +42,9 @@ reach on its own.
 - **Automatic token refresh** — 10 minutes ahead of expiry, in the background
 - **Any credential backs any route** — not a fixed 1:1 mapping
 - **DPAPI-encrypted store** — nothing written in plaintext
-- **Local API key** on every request, so other processes on your machine cannot spend your grants
+- **A proxy key per endpoint** — every route and every funnel has its own, with its own expiry, so
+  other processes on your machine cannot spend your grants and a key leaked from one client cannot
+  reach the rest
 - **Activity log** with redaction and rotation, viewable in-app
 - **Tray-resident** — starts hidden, survives provider and network errors, single-instance guard
 - **CI-published releases** with build provenance attestation
@@ -220,7 +222,8 @@ elsewhere, each credential on a route has a **placement**, a **name**, and a **v
 
 ### Zero, one, or several credentials per route
 
-Select a route in the grid to open its credential editor. **Add credential** appends another
+Select a route in the grid to open its editor — the route's own proxy key sits at the top, the
+credentials below it. **Add credential** appends another
 entry; **Remove** drops one. Every entry has its own credential, placement, name, and prefix, so a
 route can carry any combination:
 
@@ -243,7 +246,7 @@ route can carry any combination:
   `X-Api-Key` credential arrives already described as one.
 - **A route with no credential still forwards**, and still strips the caller's own `Authorization`
   header and cookies. Attaching nothing is not a licence to relay whatever the caller sent — that
-  guarantee holds on every route, and the local API key is still required.
+  guarantee holds on every route, and the route's own proxy key is still required.
 - **No two entries may write the same slot.** Two credentials on one header, query parameter, or
   body field would silently overwrite each other, so the pair is refused at the point of editing.
   Header names are compared case-insensitively (HTTP treats them that way); query parameter and
@@ -313,11 +316,14 @@ add an unrelated source, breaking every agent prompt that referenced it.
 {
   "servers": {
     "my-agent": {
-      "url": "http://127.0.0.1:5559/mcp/my-agent?proxy_key=<your-key>"
+      "url": "http://127.0.0.1:5559/mcp/my-agent?proxy_key=<this-funnel's-key>"
     }
   }
 }
 ```
+
+Each funnel has **its own** proxy key — no route's key opens it, and no other funnel's does.
+Select the funnel to copy its key, or the whole URL with the key already attached.
 
 Or send the key as the `X-Proxy-Key` header if your client supports custom headers.
 
@@ -349,33 +355,62 @@ Or send the key as the `X-Proxy-Key` header if your client supports custom heade
 
 ## Calling the proxy
 
-Every request — routes and funnels alike — must present the **local API key** from the Settings
-tab:
+Every request — routes and funnels alike — must present **the proxy key of the endpoint it is
+calling**. There is no key for the proxy as a whole: each route carries its own, each funnel
+carries its own, and a key opens nothing but the endpoint it was issued for.
+
+Copy a route's key from its row on the **Routes** tab (select the route to open its editor), and a
+funnel's from the panel under the **MCP Funnel** tab.
 
 ```bash
-curl -H "X-Proxy-Key: <your-key>" http://127.0.0.1:5559/app/my-service/foo
+curl -H "X-Proxy-Key: <this-route's-key>" http://127.0.0.1:5559/app/my-service/foo
 ```
 
 For clients that cannot set headers (browser `EventSource`, some MCP SSE transports), pass it as a
 query parameter instead:
 
 ```
-http://127.0.0.1:5559/app/my-service?token=abc&proxy_key=<your-key>
+http://127.0.0.1:5559/app/my-service?token=abc&proxy_key=<this-route's-key>
 ```
 
 The key is stripped before forwarding — in both forms — so it never reaches the upstream's access
-log or this app's activity log. Your own headers and parameters pass through untouched. Requests
-without a valid key get `403`.
+log or this app's activity log. Your own headers and parameters pass through untouched.
 
-Use **Regenerate key** in Settings if it is ever exposed; clients using the old key start getting
+Anything without a valid key gets `403`: a wrong key, another endpoint's key, an expired key, and
+a path belonging to no route or funnel all answer the same way, so the reply cannot be used to map
+which endpoints exist.
+
+### Key validity
+
+Each key is generated when its route or funnel is created and is valid **until you replace it**
+unless you say otherwise. **Valid for** on the row sets a lifetime — 7, 30, 90, or 180 days, or a
+year — measured from the moment the key was last generated. Once it lapses the endpoint answers
+`403` until the key is regenerated or the period extended; the row says so, and so does the log.
+
+**Regenerate** issues a new key for that one endpoint, immediately. Clients still holding the old
+one get `403`; every other endpoint is untouched. Regenerating keeps the lifetime you chose and
+restarts it from now.
+
+> **Upgrading from a build with a single proxy-wide key:** that key is no longer read. Every
+> existing route and funnel is issued its own on first launch, so each client has to be given the
+> key of the endpoint it calls.
+
+Use **Regenerate** if a key is ever exposed; clients using the old key start getting
 `403` immediately.
 
-### Why the key exists
+### Why the key exists, and why there is one per endpoint
 
 Binding to `127.0.0.1` keeps other machines out, but it is **not** an authorization boundary:
 every process on your computer, under any account, can reach loopback. Since the proxy attaches
 your live OAuth token to whatever it forwards, an unguarded listener would hand your Google or
 Nextcloud session to any local program that knew the port.
+
+One key for the whole proxy made every client that held it a client of **every** route: an agent
+given the key so it could reach a calendar endpoint could equally spend the grant attached to a
+mail endpoint, and revoking one client meant re-keying all of them. Per-endpoint keys make the
+blast radius of a leaked key exactly the endpoint it was issued for, and revocation a one-row
+operation. It is also what makes a funnel meaningful — an agent handed a funnel's key sees the
+tools that funnel exposes and cannot reach the routes underneath it directly.
 
 The key also blocks **DNS rebinding**, where a page on an attacker's domain re-resolves that name
 to `127.0.0.1` so the browser treats proxied responses as same-origin and lets its JavaScript read
@@ -429,8 +464,9 @@ build was never re-checked.
 profile copied to another machine or account, which DPAPI cannot decrypt — it is renamed to
 `store.dat.corrupt-<timestamp>` and the app starts with empty config rather than failing to start.
 The old file is kept in case the account that wrote it can still recover it. This is reported in
-the log and in a dialog, because it means every credential, upstream, and route is gone and a
-**new local API key** has been generated — every configured client will get `403` until updated.
+the log and in a dialog, because it means every credential, upstream, route, and funnel is gone —
+along with the proxy keys they carried, so every configured client will get `403` until it is
+pointed at a rebuilt endpoint with a new key.
 
 **Encryption scope.** `store.dat` uses DPAPI at `CurrentUser` scope. That protects it from other
 accounts, from backups, and from being read on another machine — but **not** from code running as
@@ -508,8 +544,14 @@ responses, e.g. `<- 200 [text/html] for POST /app/foo`. That usually means the u
 sign-in or landing page instead of running its handler — check its deployment settings and
 whether it accepts your token.
 
-**Requests get 403.** The local API key is missing, wrong, or was regenerated. Copy it again from
-the Settings tab.
+**Requests get 403.** The endpoint's proxy key is missing, wrong, expired, or was regenerated —
+or the key belongs to a *different* route or funnel, which opens nothing here. Copy the key from
+the row of the endpoint you are calling: the Routes tab for a route, the MCP Funnel tab for a
+funnel. The activity log names which endpoint refused and why.
+
+**A path that used to work now 403s instead of 404ing.** A request to a path belonging to no route
+and no funnel has no key to check against and is refused rather than answered, so which prefixes
+exist cannot be discovered by watching status codes.
 
 **A route 502s.** The activity log records YARP's reason. Confirm the upstream base URL is
 reachable and `https`.

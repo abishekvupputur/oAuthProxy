@@ -3,6 +3,8 @@ using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using OAuthProxy.Core.Diagnostics;
+using OAuthProxy.Core.Mcp;
+using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Storage;
 
 namespace OAuthProxy.Core.Proxy;
@@ -16,7 +18,10 @@ namespace OAuthProxy.Core.Proxy;
 /// confused deputy that lends the user's Google/Nextcloud session to the first caller who asks.
 ///
 /// Three checks, each closing a different door:
-///   1. Shared secret  — a caller must know a value it cannot guess from the port alone.
+///   1. Endpoint key   — a caller must know a value it cannot guess from the port alone, and the
+///                       value is specific to the route or funnel it is calling. There is no
+///                       proxy-wide key: the key that opens /app/mail does not open /app/drive
+///                       and does not open /mcp/coding-agent.
 ///   2. Host allowlist — blocks DNS rebinding, where a page on evil.com re-resolves that name
 ///                       to 127.0.0.1 so the browser treats proxied responses as same-origin
 ///                       and lets attacker JavaScript read the user's data.
@@ -76,8 +81,9 @@ public static class LocalAccessGuard
                 activityLog.Log($"DENIED {context.Request.Method} {context.Request.Path} — {reason}");
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
                 await context.Response.WriteAsync(
-                    "Forbidden. This proxy requires the local API key from OAuthProxy's Settings tab, "
-                    + $"sent as the '{ApiKeyHeaderName}' header.");
+                    "Forbidden. This endpoint requires its own proxy key — copy it from the row for "
+                    + "this route on OAuthProxy's Routes tab, or for this funnel on the MCP Funnel tab — "
+                    + $"sent as the '{ApiKeyHeaderName}' header or the '{ApiKeyQueryName}' query parameter.");
                 return;
             }
 
@@ -154,22 +160,84 @@ public static class LocalAccessGuard
             return "path contains a '..' segment";
         }
 
-        var expected = configStoreCache.Current.Settings.LocalApiKey;
-        if (string.IsNullOrEmpty(expected))
-        {
-            // A store written before this key existed deserializes it as null. Failing closed
-            // would brick an upgraded install with no way in, so treat it as "not yet
-            // configured" and let ConfigStoreCache backfill one on load instead.
-            return "no local API key is configured";
-        }
-
         var presented = request.Headers[ApiKeyHeaderName].ToString();
         if (string.IsNullOrEmpty(presented))
         {
             presented = request.Query[ApiKeyQueryName].ToString();
         }
 
-        return FixedTimeEquals(presented, expected) ? null : "missing or incorrect local API key";
+        // Only the key belonging to the endpoint being called is accepted. A path that belongs to
+        // no route and no funnel has no key, and is refused with the same 403 as a wrong key
+        // rather than a distinguishable answer — otherwise an unauthenticated caller could map
+        // which prefixes exist by watching status codes.
+        var target = ResolveTarget(configStoreCache.Current, request.Path);
+        if (target is null || !target.Key.IsConfigured)
+        {
+            return "no proxy key is configured for this path";
+        }
+
+        if (!FixedTimeEquals(presented, target.Key.Value))
+        {
+            return $"missing or incorrect proxy key for {target.Description}";
+        }
+
+        // Checked after the value, so an expired key is only named as such to a caller that
+        // proved it holds it. Someone guessing gets the generic answer.
+        return target.Key.IsExpired(DateTimeOffset.UtcNow)
+            ? $"the proxy key for {target.Description} expired on {target.Key.ExpiresUtc:u}"
+            : null;
+    }
+
+    /// <summary>
+    /// The route or funnel a request is addressed to, and therefore whose key it must present.
+    /// Null when the path belongs to neither.
+    /// </summary>
+    public sealed record ProxyTarget(string Description, ProxyKey Key);
+
+    /// <summary>
+    /// Resolves a request path to the endpoint that owns it.
+    ///
+    /// Everything under <see cref="McpFunnelEndpoints.BasePath"/> belongs to the funnel named by
+    /// the first segment after it — routes are forbidden from claiming that space, so there is no
+    /// overlap to arbitrate. Everything else is matched against route prefixes, longest first:
+    /// with routes at "/app" and "/app/mail" a request to /app/mail/x is the second route's, which
+    /// is the same choice ASP.NET routing makes when it later picks the endpoint.
+    ///
+    /// Disabled records still resolve. A disabled route or funnel is served by nothing downstream
+    /// and answers 404, and letting it fall through to "unknown path" here would instead turn its
+    /// own clients' 404 into a 403 the moment it was switched off — a confusing way to learn that
+    /// a checkbox changed.
+    /// </summary>
+    public static ProxyTarget? ResolveTarget(ConfigStore store, PathString path)
+    {
+        if (path.StartsWithSegments(McpFunnelEndpoints.BasePath))
+        {
+            var slug = McpFunnelEndpoints.ExtractSlug(path);
+            if (slug is null) return null;
+
+            var funnel = store.McpFunnels.FirstOrDefault(f =>
+                string.Equals(f.Slug, slug, StringComparison.OrdinalIgnoreCase));
+
+            return funnel is null ? null : new ProxyTarget($"funnel '{funnel.Name}'", funnel.Key);
+        }
+
+        RouteMapping? match = null;
+        var matchedLength = -1;
+
+        foreach (var route in store.Routes)
+        {
+            // A prefix that is empty or does not start with '/' cannot be turned into a PathString
+            // at all (it throws), and ProxyConfigBuilder refuses to serve such a route anyway.
+            var prefix = route.PathPrefix.TrimEnd('/');
+            if (prefix.Length == 0 || prefix[0] != '/') continue;
+            if (!path.StartsWithSegments(prefix)) continue;
+            if (prefix.Length <= matchedLength) continue;
+
+            match = route;
+            matchedLength = prefix.Length;
+        }
+
+        return match is null ? null : new ProxyTarget($"route '{match.PathPrefix}'", match.Key);
     }
 
     /// <summary>

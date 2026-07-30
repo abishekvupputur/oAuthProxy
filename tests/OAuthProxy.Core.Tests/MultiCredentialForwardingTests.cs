@@ -126,11 +126,12 @@ public class MultiCredentialForwardingTests : IAsyncLifetime
 
         await cache.MutateAsync(store =>
         {
-            store.Settings.LocalApiKey = ApiKey;
             store.Credentials.Add(alpha);
             store.Credentials.Add(bravo);
             store.Upstreams.Add(upstreamRecord);
 
+            // One key value across every route here: these tests are about what reaches the
+            // upstream, not about which key opens which route (that is LocalAccessGuardTests).
             void AddRoute(string prefix, params RouteCredential[] credentials) =>
                 store.Routes.Add(new RouteMapping
                 {
@@ -138,6 +139,7 @@ public class MultiCredentialForwardingTests : IAsyncLifetime
                     UpstreamId = upstreamRecord.Id,
                     StripPrefix = true,
                     Credentials = [.. credentials],
+                    Key = new ProxyKey { Value = ApiKey },
                 });
 
             AddRoute(TwoQueries,

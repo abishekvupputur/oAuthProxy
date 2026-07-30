@@ -93,6 +93,24 @@ public class McpFunnelRouteSourceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task TheHopIntoTheRouteUsesTheRoutesOwnKey_NotTheFunnels()
+    {
+        // Keys are per endpoint, so the funnel's key is not accepted by the route it pools. The
+        // hop has to present the route's, and it reads it live — a key changed on the Routes tab
+        // must not leave every funnel over that route authenticating with a stale one.
+        var route = _host.Cache.Current.Routes.Single();
+        await _host.MutateAsync(_ => route.Key.Value = "a-key-only-this-route-accepts");
+
+        // The pooled session was opened with the previous key; drop it so the next call
+        // re-dials, exactly as editing the route in the GUI does.
+        await _host.Pool.InvalidateAllAsync();
+
+        var client = await _host.ConnectAsync("agent");
+
+        Assert.Equal("still-authorized", await FunnelTestHost.CallTextAsync(client, "auth__echo", "still-authorized"));
+    }
+
+    [Fact]
     public async Task ARouteSourceStillGetsItsOwnSessionPerFunnel()
     {
         // Same isolation guarantee as a direct URL source — the credentialed hop must not

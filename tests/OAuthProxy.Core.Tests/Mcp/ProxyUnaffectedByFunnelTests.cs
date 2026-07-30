@@ -163,9 +163,12 @@ public class ProxyUnaffectedByFunnelTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task AnUnmatchedPathIsStillANotFoundRatherThanAFunnelResponse()
+    public async Task AnUnmatchedPathIsRefusedRatherThanAnsweredByAFunnel()
     {
-        Assert.Equal(HttpStatusCode.NotFound, (await PostAsync("/nothing-here")).StatusCode);
+        // A path belonging to no route and no funnel has no key to authenticate against, so it is
+        // refused at the guard — the same 403 a wrong key gets, so which prefixes exist cannot be
+        // mapped by watching status codes. What matters here is that it is not the funnel's.
+        Assert.Equal(HttpStatusCode.Forbidden, (await PostAsync("/nothing-here")).StatusCode);
     }
 
     [Fact]

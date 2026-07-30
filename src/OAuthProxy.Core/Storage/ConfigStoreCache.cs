@@ -31,20 +31,41 @@ public sealed class ConfigStoreCache
     public async Task InitializeAsync(CancellationToken ct = default)
     {
         var loaded = await _secureStore.LoadAsync(ct);
+        _current = loaded;
 
-        // Covers both a brand-new install and a store written before this key existed. The
-        // generated value must be persisted here and nowhere else — if it only ever lived in
-        // memory, every restart would produce a different key and clients would break at
+        // Every route and funnel needs its own key. This covers a store written before
+        // per-endpoint keys existed (where the single Settings.LocalApiKey was the only secret,
+        // and is now ignored) as well as any record that somehow reached disk without one.
+        //
+        // The generated values must be persisted here and nowhere else — if they only ever lived
+        // in memory, every restart would produce different keys and every client would break at
         // random.
-        if (string.IsNullOrEmpty(loaded.Settings.LocalApiKey))
+        if (BackfillKeys(loaded) > 0)
         {
-            loaded.Settings.LocalApiKey = AppSettings.GenerateApiKey();
-            _current = loaded;
             await SaveAsync(ct);
-            return;
+        }
+    }
+
+    /// <summary>
+    /// Issues a never-expiring key to every route and funnel that has none. Returns how many were
+    /// issued, so the caller can skip the write when there is nothing to do.
+    /// </summary>
+    private static int BackfillKeys(ConfigStore store)
+    {
+        var issued = 0;
+
+        foreach (var key in store.Routes.Select(r => r.Key).Concat(store.McpFunnels.Select(f => f.Key)))
+        {
+            if (key.IsConfigured) continue;
+
+            var fresh = ProxyKey.Generate();
+            key.Value = fresh.Value;
+            key.CreatedUtc = fresh.CreatedUtc;
+            key.ExpiresUtc = null;
+            issued++;
         }
 
-        _current = loaded;
+        return issued;
     }
 
     /// <summary>
@@ -120,7 +141,6 @@ public sealed class ConfigStoreCache
         List<McpFunnelRecord> McpFunnels,
         int ListenPort,
         bool StartWithWindows,
-        string LocalApiKey,
         bool McpFunnelEnabled);
 
     private static StoreSnapshot Snapshot(ConfigStore store) => new(
@@ -131,7 +151,6 @@ public sealed class ConfigStoreCache
         [.. store.McpFunnels],
         store.Settings.ListenPort,
         store.Settings.StartWithWindows,
-        store.Settings.LocalApiKey,
         store.Settings.McpFunnelEnabled);
 
     private static void RestoreInto(ConfigStore store, StoreSnapshot snapshot)
@@ -144,7 +163,6 @@ public sealed class ConfigStoreCache
 
         store.Settings.ListenPort = snapshot.ListenPort;
         store.Settings.StartWithWindows = snapshot.StartWithWindows;
-        store.Settings.LocalApiKey = snapshot.LocalApiKey;
         store.Settings.McpFunnelEnabled = snapshot.McpFunnelEnabled;
     }
 

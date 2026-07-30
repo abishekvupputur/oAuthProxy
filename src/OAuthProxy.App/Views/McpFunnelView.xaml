@@ -113,7 +113,7 @@ Use Include to grant a known set, Exclude to revoke a few from an otherwise trus
                     <TextBlock Style="{StaticResource HintTextStyle}"
                                Text="Select a funnel to choose which sources it pools and which of their tools it exposes."/>
                     <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,6"
-                               Text="Funnel endpoints need the local API key, exactly like routes: send it as the X-Proxy-Key header (or ?proxy_key= for clients that cannot set headers). Without it they answer 403."/>
+                               Text="Each funnel has its own proxy key — only that key opens it, and no route's key does. Send it as the X-Proxy-Key header, or as ?proxy_key= for clients that cannot set headers. Without it the endpoint answers 403."/>
                 </StackPanel>
 
                 <DataGrid ItemsSource="{Binding Funnels}" SelectedItem="{Binding SelectedFunnel}"
@@ -138,6 +138,22 @@ Use Include to grant a known set, Exclude to revoke a few from an otherwise trus
                         </DataGridTemplateColumn>
 
                         <DataGridTextColumn Header="POOLS" Binding="{Binding SourceSummary}" Width="110"/>
+
+                        <!-- Status only; the key itself is in the editor below, where it can be
+                             shown, copied, and re-issued. -->
+                        <DataGridTemplateColumn Header="PROXY KEY" Width="150">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <StackPanel VerticalAlignment="Center" ToolTip="{StaticResource ProxyKeyHelpText}">
+                                        <TextBlock Text="{Binding Key.ExpirySummary}" TextWrapping="Wrap" FontSize="10"
+                                                   Foreground="{StaticResource MutedTextBrush}"/>
+                                        <TextBlock Text="⚠ expired — this funnel answers 403" FontSize="10" TextWrapping="Wrap"
+                                                   Foreground="{StaticResource ErrorBrush}"
+                                                   Visibility="{Binding Key.IsExpired, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
 
                         <DataGridTemplateColumn Width="70">
                             <DataGridTemplateColumn.Header>
@@ -170,6 +186,24 @@ Use Include to grant a known set, Exclude to revoke a few from an otherwise trus
                         <TextBlock Text="{Binding SelectedFunnelTitle}" Style="{StaticResource SectionHeaderStyle}"/>
                         <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,10"
                                    Text="Changes apply to the agent's next call — no reconnect needed."/>
+
+                        <!-- This funnel's own key. Nothing else opens the endpoint, so it belongs
+                             next to the endpoint rather than in a global setting. -->
+                        <ContentControl Content="{Binding SelectedFunnel.Key}"
+                                        ContentTemplate="{StaticResource ProxyKeyEditorTemplate}"/>
+
+                        <TextBlock Text="Endpoint URL with the key attached" Style="{StaticResource FieldLabelStyle}"
+                                   Margin="0,10,0,0"
+                                   ToolTip="Most MCP clients are configured from a JSON file and cannot set a header. Paste this form instead."/>
+                        <TextBox Text="{Binding SelectedFunnel.LocalUrlWithKey, Mode=OneWay}" IsReadOnly="True"
+                                 FontFamily="Cascadia Code, Consolas" FontSize="11"
+                                 Background="Transparent" BorderThickness="0" Padding="0"
+                                 Foreground="{StaticResource AccentBrush}"/>
+                        <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,10"
+                                   Text="Press Show above to reveal the key inside this URL before copying it."/>
+
+                        <Border BorderBrush="{StaticResource BorderSubtleBrush}" BorderThickness="0,1,0,0"
+                                Margin="0,0,0,10"/>
 
                         <ItemsControl ItemsSource="{Binding FunnelSources}">
                             <ItemsControl.ItemTemplate>
@@ -229,6 +263,16 @@ Use Include to grant a known set, Exclude to revoke a few from an otherwise trus
                                          ToolTip="Last part of the URL, e.g. /mcp/coding-agent. Derived from the name if left blank."/>
                             </StackPanel>
                         </UniformGrid>
+                        <StackPanel Margin="0,0,0,8" HorizontalAlignment="Left">
+                            <TextBlock Text="Proxy key validity" Style="{StaticResource FieldLabelStyle}"
+                                       ToolTip="{StaticResource ProxyKeyExpiryHelpText}"/>
+                            <ComboBox Width="180" HorizontalAlignment="Left"
+                                      ItemsSource="{Binding KeyLifetimes}"
+                                      SelectedItem="{Binding NewFunnelKeyLifetime, Mode=TwoWay}"
+                                      ToolTip="{StaticResource ProxyKeyExpiryHelpText}"/>
+                            <TextBlock Style="{StaticResource HintTextStyle}"
+                                       Text="The funnel gets its own key on creation — copy it from the panel above after selecting the funnel. Changeable at any time."/>
+                        </StackPanel>
                         <Button Content="Add funnel" HorizontalAlignment="Left" Width="110" Command="{Binding AddFunnelCommand}"/>
                     </StackPanel>
                 </Border>

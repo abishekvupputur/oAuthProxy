@@ -31,6 +31,13 @@ public sealed class McpFunnelRecord
 
     public bool Enabled { get; set; } = true;
 
+    /// <summary>
+    /// The secret a caller must present to use this endpoint. Only this key opens /mcp/{Slug} —
+    /// the keys of the routes the funnel pools do not, and neither does another funnel's. An
+    /// agent handed this key can reach exactly the tools this funnel exposes and nothing else.
+    /// </summary>
+    public ProxyKey Key { get; set; } = new();
+
     public List<McpFunnelSource> Sources { get; set; } = [];
 }
 

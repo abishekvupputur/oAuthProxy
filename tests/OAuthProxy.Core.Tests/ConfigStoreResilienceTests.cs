@@ -30,34 +30,52 @@ public class ConfigStoreResilienceTests : IDisposable
     }
 
     [Fact]
-    public async Task Initialize_BackfillsMissingApiKey()
+    public async Task Initialize_IssuesAKeyToEveryRouteAndFunnelThatHasNone()
     {
-        // A store written before the local API key existed. Without a backfill the guard has
-        // nothing to compare against and every request would be refused.
+        // A store written before per-endpoint keys existed: its routes and funnels have none, and
+        // the proxy-wide Settings.LocalApiKey they used to rely on is no longer read. Without a
+        // backfill the guard has nothing to compare against and every request would be refused.
         var store = new ConfigStore();
-        store.Settings.LocalApiKey = "";
+        store.Routes.Add(new RouteMapping { PathPrefix = "/app/legacy" });
+        store.McpFunnels.Add(new McpFunnelRecord { Name = "legacy", Slug = "legacy" });
+
         var secureStore = new SecureStore(_tempFile);
         await secureStore.SaveAsync(store);
 
         var cache = new ConfigStoreCache(secureStore);
         await cache.InitializeAsync();
 
-        Assert.False(string.IsNullOrEmpty(cache.Current.Settings.LocalApiKey));
+        var routeKey = cache.Current.Routes[0].Key;
+        var funnelKey = cache.Current.McpFunnels[0].Key;
 
-        // And it must survive a restart rather than being regenerated every launch.
+        Assert.True(routeKey.IsConfigured);
+        Assert.True(funnelKey.IsConfigured);
+
+        // Separately generated, or the whole point of per-endpoint keys is lost.
+        Assert.NotEqual(routeKey.Value, funnelKey.Value);
+
+        // Never-expiring, so an upgrade cannot silently lock someone out on a timer.
+        Assert.Null(routeKey.ExpiresUtc);
+
+        // And they must survive a restart rather than being regenerated every launch.
         var reloaded = await new SecureStore(_tempFile).LoadAsync();
-        Assert.Equal(cache.Current.Settings.LocalApiKey, reloaded.Settings.LocalApiKey);
+        Assert.Equal(routeKey.Value, reloaded.Routes[0].Key.Value);
+        Assert.Equal(funnelKey.Value, reloaded.McpFunnels[0].Key.Value);
     }
 
     [Fact]
-    public async Task Initialize_KeepsTheSameApiKeyAcrossRestarts()
+    public async Task Initialize_KeepsTheSameEndpointKeysAcrossRestarts()
     {
         // The failure this guards against: a generated-by-default key looks "already set" to
         // the backfill, so it never reaches disk and the next launch invents a different one —
         // every configured client starts getting 403 at random.
+        var seed = new ConfigStore();
+        seed.Routes.Add(new RouteMapping { PathPrefix = "/app/one" });
+        await new SecureStore(_tempFile).SaveAsync(seed);
+
         var firstRun = new ConfigStoreCache(new SecureStore(_tempFile));
         await firstRun.InitializeAsync();
-        var originalKey = firstRun.Current.Settings.LocalApiKey;
+        var originalKey = firstRun.Current.Routes[0].Key.Value;
 
         Assert.False(string.IsNullOrEmpty(originalKey));
 
@@ -65,21 +83,25 @@ public class ConfigStoreResilienceTests : IDisposable
         {
             var laterRun = new ConfigStoreCache(new SecureStore(_tempFile));
             await laterRun.InitializeAsync();
-            Assert.Equal(originalKey, laterRun.Current.Settings.LocalApiKey);
+            Assert.Equal(originalKey, laterRun.Current.Routes[0].Key.Value);
         }
     }
 
     [Fact]
-    public void NewAppSettings_HasNoApiKeyUntilInitialized()
+    public void ANewProxyKey_HasNoValueUntilItIsGenerated()
     {
-        // Generation belongs to InitializeAsync alone, so that it is always paired with a save.
-        Assert.Equal("", new AppSettings().LocalApiKey);
+        // Generation belongs to route/funnel creation and to InitializeAsync alone, so that it is
+        // always paired with a save.
+        Assert.Equal("", new ProxyKey().Value);
+        Assert.False(new ProxyKey().IsConfigured);
+        Assert.False(new RouteMapping { PathPrefix = "/app/x" }.Key.IsConfigured);
+        Assert.False(new McpFunnelRecord { Name = "n", Slug = "n" }.Key.IsConfigured);
     }
 
     [Fact]
     public void GenerateApiKey_ProducesDistinctUrlSafeKeys()
     {
-        var keys = Enumerable.Range(0, 100).Select(_ => AppSettings.GenerateApiKey()).ToList();
+        var keys = Enumerable.Range(0, 100).Select(_ => ProxyKey.GenerateValue()).ToList();
 
         Assert.Equal(100, keys.Distinct().Count());
         Assert.All(keys, key =>
@@ -145,19 +167,16 @@ public class ConfigStoreResilienceTests : IDisposable
     public async Task MutateAsync_WhenTheSaveFails_UndoesSettingsChangesToo()
     {
         var cache = new ConfigStoreCache(UnwritableStore());
-        cache.Current.Settings.LocalApiKey = "original-key";
         var originalPort = cache.Current.Settings.ListenPort;
 
         await Assert.ThrowsAnyAsync<Exception>(() => cache.MutateAsync(store =>
         {
             store.Settings.ListenPort = 9999;
-            store.Settings.LocalApiKey = "regenerated-key";
+            store.Settings.McpFunnelEnabled = true;
         }));
 
-        // A half-applied key rotation is the worst case here: every client would be locked out
-        // by a key that was never written down anywhere.
         Assert.Equal(originalPort, cache.Current.Settings.ListenPort);
-        Assert.Equal("original-key", cache.Current.Settings.LocalApiKey);
+        Assert.False(cache.Current.Settings.McpFunnelEnabled);
     }
 
     [Fact]

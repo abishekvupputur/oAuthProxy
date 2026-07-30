@@ -88,7 +88,6 @@ internal sealed class FunnelTestHost : IAsyncDisposable
         var host = new FunnelTestHost(proxy, baseUrl, storePath, logPath);
         await host.Cache.MutateAsync(store =>
         {
-            store.Settings.LocalApiKey = ApiKey;
             store.Settings.McpFunnelEnabled = true;
 
             // A route-backed source is dialled at 127.0.0.1:{ListenPort}, so the stored port has
@@ -144,11 +143,28 @@ internal sealed class FunnelTestHost : IAsyncDisposable
             Sources = [.. sources],
         };
 
-        await Cache.MutateAsync(store => store.McpFunnels.Add(funnel));
+        await MutateAsync(store => store.McpFunnels.Add(funnel));
         return funnel;
     }
 
-    public Task MutateAsync(Action<ConfigStore> mutate) => Cache.MutateAsync(mutate);
+    /// <summary>
+    /// Applies a store edit and then gives every route and funnel that still has no proxy key the
+    /// one constant these tests authenticate with.
+    ///
+    /// Keys are per endpoint in production, and <see cref="LocalAccessGuardTests"/> is where that
+    /// isolation is pinned. Here the subject is the funnel's behaviour, so a test that adds a
+    /// route should not also have to invent and thread through a key for it — every endpoint on
+    /// this host answers to <see cref="ApiKey"/>.
+    /// </summary>
+    public Task MutateAsync(Action<ConfigStore> mutate) => Cache.MutateAsync(store =>
+    {
+        mutate(store);
+
+        foreach (var key in store.Routes.Select(r => r.Key).Concat(store.McpFunnels.Select(f => f.Key)))
+        {
+            if (!key.IsConfigured) key.Value = ApiKey;
+        }
+    });
 
     /// <summary>
     /// Pushes route changes into YARP. Funnel edits need no equivalent — the funnel reads config

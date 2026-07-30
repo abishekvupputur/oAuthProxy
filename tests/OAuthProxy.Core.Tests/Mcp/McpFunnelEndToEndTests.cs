@@ -144,9 +144,13 @@ public class McpFunnelEndToEndTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task AnUnknownSlug_Is404RatherThanAnEmptyServer()
+    public async Task AnUnknownSlug_IsRefusedRatherThanServedAsAnEmptyServer()
     {
-        Assert.Equal(HttpStatusCode.NotFound, await ProbeAsync("/mcp/no-such-agent"));
+        // 403 rather than the gate's 404: a slug that names no funnel has no key to authenticate
+        // against, so the guard turns it away before the gate is reached. Either way it must not
+        // be answered as a working-but-empty MCP server, which is what an agent would otherwise
+        // report as "the tools are gone" rather than "that endpoint does not exist".
+        Assert.Equal(HttpStatusCode.Forbidden, await ProbeAsync("/mcp/no-such-agent"));
     }
 
     [Fact]
