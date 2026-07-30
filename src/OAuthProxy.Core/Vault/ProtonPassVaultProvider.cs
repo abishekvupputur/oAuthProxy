@@ -235,6 +235,22 @@ public sealed class ProtonPassVaultProvider(
     // ---- CLI calls ------------------------------------------------------------------------------
 
     /// <summary>
+    /// Ids as <c>--flag=value</c> rather than two arguments.
+    ///
+    /// Proton Pass ids are base64url, so roughly one in sixty starts with a hyphen — and
+    /// <c>--item-id -0_TRk…</c> is parsed by the CLI as an unknown flag, not as a value:
+    /// "error: unexpected argument '-0' found". The attached form has no such ambiguity.
+    ///
+    /// The symptom was ugly and permanent. A delete that can never succeed leaves an orphaned
+    /// item behind on every save, so a route ended up with two key items and no way to tell which
+    /// one the proxy was actually accepting.
+    /// </summary>
+    private string Share => $"--share-id={_shareId}";
+
+    private static string ItemId(string itemId) => $"--item-id={itemId}";
+
+
+    /// <summary>
     /// Creates an item from a template on stdin — the only write path that keeps the value out of
     /// an argument. Returns the new item id, which the CLI prints bare rather than as JSON.
     /// </summary>
@@ -243,7 +259,7 @@ public sealed class ProtonPassVaultProvider(
         var type = TypeName(spec.Category);
 
         var result = await RunAsync(
-            ["item", "create", type, "--share-id", _shareId!, "--from-template", "-"],
+            ["item", "create", type, Share, "--from-template", "-"],
             stdin: BuildTemplate(spec).ToJsonString(),
             timeout: CliRunner.WriteTimeout,
             ct: ct);
@@ -267,8 +283,8 @@ public sealed class ProtonPassVaultProvider(
     private async Task<List<ProtonItem>> ListAsync(bool withSecrets, CancellationToken ct)
     {
         string[] args = withSecrets
-            ? ["item", "list", "--share-id", _shareId!, "--output", "json", "--show-secrets"]
-            : ["item", "list", "--share-id", _shareId!, "--output", "json"];
+            ? ["item", "list", Share, "--output", "json", "--show-secrets"]
+            : ["item", "list", Share, "--output", "json"];
 
         var result = await RunAsync(args, ct: ct);
 
@@ -375,7 +391,7 @@ public sealed class ProtonPassVaultProvider(
     private async Task DeleteItemAsync(string itemId, string title, CancellationToken ct)
     {
         var result = await RunAsync(
-            ["item", "delete", "--share-id", _shareId!, "--item-id", itemId],
+            ["item", "delete", Share, ItemId(itemId)],
             timeout: CliRunner.WriteTimeout, ct: ct);
 
         if (!result.Succeeded)
