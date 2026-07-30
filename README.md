@@ -11,6 +11,21 @@ into filtered, per-agent MCP endpoints.
 
 ---
 
+> ### Upgrading from a version before 2.0?
+>
+> **This version does not read your old configuration.** Secrets have moved out of the encrypted
+> `store.dat` file and into a vault in your password manager, and there is no import path.
+> Credentials, upstreams, routes, MCP sources and funnels all need to be set up again, and every
+> client needs to be handed the new key for the endpoint it calls.
+>
+> The old `%AppData%\OAuthProxy\store.dat` is left where it is — OAuthProxy never reads or
+> deletes it, and the setup page offers to delete it once you are done with it.
+>
+> You will need **1Password** or **Proton Pass** installed and unlocked. See
+> [Where your configuration lives](#where-your-configuration-lives).
+
+---
+
 ## The problem
 
 MCP servers are increasingly behind OAuth2, but most MCP clients expect a bare HTTP endpoint with
@@ -41,7 +56,7 @@ reach on its own.
   query parameters, and body fields; the same credential may appear in more than one place
 - **Automatic token refresh** — 10 minutes ahead of expiry, in the background
 - **Any credential backs any route** — not a fixed 1:1 mapping
-- **DPAPI-encrypted store** — nothing written in plaintext
+- **Stored in your password manager** — 1Password or Proton Pass holds every secret; nothing is written to this PC
 - **A proxy key per endpoint** — every route and every funnel has its own, with its own expiry, so
   other processes on your machine cannot spend your grants and a key leaked from one client cannot
   reach the rest
@@ -124,8 +139,8 @@ Both kinds attach to routes identically, and both share two fields:
 
 - Set the placement to whatever the service documents — `X-Api-Key`, `PRIVATE-TOKEN`,
   `?api_key=`, `Authorization` with a `token ` prefix, or a body field.
-- The key is stored DPAPI-encrypted with everything else and is **never redisplayed**. On edit, a
-  blank key box means "keep the current key", exactly as for a client secret.
+- The key is stored in your password manager with everything else and is **never redisplayed**. On
+  edit, a blank key box means "keep the current key", exactly as for a client secret.
 - Keys containing control characters (a line break picked up when copying out of a wrapped email,
   say) are **rejected**. Written into a header, a CR or LF ends the header line and lets the rest
   be read as further headers — request splitting, aimed at your upstream. The forwarder refuses
@@ -438,41 +453,108 @@ authorize and nothing to refresh. Test appears only once a test endpoint is set.
 
 ---
 
-## Data and logs
+## Where your configuration lives
 
-Everything lives under `%AppData%\OAuthProxy\`:
+Everything — OAuth client secrets, access and refresh tokens, API keys, per-endpoint proxy keys,
+routes, upstreams, MCP sources and funnels, and settings — is stored in a vault called
+**`threeEyedRaven`** in your password manager. **Nothing is kept on this PC.** There is no local
+cache and no fallback file, so the proxy does not start until 1Password or Proton Pass is
+unlocked.
+
+### Supported managers
+
+| Manager | CLI | Install |
+|---|---|---|
+| 1Password | `op` 2.0 or newer | `winget install AgileBits.1Password.CLI` |
+| Proton Pass | `pass-cli` | `winget install Proton.PassCLI` |
+
+Open OAuthProxy and it walks you through the rest: install, sign in, and create the vault. It only
+ever touches items it created, so `threeEyedRaven` stays safe to keep other things in.
+
+**Signing in.** For 1Password, turn on **Settings → Developer → Integrate with 1Password CLI** in
+the desktop app; without it, `op account add` then `op signin`. For Proton Pass, `pass-cli login`
+(or `pass-cli login --interactive` to stay in the terminal). Either can instead use a token —
+`OP_SERVICE_ACCOUNT_TOKEN` or `PROTON_PASS_PERSONAL_ACCESS_TOKEN` — which is the better option for
+a machine that should never show an unlock prompt. A 1Password service account must be granted
+access to `threeEyedRaven` explicitly; it cannot use your Private vault, and without the grant it
+sees no vaults at all.
+
+**If both are installed** and neither vault clearly holds the configuration, OAuthProxy asks which
+to use — **every launch**. The choice is the one thing that cannot live in the vault, and this app
+deliberately stores nothing about itself locally. Once one vault has a configuration in it, that
+one is used and the question stops.
+
+### What the vault looks like
+
+| Item | Holds |
+|---|---|
+| `OAuthProxy Config` | Routes, upstreams, MCP sources and funnels, settings — the topology, with **no secrets in it** |
+| `OAuthProxy credential — <name> [<id>]` | One per credential: client id and secret, API key, access and refresh tokens |
+| `OAuthProxy route key — <prefix> [<id>]` | One per route: its proxy key |
+| `OAuthProxy funnel key — /mcp/<slug> [<id>]` | One per funnel: its proxy key |
+
+Secrets get their own items so your password manager can conceal them, show them, and let you copy
+one out without reading JSON. Each field lives on exactly one side — a credential's scopes are in
+the config item and nowhere else, its secret is in its own item and nowhere else — so there is
+never a question of which copy is right.
+
+You can edit these in your password manager. OAuthProxy picks up changes on its next load and
+overwrites them on its next save, so use **Reload from vault** after editing by hand.
+
+### While the vault is locked
+
+OAuthProxy **stops editing and stops refreshing OAuth tokens**. Nothing is queued for later: the
+vault is the only copy, so a change held in memory is one you would believe was saved and a restart
+would lose.
+
+That means:
+
+- Routes using an **API key** keep working normally.
+- Routes using **OAuth** keep working until their current access token expires — usually up to an
+  hour — and then fail with `vault locked` until you unlock.
+- Every editing button is greyed out. Copying a key you can already see still works.
+
+Refusing to refresh is deliberate, and it is protecting something. A refresh rotates the refresh
+token at the provider; if that succeeded while the vault could not record the result, the
+replacement would exist only in memory and the next restart would lose the grant permanently. An
+access token that expires until you unlock is the far smaller cost.
+
+The banner tells you how long you have before the first token expires.
+
+**Keeping it available.** The option that weakens nothing is a token — a 1Password service account
+or a Proton Pass personal access token, scoped to `threeEyedRaven` — so nothing has to stay
+unlocked at all. Failing that, you can raise the auto-lock timeout in your manager's security
+settings, but that is a real trade: the timeout exists to limit how long an unattended machine
+holds your secrets decrypted. OAuthProxy never changes those settings for you.
+
+### Using one vault from two machines
+
+Both managers sync, so two OAuthProxy installs can end up pointed at the same vault. Each save
+checks the configuration's revision first and refuses if the other machine has written since this
+one loaded, rather than silently overwriting it. Use **Reload from vault** and redo the edit.
+
+---
+
+## Logs
+
+Logs are the only thing OAuthProxy writes to disk, under `%AppData%\OAuthProxy\`:
 
 | Path | Contents |
 |---|---|
-| `store.dat` | DPAPI-encrypted credentials, upstreams, routes, MCP sources and funnels, settings |
-| `store.dat.corrupt-<timestamp>` | An unreadable store, kept aside — see below |
-| `logs\activity-YYYYMMDD.log` | Proxied requests and responses, connects, refreshes, route reloads. Rotates every 2 days, auto-deletes after ~10 |
+| `logsctivity-YYYYMMDD.log` | Proxied requests and responses, connects, refreshes, route reloads, vault operations. Rotates every 2 days, auto-deletes after ~10 |
 | `logs\errors.log` | Unhandled exceptions and provider errors with stack traces |
 
 The Settings tab can open either log, open the folder, or prune old ones.
 
 **Redaction.** Activity logs record request paths and query parameter *names*; values are
-redacted, and tokens are never logged. Control characters are escaped so one event can only ever
-produce one line — request paths reach the log percent-decoded, so without this a caller could
-write fabricated entries.
+redacted, and tokens are never logged. Vault operations log the command, exit code, and duration —
+never the output, which for a read is the item contents. Control characters are escaped so one
+event can only ever produce one line: request paths reach the log percent-decoded, so without this
+a caller could write fabricated entries.
 
 **Startup warnings.** Any stored upstream or token endpoint using plain `http` off-machine is
-flagged as `STARTUP WARNING`. New entries are rejected when added, but anything saved by an older
-build was never re-checked.
-
-**Corrupt store recovery.** If `store.dat` cannot be read — truncated by a power loss, or a
-profile copied to another machine or account, which DPAPI cannot decrypt — it is renamed to
-`store.dat.corrupt-<timestamp>` and the app starts with empty config rather than failing to start.
-The old file is kept in case the account that wrote it can still recover it. This is reported in
-the log and in a dialog, because it means every credential, upstream, route, and funnel is gone —
-along with the proxy keys they carried, so every configured client will get `403` until it is
-pointed at a rebuilt endpoint with a new key.
-
-**Encryption scope.** `store.dat` uses DPAPI at `CurrentUser` scope. That protects it from other
-accounts, from backups, and from being read on another machine — but **not** from code running as
-you. Any program in your Windows session can ask DPAPI to decrypt it. That is the ceiling for a
-desktop app with no master password; adding entropy would not raise it, since the entropy would
-have to live in the binary.
+flagged as `STARTUP WARNING`. New entries are rejected when added, but the vault can also be edited
+directly in your password manager, which bypasses that check.
 
 ---
 
@@ -514,7 +596,7 @@ whose licenses require their notices travel along.
 ### Project layout
 
 ```
-src/OAuthProxy.Core/            OAuth flows, encrypted storage, YARP proxy config, MCP funnel,
+src/OAuthProxy.Core/            OAuth flows, password-manager storage, YARP proxy config, MCP funnel,
                                 activity log — no WPF dependency, just the engine
 src/OAuthProxy.App/             WPF tray app: hosts Kestrel + YARP in-process, tray icon, UI
 tests/OAuthProxy.Core.Tests/    xunit tests for Core
