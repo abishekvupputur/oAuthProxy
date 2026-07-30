@@ -216,6 +216,37 @@ public sealed class ConfigStoreCache
     }
 
     /// <summary>
+    /// Empties the store and forgets that it was ever loaded — for disconnecting the password
+    /// manager.
+    ///
+    /// Everything goes: with no vault behind it there is no configuration, and leaving routes and
+    /// credentials in memory would keep the proxy spending the user's tokens on a configuration
+    /// they have just disconnected from. The listen port survives because Kestrel is already bound
+    /// to it and the Settings tab would otherwise show a port that is not the one in use.
+    ///
+    /// Callers must reload their view models afterwards, and rebuild the proxy's route table.
+    /// </summary>
+    public async Task ResetAsync(CancellationToken ct = default)
+    {
+        await _lock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            RestoreInto(_current, Snapshot(new ConfigStore()) with { ListenPort = _current.Settings.ListenPort });
+            _initialized = false;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+
+        // Nothing is pending: the changes were not saved, they were deliberately discarded along
+        // with the vault they belonged to.
+        Interlocked.Exchange(ref _syncedVersion, Interlocked.Increment(ref _version));
+        PendingSince = null;
+        PendingChanged?.Invoke();
+    }
+
+    /// <summary>
     /// Membership of every list plus the settings scalars, restored <em>into</em> the existing
     /// instances rather than by swapping <see cref="Current"/> for a clone. The view models hold
     /// direct references to individual records and to the store itself; handing back a fresh

@@ -50,6 +50,13 @@ public sealed partial class ManagerCardViewModel(VaultStatus status) : Observabl
 
     public bool HasTokenCaveat => !string.IsNullOrWhiteSpace(TokenCaveat);
 
+    /// <summary>
+    /// The vault the user typed, for "use one I already have". Bound rather than passed as a
+    /// command parameter so the text survives a failed attempt — the usual reason one fails is a
+    /// misspelled name, and clearing it would make correcting it a retype.
+    /// </summary>
+    [ObservableProperty] private string _existingVaultName = "";
+
     // Exactly one section is shown per card, so the page never asks the user to read past advice
     // that does not apply to the state they are actually in.
     public bool ShowInstall => Availability == VaultAvailability.NotInstalled;

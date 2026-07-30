@@ -14,7 +14,11 @@ namespace OAuthProxy.Core.Tests.Vault;
 /// </summary>
 public sealed class FakeOnePassword
 {
-    private readonly Dictionary<string, JsonObject> _items = [];
+    /// <summary>Vault id to that vault's items, keyed by item id.</summary>
+    private readonly Dictionary<string, Dictionary<string, JsonObject>> _byVault = [];
+
+    /// <summary>Vault name to id, in the order <c>vault list</c> reports them.</summary>
+    private readonly List<(string Name, string VaultId)> _vaults = [];
 
     private int _nextId = 1;
 
@@ -28,7 +32,42 @@ public sealed class FakeOnePassword
     /// <summary>Set to make every write fail, standing in for a vault that locked mid-save.</summary>
     public string? WriteFailure { get; set; }
 
-    public IReadOnlyCollection<JsonObject> Items => _items.Values;
+    /// <summary>Items in the threeEyedRaven vault — what most tests mean by "the vault".</summary>
+    public IReadOnlyCollection<JsonObject> Items => ItemsIn(VaultId).Values;
+
+    /// <summary>
+    /// Another vault the account can see, for the "use a vault I already have" path. Returns its
+    /// id, which is what every item call takes.
+    /// </summary>
+    public string AddVault(string name)
+    {
+        var vaultId = $"vault-{name.ToLowerInvariant()}";
+        _vaults.Add((name, vaultId));
+
+        return vaultId;
+    }
+
+    /// <summary>Puts one of the user's own entries in a vault, so it is not empty.</summary>
+    public void AddItem(string vaultId, string title) =>
+        ItemsIn(vaultId)[$"item-{_nextId++}"] = new JsonObject
+        {
+            ["title"] = title,
+            ["category"] = "Login",
+            ["fields"] = new JsonArray(),
+        };
+
+    public IReadOnlyCollection<JsonObject> ItemsInVault(string vaultId) => ItemsIn(vaultId).Values;
+
+    private Dictionary<string, JsonObject> ItemsIn(string vaultId)
+    {
+        if (!_byVault.TryGetValue(vaultId, out var items))
+        {
+            items = [];
+            _byVault[vaultId] = items;
+        }
+
+        return items;
+    }
 
     public FakeCliRunner AsRunner()
     {
@@ -39,15 +78,23 @@ public sealed class FakeOnePassword
             ["--version"] => Ok(Version),
             ["vault", "list", ..] => Ok(VaultListJson()),
             ["vault", "create", ..] => CreateVault(),
-            ["item", "list", ..] => Ok(ItemListJson()),
-            ["item", "get", var id, ..] => GetItem(id),
-            ["item", "create", ..] => CreateItem(runner),
-            ["item", "edit", var id, ..] => EditItem(runner, id),
-            ["item", "delete", var id, ..] => DeleteItem(id),
+            ["item", "list", ..] => Ok(ItemListJson(VaultOf(args))),
+            ["item", "get", var id, ..] => GetItem(id, VaultOf(args)),
+            ["item", "create", ..] => CreateItem(runner, VaultOf(args)),
+            ["item", "edit", var id, ..] => EditItem(runner, id, VaultOf(args)),
+            ["item", "delete", var id, ..] => DeleteItem(id, VaultOf(args)),
             _ => null,
         });
 
         return runner;
+    }
+
+    /// <summary>The vault a call names, defaulting to threeEyedRaven for calls that name none.</summary>
+    private string VaultOf(IReadOnlyList<string> args)
+    {
+        var index = args.ToList().IndexOf("--vault");
+
+        return index >= 0 && index + 1 < args.Count ? args[index + 1] : VaultId;
     }
 
     private static CliResult Ok(string stdout) => new(0, stdout, "");
@@ -69,14 +116,19 @@ public sealed class FakeOnePassword
             vaults.Add(new JsonObject { ["id"] = VaultId, ["name"] = VaultConstants.VaultName });
         }
 
+        foreach (var (name, vaultId) in _vaults)
+        {
+            vaults.Add(new JsonObject { ["id"] = vaultId, ["name"] = name });
+        }
+
         return vaults.ToJsonString();
     }
 
-    private string ItemListJson()
+    private string ItemListJson(string vaultId)
     {
         var array = new JsonArray();
 
-        foreach (var (id, item) in _items)
+        foreach (var (id, item) in ItemsIn(vaultId))
         {
             array.Add(new JsonObject { ["id"] = id, ["title"] = item["title"]?.GetValue<string>() });
         }
@@ -84,8 +136,8 @@ public sealed class FakeOnePassword
         return array.ToJsonString();
     }
 
-    private CliResult GetItem(string id) =>
-        _items.TryGetValue(id, out var item)
+    private CliResult GetItem(string id, string vaultId) =>
+        ItemsIn(vaultId).TryGetValue(id, out var item)
             ? Ok(new JsonObject
             {
                 ["id"] = id,
@@ -94,7 +146,7 @@ public sealed class FakeOnePassword
             }.ToJsonString())
             : Fail($"\"{id}\" isn't an item.");
 
-    private CliResult CreateItem(FakeCliRunner runner)
+    private CliResult CreateItem(FakeCliRunner runner, string vaultId)
     {
         if (WriteFailure is { } failure) return Fail(failure);
 
@@ -102,15 +154,15 @@ public sealed class FakeOnePassword
         if (template is null) return Fail("expected an item template on stdin");
 
         var id = $"item-{_nextId++}";
-        _items[id] = template;
+        ItemsIn(vaultId)[id] = template;
 
         return Ok(new JsonObject { ["id"] = id, ["title"] = template["title"]?.GetValue<string>() }.ToJsonString());
     }
 
-    private CliResult EditItem(FakeCliRunner runner, string id)
+    private CliResult EditItem(FakeCliRunner runner, string id, string vaultId)
     {
         if (WriteFailure is { } failure) return Fail(failure);
-        if (!_items.TryGetValue(id, out var existing)) return Fail($"\"{id}\" isn't an item.");
+        if (!ItemsIn(vaultId).TryGetValue(id, out var existing)) return Fail($"\"{id}\" isn't an item.");
 
         var template = ParseStdin(runner);
         if (template is null) return Fail("expected an item template on stdin");
@@ -133,8 +185,8 @@ public sealed class FakeOnePassword
         return Ok(new JsonObject { ["id"] = id }.ToJsonString());
     }
 
-    private CliResult DeleteItem(string id) =>
-        _items.Remove(id) ? Ok("") : Fail($"\"{id}\" isn't an item.");
+    private CliResult DeleteItem(string id, string vaultId) =>
+        ItemsIn(vaultId).Remove(id) ? Ok("") : Fail($"\"{id}\" isn't an item.");
 
     /// <summary>The template the provider piped in for the call being handled.</summary>
     private static JsonObject? ParseStdin(FakeCliRunner runner) =>

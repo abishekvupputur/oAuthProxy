@@ -258,6 +258,64 @@ public class DeferredSyncTests : IDisposable
 
     private OAuth2Service NewOAuth2Service() => new(new GoogleOAuthService(NewLog()), NewLog());
 
+    // ---- Disconnecting --------------------------------------------------------------------------
+
+    [Fact]
+    public async Task DisconnectingEmptiesTheStoreAndLeavesNothingPending()
+    {
+        // Disconnecting is the one place unsaved changes are discarded on purpose. Leaving them
+        // pending afterwards would have the UI promising to save them to a vault nobody is
+        // connected to; leaving the records loaded would keep the proxy spending the user's tokens.
+        var vault = new SwitchableVault();
+        var cache = new ConfigStoreCache(vault);
+        await cache.InitializeAsync();
+
+        await cache.MutateAsync(store =>
+            store.Credentials.Add(new CredentialRecord { Name = "saved", ClientId = "id", ClientSecret = "s" }));
+        await NewQueue(cache, vault).TrySyncAsync();
+
+        // Unsaved on top of what the vault already has, which is what makes the discard visible.
+        await cache.MutateAsync(store =>
+        {
+            store.Settings.ListenPort = 6000;
+            store.Credentials.Add(new CredentialRecord { Name = "pending", ClientId = "id", ClientSecret = "s" });
+        });
+
+        await cache.ResetAsync();
+
+        Assert.Empty(cache.Current.Credentials);
+        Assert.False(cache.HasPendingChanges);
+        Assert.Null(cache.PendingSince);
+
+        // The port survives: Kestrel is already bound to it, so showing anything else would be a lie.
+        Assert.Equal(6000, cache.Current.Settings.ListenPort);
+
+        // And the vault is untouched — disconnecting discards what is in memory, it is not a delete.
+        var inTheVault = (await vault.LoadAsync()).Credentials;
+        Assert.Contains(inTheVault, c => c.Name == "saved");
+        Assert.DoesNotContain(inTheVault, c => c.Name == "pending");
+    }
+
+    [Fact]
+    public async Task ConnectingAgainLoadsTheNewVault()
+    {
+        var vault = new SwitchableVault();
+        var cache = new ConfigStoreCache(vault);
+        await cache.InitializeAsync();
+
+        await cache.MutateAsync(store =>
+            store.Credentials.Add(new CredentialRecord { Name = "saved", ClientId = "id", ClientSecret = "s" }));
+        await NewQueue(cache, vault).TrySyncAsync();
+
+        await cache.ResetAsync();
+        Assert.False(cache.IsInitialized);
+
+        // The same call the startup path makes — a reset store is a first load, not a stale one.
+        await cache.InitializeAsync();
+
+        Assert.Contains(cache.Current.Credentials, c => c.Name == "saved");
+    }
+
     private ActivityLog NewLog() => new(_logPath);
 
     public void Dispose()
@@ -282,6 +340,8 @@ public class DeferredSyncTests : IDisposable
 
         public VaultBackendKind Kind => VaultBackendKind.ProtonPass;
 
+        public string VaultName => _inner.VaultName;
+
         public string? LastLoadWarning => _inner.LastLoadWarning;
 
         public Task<VaultStatus> ProbeAsync(CancellationToken ct = default) =>
@@ -289,6 +349,11 @@ public class DeferredSyncTests : IDisposable
                 IsLocked ? VaultAvailability.NotSignedIn : VaultAvailability.Ready, VaultId: "switchable"));
 
         public Task EnsureVaultAsync(CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task UseExistingVaultAsync(string vaultName, CancellationToken ct = default) =>
+            _inner.UseExistingVaultAsync(vaultName, ct);
+
+        public void Forget() => _inner.Forget();
 
         public Task<ConfigStore> LoadAsync(CancellationToken ct = default) =>
             IsLocked ? throw new VaultLockedException(Kind) : _inner.LoadAsync(ct);

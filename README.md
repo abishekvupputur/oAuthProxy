@@ -471,6 +471,13 @@ unlocked.
 Open OAuthProxy and it walks you through the rest: install, sign in, and create the vault. It only
 ever touches items it created, so `threeEyedRaven` stays safe to keep other things in.
 
+**Using a vault you already have.** Creating `threeEyedRaven` is not compulsory — type the name of
+an existing vault on the setup page instead. Only two kinds are accepted: an **empty** vault, or one
+**OAuthProxy has already written to**. Anything else has your own entries in it, and this app's
+housekeeping deletes items it no longer needs, so it will not take that vault over. An empty one is
+stamped with the `OAuthProxy Config` item straight away — that item is how the vault is recognised
+next launch, since the name you typed is deliberately not stored on this PC.
+
 **Signing in.** For 1Password, turn on **Settings → Developer → Integrate with 1Password CLI** in
 the desktop app; without it, `op account add` then `op signin`. For Proton Pass, `pass-cli login`
 (or `pass-cli login --interactive` to stay in the terminal). Either can instead use a token —
@@ -483,6 +490,13 @@ sees no vaults at all.
 to use — **every launch**. The choice is the one thing that cannot live in the vault, and this app
 deliberately stores nothing about itself locally. Once one vault has a configuration in it, that
 one is used and the question stops.
+
+**Settings → Password manager** shows which manager and which vault are in use, where its CLI is
+and what version answered, and whether everything on screen has reached the vault. **Sync now**
+pushes pending changes; **Disconnect** stops using the manager, empties the in-memory configuration
+and returns to the setup page — the proxy serves nothing until you connect one again. Nothing in
+the vault is deleted. If changes are still unsaved, disconnecting tries to save them first and then
+asks before discarding.
 
 ### What the vault looks like
 
@@ -529,10 +543,12 @@ often than exiting mid-lock. Only the newest token is ever useful, so there is n
 keeping that a reconnect cannot restore.
 
 **Keeping it available.** The option that weakens nothing is a token — a 1Password service account
-or a Proton Pass personal access token, scoped to `threeEyedRaven` — so nothing has to stay
-unlocked at all. Failing that, you can raise the auto-lock timeout in your manager's security
-settings, but that is a real trade: the timeout exists to limit how long an unattended machine
-holds your secrets decrypted. OAuthProxy never changes those settings for you.
+or a Proton Pass personal access token, scoped to the vault in use — so nothing has to stay unlocked
+at all. It is under **Running unattended** on the Settings tab, deliberately not in the lock banner:
+that banner interrupts you mid-task and should offer the thirty-second fix, not a walkthrough of
+creating a long-lived credential. Failing that, you can raise the auto-lock timeout in your
+manager's security settings, but that is a real trade: the timeout exists to limit how long an
+unattended machine holds your secrets decrypted. OAuthProxy never changes those settings for you.
 
 ### Using one vault from two machines
 

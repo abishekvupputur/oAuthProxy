@@ -45,7 +45,13 @@
                     <StackPanel>
                         <TextBlock Text="Which one should OAuthProxy use?" Style="{StaticResource SectionHeaderStyle}"/>
                         <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
+                                   Visibility="{Binding IsDisconnected, Converter={StaticResource InverseBoolToVisibilityConverter}}"
                                    Text="Both are ready. OAuthProxy uses one at a time — writing to both would leave two vaults that quietly disagree. You will be asked again next time you start it."/>
+                        <!-- After a disconnect the same buttons mean "connect again", and nothing
+                             is loaded until one is pressed. -->
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
+                                   Visibility="{Binding IsDisconnected, Converter={StaticResource BoolToVisibilityConverter}}"
+                                   Text="You disconnected from your password manager, so OAuthProxy is holding no configuration and is proxying nothing. Choose one to load its vault and start again."/>
                         <ItemsControl ItemsSource="{Binding Managers}">
                             <ItemsControl.ItemsPanel>
                                 <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
@@ -114,6 +120,22 @@
                                                 Command="{Binding DataContext.CreateVaultCommand,
                                                           RelativeSource={RelativeSource AncestorType=ItemsControl}}"
                                                 CommandParameter="{Binding}"/>
+
+                                        <!-- Creating one is not compulsory. A vault the user already
+                                             made is accepted, but only while it is theirs to give:
+                                             empty, or already holding an OAuthProxy configuration. -->
+                                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
+                                                   Margin="0,12,0,6"
+                                                   Text="Or use a vault you already have — type its name. It has to be empty, or a vault OAuthProxy has written to before: anything else has your own entries in it, and this app's housekeeping deletes items it no longer needs."/>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBox Width="190" VerticalAlignment="Center"
+                                                     Text="{Binding ExistingVaultName, UpdateSourceTrigger=PropertyChanged}"/>
+                                            <Button Content="Use this vault" Margin="8,0,0,0"
+                                                    Style="{StaticResource GhostButtonStyle}"
+                                                    Command="{Binding DataContext.UseExistingVaultCommand,
+                                                              RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                    CommandParameter="{Binding}"/>
+                                        </StackPanel>
                                     </StackPanel>
                                 </StackPanel>
                             </Border>

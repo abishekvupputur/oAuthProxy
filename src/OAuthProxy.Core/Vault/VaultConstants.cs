@@ -3,9 +3,12 @@ namespace OAuthProxy.Core.Vault;
 public static class VaultConstants
 {
     /// <summary>
-    /// The vault this app reads and writes, in whichever password manager is active. Fixed rather
-    /// than configurable: it is the one piece of state that cannot itself be stored in the vault,
-    /// and a wrong or forgotten name would look exactly like an empty configuration.
+    /// The vault this app creates and looks for first, in whichever password manager is active.
+    ///
+    /// A user can point OAuthProxy at an existing vault instead, and that name is deliberately not
+    /// written down anywhere on the PC — nothing about this app is. It is found again the way the
+    /// backend itself is: whichever vault actually holds an "OAuthProxy Config" item is the one
+    /// that was being used, which is why an adopted empty vault is stamped with that item at once.
     /// </summary>
     public const string VaultName = "threeEyedRaven";
 

@@ -5,7 +5,9 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using OAuthProxy.Core.Diagnostics;
 using OAuthProxy.Core.Platform;
+using OAuthProxy.Core.Proxy;
 using OAuthProxy.Core.Storage;
+using OAuthProxy.Core.Vault;
 
 namespace OAuthProxy.App.ViewModels;
 
@@ -16,12 +18,36 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly ConfigStoreCache _configStoreCache;
     private readonly AutostartService _autostartService;
     private readonly ActivityLog _activityLog;
+    private readonly VaultGateService _gate;
+    private readonly VaultSyncQueue _syncQueue;
+    private readonly ProxyConfigChangeNotifier _proxyConfigChangeNotifier;
     private readonly DispatcherTimer _logTimer;
 
     [ObservableProperty] private int _listenPort;
     [ObservableProperty] private bool _startWithWindows;
     [ObservableProperty] private string _recentActivity = "";
     [ObservableProperty] private string _statusMessage = "Ready.";
+
+    /// <summary>Which manager is in use and which vault in it — "Proton Pass — vault 'threeEyedRaven'".</summary>
+    [ObservableProperty] private string _passwordManagerSummary = "";
+
+    /// <summary>Where the CLI is and what version answered, so a wrong binary is visible.</summary>
+    [ObservableProperty] private string _passwordManagerDetail = "";
+
+    /// <summary>Whether everything in memory has reached the vault, in one line.</summary>
+    [ObservableProperty] private string _vaultSyncSummary = "";
+
+    /// <summary>The token option, kept off the lock banner — see <see cref="VaultLockGuidance"/>.</summary>
+    [ObservableProperty] private string _unattendedTokenSteps = "";
+
+    [ObservableProperty] private bool _isConnected;
+
+    /// <summary>
+    /// Set when disconnecting would throw away changes the vault never got. The button asks once
+    /// rather than doing it, because this is the one action in the app that can lose a token
+    /// refresh, and there is no undo for it.
+    /// </summary>
+    [ObservableProperty] private bool _isConfirmingDisconnect;
 
     /// <summary>
     /// Keys are per endpoint and live on the row that owns them, so this tab only says where to
@@ -44,11 +70,20 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
     }
 
-    public SettingsViewModel(ConfigStoreCache configStoreCache, AutostartService autostartService, ActivityLog activityLog)
+    public SettingsViewModel(
+        ConfigStoreCache configStoreCache,
+        AutostartService autostartService,
+        ActivityLog activityLog,
+        VaultGateService gate,
+        VaultSyncQueue syncQueue,
+        ProxyConfigChangeNotifier proxyConfigChangeNotifier)
     {
         _configStoreCache = configStoreCache;
         _autostartService = autostartService;
         _activityLog = activityLog;
+        _gate = gate;
+        _syncQueue = syncQueue;
+        _proxyConfigChangeNotifier = proxyConfigChangeNotifier;
 
         var settings = _configStoreCache.Current.Settings;
         _listenPort = settings.ListenPort;
@@ -59,10 +94,22 @@ public sealed partial class SettingsViewModel : ObservableObject
         _startWithWindows = _autostartService.IsEnabled();
 
         RefreshActivity();
+        RefreshVaultStatus();
+
+        // One timer for both: the sync queue and the gate both change state from background
+        // threads, and polling them on the dispatcher's own tick avoids marshalling a stream of
+        // events into a tab that is usually not even visible.
         _logTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-        _logTimer.Tick += (_, _) => RefreshActivity();
+        _logTimer.Tick += (_, _) =>
+        {
+            RefreshActivity();
+            RefreshVaultStatus();
+        };
         _logTimer.Start();
     }
+
+    /// <summary>Raised after the user disconnects, so the shell can go back to the setup page.</summary>
+    public event Action? Disconnected;
 
     /// <summary>
     /// Re-reads state the tray menu can also change, so the two never disagree. Called when
@@ -76,6 +123,127 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         // Routes and funnels can have been added on another tab since this one was last shown.
         OnPropertyChanged(nameof(KeyLocationSummary));
+
+        RefreshVaultStatus();
+    }
+
+    /// <summary>
+    /// What the password manager is doing, in the two lines a user actually needs: which vault the
+    /// configuration is in, and whether what they see on screen has reached it.
+    /// </summary>
+    private void RefreshVaultStatus()
+    {
+        var kind = _gate.Status.Selected;
+        var manager = VaultLockGuidance.DisplayName(kind);
+        var status = _gate.Status.For(kind);
+
+        IsConnected = kind != VaultBackendKind.None;
+        UnattendedTokenSteps = VaultLockGuidance.UnattendedTokenSteps(kind);
+
+        if (!IsConnected)
+        {
+            PasswordManagerSummary = "Not connected to a password manager.";
+            PasswordManagerDetail = "";
+            VaultSyncSummary = "";
+            return;
+        }
+
+        // The vault name is worth stating even when it is the default: once a user has pointed
+        // OAuthProxy at a vault of their own, nothing else on screen says which one it went to.
+        PasswordManagerSummary = $"{manager} — vault '{status?.VaultName ?? _gate.Selected.VaultName}'";
+
+        PasswordManagerDetail = status?.ExePath is { Length: > 0 } path
+            ? status.Version is { Length: > 0 } version ? $"{path}  (v{version})" : path
+            : "";
+
+        VaultSyncSummary = DescribeSync(manager);
+    }
+
+    private string DescribeSync(string manager)
+    {
+        if (!_configStoreCache.HasPendingChanges) return $"Everything is saved to {manager}.";
+
+        return _syncQueue.State switch
+        {
+            VaultSyncState.WaitingForUnlock =>
+                $"Waiting for {manager} — changes are in memory only and are lost if OAuthProxy exits first.",
+
+            VaultSyncState.Failed =>
+                $"{manager} refused the last save: {_syncQueue.LastError ?? "no reason given"}. Retrying.",
+
+            _ => $"Saving to {manager}…",
+        };
+    }
+
+    /// <summary>Pushes now, for when the manager has just been unlocked.</summary>
+    [RelayCommand]
+    private async Task SyncNowAsync()
+    {
+        if (!_configStoreCache.HasPendingChanges)
+        {
+            StatusMessage = "Nothing to save — the vault already has everything.";
+            RefreshVaultStatus();
+            return;
+        }
+
+        StatusMessage = "Saving to your password manager…";
+
+        var saved = await _syncQueue.FlushAsync(TimeSpan.FromSeconds(30));
+
+        StatusMessage = saved
+            ? "Saved."
+            : _syncQueue.LastError ?? "Could not save — the password manager is locked or unavailable.";
+
+        RefreshVaultStatus();
+    }
+
+    /// <summary>
+    /// Stops using the password manager and empties the store, which leaves the proxy serving
+    /// nothing until one is connected again.
+    ///
+    /// Tries to save first: the manager is often unlocked by now — the user may have unlocked it
+    /// for something else entirely — and discarding changes that could simply have been written
+    /// would be a poor way to find that out. Only what is still unsaved after that gets a warning.
+    /// </summary>
+    [RelayCommand]
+    private async Task DisconnectAsync()
+    {
+        if (_configStoreCache.HasPendingChanges && !IsConfirmingDisconnect)
+        {
+            StatusMessage = "Saving pending changes before disconnecting…";
+            await _syncQueue.FlushAsync(TimeSpan.FromSeconds(15));
+
+            if (_configStoreCache.HasPendingChanges)
+            {
+                IsConfirmingDisconnect = true;
+                StatusMessage = "Some changes have still not reached the vault.";
+                return;
+            }
+        }
+
+        IsConfirmingDisconnect = false;
+
+        _gate.Disconnect();
+        await _configStoreCache.ResetAsync();
+
+        // Routes come from the store, so the proxy has to be rebuilt from the now-empty one —
+        // otherwise it would keep forwarding with the credentials of a vault this app has just
+        // disconnected from.
+        _proxyConfigChangeNotifier.Rebuild();
+
+        _activityLog.Log("VAULT disconnected from the Settings tab — the proxy is serving nothing until reconnected");
+
+        StatusMessage = "Disconnected.";
+        RefreshVaultStatus();
+
+        Disconnected?.Invoke();
+    }
+
+    [RelayCommand]
+    private void CancelDisconnect()
+    {
+        IsConfirmingDisconnect = false;
+        StatusMessage = "Left connected.";
     }
 
     private void RefreshActivity()

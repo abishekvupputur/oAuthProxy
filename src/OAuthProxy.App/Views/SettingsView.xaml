@@ -15,6 +15,50 @@
         <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                       helpers:SmoothScroll.Enable="True" Padding="0,0,4,0">
             <StackPanel Margin="16">
+            <!-- First card on the tab: everything else here is stored in the vault this one names. -->
+            <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14">
+                <StackPanel>
+                    <TextBlock Text="Password manager" Style="{StaticResource SectionHeaderStyle}"/>
+                    <TextBlock Text="{Binding PasswordManagerSummary}" TextWrapping="Wrap"
+                               Foreground="{StaticResource TextBrush}" Margin="0,0,0,2"/>
+                    <TextBlock Text="{Binding PasswordManagerDetail}" Style="{StaticResource HintTextStyle}"
+                               TextWrapping="Wrap" Margin="0,0,0,6"/>
+                    <TextBlock Text="{Binding VaultSyncSummary}" Style="{StaticResource HintTextStyle}"
+                               TextWrapping="Wrap" Margin="0,0,0,8"/>
+
+                    <WrapPanel Visibility="{Binding IsConnected, Converter={StaticResource BoolToVisibilityConverter}}">
+                        <Button Content="Sync now" Margin="0,0,8,6" Command="{Binding SyncNowCommand}"/>
+                        <Button Content="Disconnect" Margin="0,0,0,6" Style="{StaticResource GhostButtonStyle}"
+                                Command="{Binding DisconnectCommand}"
+                                Visibility="{Binding IsConfirmingDisconnect, Converter={StaticResource InverseBoolToVisibilityConverter}}"/>
+                    </WrapPanel>
+
+                    <!-- Only when a disconnect would actually cost something: changes that are in
+                         memory and nowhere else. -->
+                    <StackPanel Visibility="{Binding IsConfirmingDisconnect, Converter={StaticResource BoolToVisibilityConverter}}">
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
+                                   Foreground="{StaticResource ErrorBrush}"
+                                   Text="Some changes are only in memory. Disconnecting discards them, and any credential whose token was refreshed since the last save will need reconnecting. Unlock your password manager and choose Sync now to keep them."/>
+                        <WrapPanel>
+                            <Button Content="Disconnect and discard" Margin="0,0,8,6"
+                                    Command="{Binding DisconnectCommand}"/>
+                            <Button Content="Cancel" Margin="0,0,0,6" Style="{StaticResource GhostButtonStyle}"
+                                    Command="{Binding CancelDisconnectCommand}"/>
+                        </WrapPanel>
+                    </StackPanel>
+
+                    <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,4,0,0"
+                               Text="Disconnecting empties the configuration held in memory — the proxy serves nothing until you connect a password manager again. Nothing in the vault is deleted."/>
+
+                    <Expander Header="Running unattended" Margin="0,8,0,0"
+                              Foreground="{StaticResource MutedTextBrush}"
+                              Visibility="{Binding IsConnected, Converter={StaticResource BoolToVisibilityConverter}}">
+                        <TextBlock Text="{Binding UnattendedTokenSteps}" Style="{StaticResource HintTextStyle}"
+                                   TextWrapping="Wrap" Margin="0,6,0,0"/>
+                    </Expander>
+                </StackPanel>
+            </Border>
+
             <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14">
                 <StackPanel>
                     <TextBlock Text="Listen port" Style="{StaticResource SectionHeaderStyle}"/>

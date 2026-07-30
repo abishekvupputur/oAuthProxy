@@ -34,6 +34,9 @@ public partial class App : Application
     /// </summary>
     private bool _proxyStarted;
 
+    /// <summary>The port Kestrel actually bound, so a reconnect can say when a vault disagrees.</summary>
+    private int _boundPort;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -125,6 +128,7 @@ public partial class App : Application
 
         var mainWindow = _webApp.Services.GetRequiredService<MainWindow>();
         var settingsViewModel = _webApp.Services.GetRequiredService<SettingsViewModel>();
+        var mainWindowViewModel = _webApp.Services.GetRequiredService<MainWindowViewModel>();
 
         _trayIconManager = _webApp.Services.GetRequiredService<TrayIconManager>();
         _trayIconManager.Initialize(
@@ -140,6 +144,17 @@ public partial class App : Application
         var setupViewModel = _webApp.Services.GetRequiredService<SetupViewModel>();
         setupViewModel.ReadyToStart += StartProxyAsync;
 
+        // Disconnecting from the Settings tab puts the whole window back to the setup page: with no
+        // password manager there is no configuration, so the tabs would be four empty grids whose
+        // every control fails — the same reason the app starts there.
+        settingsViewModel.Disconnected += () =>
+        {
+            mainWindowViewModel.EnterSetupMode();
+            _trayIconManager?.SetState(TrayState.SetupRequired);
+
+            _ = setupViewModel.CheckAsync();
+        };
+
         // Fire and forget on the Dispatcher rather than blocking it. The original deadlock hazard
         // was blocking this thread while a continuation tried to post back onto it; this never
         // blocks, and every piece of work below is still wrapped in Task.Run so nothing captures
@@ -154,7 +169,11 @@ public partial class App : Application
     /// </summary>
     private async Task StartProxyAsync()
     {
-        if (_proxyStarted) return;
+        if (_proxyStarted)
+        {
+            await ReconnectAsync();
+            return;
+        }
 
         var configStoreCache = _webApp!.Services.GetRequiredService<ConfigStoreCache>();
         var mainWindowViewModel = _webApp.Services.GetRequiredService<MainWindowViewModel>();
@@ -202,6 +221,46 @@ public partial class App : Application
         }
 
         _proxyStarted = true;
+        _boundPort = port;
+        mainWindowViewModel.EnterNormalMode();
+        _trayIconManager?.SetState(TrayState.Running);
+    }
+
+    /// <summary>
+    /// Loads the store again after the user disconnected a password manager and connected one
+    /// back. Kestrel is already bound and cannot be rebound in this process, so a listen port that
+    /// differs in the newly connected vault takes effect at the next start — everything else, from
+    /// routes to proxy keys, comes back immediately.
+    /// </summary>
+    private async Task ReconnectAsync()
+    {
+        var vaultStatusViewModel = _webApp!.Services.GetRequiredService<VaultStatusViewModel>();
+        var mainWindowViewModel = _webApp.Services.GetRequiredService<MainWindowViewModel>();
+        var setupViewModel = _webApp.Services.GetRequiredService<SetupViewModel>();
+        var configStoreCache = _webApp.Services.GetRequiredService<ConfigStoreCache>();
+
+        try
+        {
+            await vaultStatusViewModel.ReconnectAsync();
+        }
+        catch (Exception ex)
+        {
+            // Staying on the setup page is the right answer: the store did not load, so the tabs
+            // would show a configuration that is not there.
+            _webApp.Services.GetService<ActivityLog>()?.LogError("Could not reload the vault", ex);
+            setupViewModel.ReportReconnectFailure(ex.Message);
+            return;
+        }
+
+        _webApp.Services.GetRequiredService<ProxyConfigChangeNotifier>().Rebuild();
+
+        if (configStoreCache.Current.Settings.ListenPort != _boundPort)
+        {
+            _webApp.Services.GetService<ActivityLog>()?.Log(
+                $"STARTUP this vault asks for port {configStoreCache.Current.Settings.ListenPort}, but the proxy is "
+                + $"already listening on {_boundPort} — restart OAuthProxy to move it");
+        }
+
         mainWindowViewModel.EnterNormalMode();
         _trayIconManager?.SetState(TrayState.Running);
     }
