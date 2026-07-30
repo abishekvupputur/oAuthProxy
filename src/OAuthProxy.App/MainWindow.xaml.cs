@@ -9,6 +9,8 @@ namespace OAuthProxy.App;
 public partial class MainWindow : Window
 {
     public MainWindow(
+        MainWindowViewModel mainWindowViewModel,
+        SetupViewModel setupViewModel,
         CredentialsViewModel credentialsViewModel,
         RoutesViewModel routesViewModel,
         McpFunnelViewModel mcpFunnelViewModel,
@@ -16,6 +18,9 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
+        DataContext = mainWindowViewModel;
+
+        SetupViewControl.DataContext = setupViewModel;
         CredentialsViewControl.DataContext = credentialsViewModel;
         RoutesViewControl.DataContext = routesViewModel;
         McpFunnelViewControl.DataContext = mcpFunnelViewModel;
@@ -57,5 +62,19 @@ public partial class MainWindow : Window
         // Never actually close from the X button — only the tray "Exit" command shuts the app down.
         e.Cancel = true;
         Hide();
+
+        // Closing the setup page before finishing leaves a tray icon and no proxy, which looks
+        // exactly like a working install until the first request fails. Said once, so it reads as
+        // information rather than nagging.
+        if (DataContext is MainWindowViewModel { IsGated: true } && !_warnedAboutBeingIdle)
+        {
+            _warnedAboutBeingIdle = true;
+            HiddenWhileGated?.Invoke();
+        }
     }
+
+    /// <summary>Raised the first time the window is hidden with setup still incomplete.</summary>
+    public event Action? HiddenWhileGated;
+
+    private bool _warnedAboutBeingIdle;
 }

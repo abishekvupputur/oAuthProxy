@@ -25,22 +25,25 @@ public class ProtonPassProviderTests : IDisposable
     private readonly string _stubDir = Path.Combine(Path.GetTempPath(), $"oauthproxy-pass-{Guid.NewGuid()}");
     private readonly string _logPath = Path.Combine(Path.GetTempPath(), $"oauthproxy-pass-logs-{Guid.NewGuid()}");
 
+    private readonly string _stub;
+
     public ProtonPassProviderTests()
     {
+        // Handed to the provider directly rather than set in the environment: xunit runs test
+        // classes in parallel, and a process-wide variable would be clobbered by whichever other
+        // provider test happened to be running at the same moment.
         Directory.CreateDirectory(_stubDir);
-
-        var stub = Path.Combine(_stubDir, "pass-cli.exe");
-        File.WriteAllText(stub, "");
-        Environment.SetEnvironmentVariable(VaultProbe.ProtonPassPathVariable, stub);
+        _stub = Path.Combine(_stubDir, "pass-cli.exe");
+        File.WriteAllText(_stub, "");
     }
 
     [Fact]
     public async Task NotInstalled_WhenTheBinaryIsMissing()
     {
-        Environment.SetEnvironmentVariable(VaultProbe.ProtonPassPathVariable,
-            Path.Combine(_stubDir, "not-here.exe"));
+        var provider = new ProtonPassVaultProvider(
+            new FakeCliRunner(), new ActivityLog(_logPath), Path.Combine(_stubDir, "not-here.exe"));
 
-        Assert.Equal(VaultAvailability.NotInstalled, (await NewProvider(new FakeCliRunner()).ProbeAsync()).Availability);
+        Assert.Equal(VaultAvailability.NotInstalled, (await provider.ProbeAsync()).Availability);
     }
 
     [Fact]
@@ -264,7 +267,7 @@ public class ProtonPassProviderTests : IDisposable
     }
 
     private ProtonPassVaultProvider NewProvider(FakeCliRunner runner) =>
-        new(runner, new ActivityLog(_logPath));
+        new(runner, new ActivityLog(_logPath), _stub);
 
     private static ConfigStore StoreWithSecrets()
     {
@@ -304,8 +307,6 @@ public class ProtonPassProviderTests : IDisposable
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(VaultProbe.ProtonPassPathVariable, null);
-
         try { Directory.Delete(_stubDir, recursive: true); } catch { /* best effort */ }
         try { Directory.Delete(_logPath, recursive: true); } catch { /* best effort */ }
     }

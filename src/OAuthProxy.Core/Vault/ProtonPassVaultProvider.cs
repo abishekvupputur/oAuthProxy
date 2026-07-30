@@ -24,7 +24,15 @@ namespace OAuthProxy.Core.Vault;
 /// and a mismatch fails loudly with a message naming that flag rather than silently writing
 /// items nothing can read back.
 /// </summary>
-public sealed class ProtonPassVaultProvider(ICliRunner cliRunner, ActivityLog activityLog) : IConfigVault
+/// <param name="exePathOverride">
+/// Skips the search for the binary. For tests, which must not depend on whether the real CLI
+/// happens to be installed — and must not reach for the process-wide environment variable, since
+/// test classes run in parallel and would clobber each other's.
+/// </param>
+public sealed class ProtonPassVaultProvider(
+    ICliRunner cliRunner,
+    ActivityLog activityLog,
+    string? exePathOverride = null) : IConfigVault
 {
     /// <summary>
     /// What Proton Pass substitutes for a secret it declines to print. If this comes back instead
@@ -49,8 +57,8 @@ public sealed class ProtonPassVaultProvider(ICliRunner cliRunner, ActivityLog ac
 
     public async Task<VaultStatus> ProbeAsync(CancellationToken ct = default)
     {
-        _exePath = VaultProbe.FindProtonPass();
-        if (_exePath is null) return VaultStatus.NotInstalled(Kind);
+        _exePath = exePathOverride ?? VaultProbe.FindProtonPass();
+        if (_exePath is null || !File.Exists(_exePath)) return VaultStatus.NotInstalled(Kind);
 
         string? version;
         CliResult vaultList;

@@ -9,18 +9,31 @@
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}"
         TextElement.FontFamily="Segoe UI">
-    <TabControl SelectionChanged="TabControl_SelectionChanged">
-        <TabItem Header="Credentials">
-            <views:CredentialsView x:Name="CredentialsViewControl"/>
-        </TabItem>
-        <TabItem Header="Routes">
-            <views:RoutesView x:Name="RoutesViewControl"/>
-        </TabItem>
-        <TabItem Header="MCP Funnel">
-            <views:McpFunnelView x:Name="McpFunnelViewControl"/>
-        </TabItem>
-        <TabItem Header="Settings">
-            <views:SettingsView x:Name="SettingsViewControl"/>
-        </TabItem>
-    </TabControl>
+    <!--
+        Two whole-window states rather than a banner over a disabled UI: without a reachable
+        password manager there is no configuration at all, so the tabs would be four empty grids
+        whose every control fails. A Grid with visibility rather than a ContentControl with a
+        state DataTemplate, because the code-behind wires the tab views up by x:Name and a
+        template would rebuild them out from under it.
+    -->
+    <Grid>
+        <views:SetupView x:Name="SetupViewControl"
+                         Visibility="{Binding IsGated, Converter={StaticResource BoolToVisibilityConverter}}"/>
+
+        <TabControl x:Name="TabsControl" SelectionChanged="TabControl_SelectionChanged"
+                    Visibility="{Binding IsNormal, Converter={StaticResource BoolToVisibilityConverter}}">
+            <TabItem Header="Credentials">
+                <views:CredentialsView x:Name="CredentialsViewControl"/>
+            </TabItem>
+            <TabItem Header="Routes">
+                <views:RoutesView x:Name="RoutesViewControl"/>
+            </TabItem>
+            <TabItem Header="MCP Funnel">
+                <views:McpFunnelView x:Name="McpFunnelViewControl"/>
+            </TabItem>
+            <TabItem Header="Settings">
+                <views:SettingsView x:Name="SettingsViewControl"/>
+            </TabItem>
+        </TabControl>
+    </Grid>
 </Window>
