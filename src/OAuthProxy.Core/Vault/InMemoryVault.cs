@@ -1,28 +1,29 @@
-using System.Text.Json;
 using OAuthProxy.Core.Models;
 
 namespace OAuthProxy.Core.Vault;
 
 /// <summary>
-/// An <see cref="IConfigVault"/> that keeps the store in memory. Ships in Core rather than the
-/// test project because it is what every test that needs a working store uses, and because it is
-/// the honest stand-in for "a vault, minus the subprocess".
+/// An <see cref="IConfigVault"/> backed by a dictionary of items instead of a CLI. Ships in Core
+/// rather than the test project because it is what every test needing a working store uses, and
+/// because it is the honest stand-in for "a vault, minus the subprocess".
 ///
-/// Round-trips through JSON on both read and write rather than handing out the same object graph.
-/// That is not ceremony: the real backends serialize, so properties marked
-/// <see cref="System.Text.Json.Serialization.JsonIgnoreAttribute"/> do not survive a save, and a
-/// double that shared references would let a test pass on state the real vault would have dropped.
-/// It also means a caller cannot mutate "what is stored" by editing the object it saved.
+/// It runs the **real** <see cref="VaultMapper"/> over those items — the same split into a
+/// redacted topology note plus one item per secret, the same index, the same reassembly on load,
+/// the same delete reconciliation. A double that just held a <see cref="ConfigStore"/> would let
+/// round-trip tests pass on a mapping that silently drops half the fields, which is exactly the
+/// bug worth catching.
 /// </summary>
 public sealed class InMemoryVault : IConfigVault
 {
-    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
-
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly VaultAvailability _availability;
     private readonly SaveBehavior _saveBehavior;
 
-    private string? _stored;
+    /// <summary>Item id to contents, standing in for the vault's own storage.</summary>
+    private readonly Dictionary<string, VaultItemContents> _items = [];
+
+    private long _revision;
+    private int _nextItemId = 1;
     private string? _loadWarning;
 
     private enum SaveBehavior
@@ -48,6 +49,9 @@ public sealed class InMemoryVault : IConfigVault
 
     public string? LastLoadWarning { get; private set; }
 
+    /// <summary>Every item currently stored, for tests that assert on the vault's shape.</summary>
+    public IReadOnlyCollection<VaultItemContents> Items => _items.Values;
+
     /// <summary>A working, initially empty vault.</summary>
     public static InMemoryVault Empty() => new();
 
@@ -60,35 +64,57 @@ public sealed class InMemoryVault : IConfigVault
         new(VaultAvailability.Ready, SaveBehavior.FailBeforeWriting);
 
     /// <summary>
-    /// Commits the store and then fails. Stands in for a multi-item save that died between items:
-    /// some of it is durable, so ConfigStoreCache must *not* roll back and must instead report
-    /// being out of sync.
+    /// Writes the secret items and then fails before the note. Stands in for a multi-item save
+    /// that died part way: some of it is durable, so ConfigStoreCache must <em>not</em> roll back
+    /// and must report being out of sync instead.
     /// </summary>
     public static InMemoryVault ThatFailsHalfway() =>
         new(VaultAvailability.Ready, SaveBehavior.FailHalfway);
 
-    /// <summary>
-    /// Probes as signed out and refuses writes with <see cref="VaultLockedException"/>. Drives the
-    /// read-only mode tests.
-    /// </summary>
+    /// <summary>Probes as signed out and refuses writes with <see cref="VaultLockedException"/>.</summary>
     public static InMemoryVault ThatIsLocked() =>
         new(VaultAvailability.NotSignedIn, SaveBehavior.Locked);
 
     /// <summary>Seeds the vault as if the store had already been saved to it.</summary>
     public InMemoryVault Seeded(ConfigStore store)
     {
-        _stored = Serialize(store);
+        WriteItems(store);
         return this;
     }
 
     /// <summary>
-    /// Makes every load report an incomplete result — a real backend does this when a record's
-    /// secret item is missing and the record comes back without its secret.
+    /// Makes every load report an incomplete result — what a real backend does when a record's
+    /// secret item has gone missing.
     /// </summary>
     public InMemoryVault WithLoadWarning(string warning)
     {
         _loadWarning = warning;
         return this;
+    }
+
+    /// <summary>Removes an item, standing in for one deleted in the password manager's own UI.</summary>
+    public bool RemoveItem(string itemId) => _items.Remove(itemId);
+
+    /// <summary>Adds an item this app does not own, which no save may ever delete.</summary>
+    public void AddForeignItem(string title, string value)
+    {
+        var itemId = $"foreign-{_nextItemId++}";
+        _items[itemId] = new VaultItemContents(itemId, title,
+            new Dictionary<string, string> { [VaultFields.Password] = value });
+    }
+
+    /// <summary>Rewrites the config note, for testing recovery from a stale or broken index.</summary>
+    public void EditConfigNote(Func<string, string> edit)
+    {
+        if (FindConfigNote() is not { } note) return;
+
+        _items[note.ItemId] = note with
+        {
+            Fields = new Dictionary<string, string>
+            {
+                [VaultFields.NoteContent] = edit(note.Field(VaultFields.NoteContent) ?? ""),
+            },
+        };
     }
 
     public Task<VaultStatus> ProbeAsync(CancellationToken ct = default) =>
@@ -103,9 +129,19 @@ public sealed class InMemoryVault : IConfigVault
         {
             LastLoadWarning = _loadWarning;
 
-            return _stored is null
-                ? new ConfigStore()
-                : JsonSerializer.Deserialize<ConfigStore>(_stored, JsonOptions) ?? new ConfigStore();
+            if (FindConfigNote() is not { } note) return new ConfigStore();
+
+            var document = VaultDocument.TryParse(note.Field(VaultFields.NoteContent) ?? "");
+            if (document is null) return new ConfigStore();
+
+            _revision = document.Revision;
+
+            var warnings = new List<string>();
+            var store = VaultMapper.ComposeStore(document, ResolveSecrets(document.Index), warnings);
+
+            if (warnings.Count > 0) LastLoadWarning = string.Join(" ", warnings);
+
+            return store;
         }
         finally
         {
@@ -126,10 +162,7 @@ public sealed class InMemoryVault : IConfigVault
                     partiallyApplied: false);
             }
 
-            // Serialize before storing so a store that cannot be serialized fails the same way it
-            // would against a real backend, rather than being accepted and blowing up on load.
-            var serialized = Serialize(store);
-            _stored = serialized;
+            WriteItems(store, stopBeforeTheNote: _saveBehavior == SaveBehavior.FailHalfway);
 
             if (_saveBehavior == SaveBehavior.FailHalfway)
             {
@@ -143,5 +176,88 @@ public sealed class InMemoryVault : IConfigVault
         }
     }
 
-    private static string Serialize(ConfigStore store) => JsonSerializer.Serialize(store, JsonOptions);
+    /// <summary>
+    /// The same order a real provider uses: secret items first, note last, then reconcile
+    /// deletions — so the note can never point at an item that does not exist.
+    /// </summary>
+    private void WriteItems(ConfigStore store, bool stopBeforeTheNote = false)
+    {
+        var index = ReadIndex();
+        var secretItems = VaultMapper.BuildSecretItems(store, index);
+
+        foreach (var item in secretItems)
+        {
+            var itemId = item.Spec.ItemId ?? $"item-{_nextItemId++}";
+
+            _items[itemId] = new VaultItemContents(
+                itemId,
+                item.Spec.Title,
+                item.Spec.Fields.ToDictionary(f => f.Name, f => f.Value));
+
+            index.For(item.Role)[item.RecordId] = itemId;
+        }
+
+        if (stopBeforeTheNote) return;
+
+        var note = VaultMapper.BuildConfigNote(store, index, ++_revision);
+        var noteId = FindConfigNote()?.ItemId ?? $"item-{_nextItemId++}";
+
+        _items[noteId] = new VaultItemContents(
+            noteId,
+            note.Title,
+            note.Fields.ToDictionary(f => f.Name, f => f.Value));
+
+        ReconcileDeletions(secretItems);
+    }
+
+    /// <summary>
+    /// Deletes items this app owns whose record is gone, and never touches anything else — the
+    /// vault belongs to the user, and their own entries must survive every save.
+    /// </summary>
+    private void ReconcileDeletions(List<VaultSecretItem> live)
+    {
+        var keep = live.Select(i => (i.Role, i.RecordId)).ToHashSet();
+
+        foreach (var item in _items.Values.ToList())
+        {
+            if (!VaultItemNaming.TryParse(item.Title, out var role, out var id)) continue;
+            if (role == VaultItemRole.Config) continue;
+
+            if (!keep.Contains((role, id))) _items.Remove(item.ItemId);
+        }
+    }
+
+    private VaultIndex ReadIndex() =>
+        FindConfigNote() is { } note
+        && VaultDocument.TryParse(note.Field(VaultFields.NoteContent) ?? "") is { } document
+            ? document.Index
+            : new VaultIndex();
+
+    private Dictionary<(VaultItemRole, Guid), VaultItemContents> ResolveSecrets(VaultIndex index)
+    {
+        var resolved = new Dictionary<(VaultItemRole, Guid), VaultItemContents>();
+
+        foreach (var role in new[] { VaultItemRole.Credential, VaultItemRole.RouteKey, VaultItemRole.FunnelKey })
+        {
+            foreach (var (recordId, itemId) in index.For(role))
+            {
+                if (_items.TryGetValue(itemId, out var item)) resolved[(role, recordId)] = item;
+            }
+        }
+
+        // Anything the index missed, recovered from the title — the same fallback a real provider
+        // uses when the note is older than the items it points at.
+        foreach (var item in _items.Values)
+        {
+            if (!VaultItemNaming.TryParse(item.Title, out var role, out var id)) continue;
+            if (role == VaultItemRole.Config) continue;
+
+            resolved.TryAdd((role, id), item);
+        }
+
+        return resolved;
+    }
+
+    private VaultItemContents? FindConfigNote() =>
+        _items.Values.FirstOrDefault(i => i.Title == VaultItemNaming.ConfigTitle);
 }

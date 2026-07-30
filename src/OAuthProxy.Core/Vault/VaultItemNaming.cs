@@ -1,0 +1,107 @@
+using System.Globalization;
+using System.Text.RegularExpressions;
+
+namespace OAuthProxy.Core.Vault;
+
+/// <summary>What a vault item belongs to.</summary>
+public enum VaultItemRole
+{
+    Config,
+    Credential,
+    RouteKey,
+    FunnelKey,
+}
+
+/// <summary>
+/// Item titles, and how to read a record back out of one.
+///
+/// Every item this app owns starts with <see cref="Prefix"/>. That is what makes the vault safe to
+/// share with the user's other things: reconciliation only ever considers prefixed items, so
+/// nothing else in threeEyedRaven can be deleted by a save no matter what it is called.
+///
+/// The trailing "[guid]" is the real identity. A user renaming a credential must retitle the
+/// existing item rather than orphan it and create a second one, and the index in the config note
+/// can go stale (restored from an older version, or an item recreated by hand) — in which case
+/// scanning titles for the guid is what reconnects everything.
+/// </summary>
+public static partial class VaultItemNaming
+{
+    public const string Prefix = "OAuthProxy ";
+
+    /// <summary>Fixed title of the topology note. Found by title, since nothing else points at it.</summary>
+    public const string ConfigTitle = "OAuthProxy Config";
+
+    public static string ForCredential(Guid id, string name) =>
+        $"{Prefix}credential — {Clean(name)} [{id:D}]";
+
+    public static string ForRouteKey(Guid id, string pathPrefix) =>
+        $"{Prefix}route key — {Clean(pathPrefix)} [{id:D}]";
+
+    public static string ForFunnelKey(Guid id, string slug) =>
+        $"{Prefix}funnel key — /mcp/{Clean(slug)} [{id:D}]";
+
+    public static bool IsOwned(string title) =>
+        title.StartsWith(Prefix, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Reads the role and record id back out of a title. Returns false for the config note (which
+    /// has no guid) and for anything this app does not own.
+    /// </summary>
+    public static bool TryParse(string title, out VaultItemRole role, out Guid id)
+    {
+        role = default;
+        id = default;
+
+        if (!IsOwned(title)) return false;
+
+        if (title.Equals(ConfigTitle, StringComparison.Ordinal))
+        {
+            role = VaultItemRole.Config;
+            return true;
+        }
+
+        var match = TrailingGuid().Match(title);
+        if (!match.Success) return false;
+
+        if (!Guid.TryParseExact(match.Groups[1].Value, "D", out id)) return false;
+
+        role = title.Contains("credential —", StringComparison.Ordinal) ? VaultItemRole.Credential
+            : title.Contains("route key —", StringComparison.Ordinal) ? VaultItemRole.RouteKey
+            : title.Contains("funnel key —", StringComparison.Ordinal) ? VaultItemRole.FunnelKey
+            : default;
+
+        return role != default;
+    }
+
+    /// <summary>
+    /// Keeps a user-chosen name from wrecking the title. Newlines would break the one-line title
+    /// the CLIs expect, and a trailing "[...]" in the name itself would fight the guid suffix the
+    /// parser looks for. Length is capped so a pasted URL does not produce an unreadable list.
+    /// </summary>
+    private static string Clean(string value)
+    {
+        var collapsed = Whitespace().Replace(value, " ").Replace("[", "(").Replace("]", ")").Trim();
+
+        if (collapsed.Length == 0) return "(unnamed)";
+
+        return collapsed.Length <= 60
+            ? collapsed
+            : string.Concat(collapsed.AsSpan(0, 57), "…");
+    }
+
+    [GeneratedRegex(@"\[([0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})\]\s*$")]
+    private static partial Regex TrailingGuid();
+
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex Whitespace();
+
+    /// <summary>Round-trips a timestamp through a text field without losing the offset.</summary>
+    public static string FormatTimestamp(DateTimeOffset value) =>
+        value.ToString("O", CultureInfo.InvariantCulture);
+
+    public static DateTimeOffset? ParseTimestamp(string? value) =>
+        DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind, out var parsed)
+            ? parsed
+            : null;
+}
