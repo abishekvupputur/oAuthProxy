@@ -24,15 +24,16 @@ public class OnePasswordProviderTests : IDisposable
     private readonly string _stubDir = Path.Combine(Path.GetTempPath(), $"oauthproxy-op-{Guid.NewGuid()}");
     private readonly string _logPath = Path.Combine(Path.GetTempPath(), $"oauthproxy-op-logs-{Guid.NewGuid()}");
 
+    private readonly string _stub;
+
     public OnePasswordProviderTests()
     {
+        // The stub path is handed to the provider directly rather than set in the environment:
+        // xunit runs test classes in parallel, and a process-wide variable would be clobbered by
+        // whichever other provider test happened to be running at the same moment.
         Directory.CreateDirectory(_stubDir);
-
-        // The provider locates op through VaultProbe, so point the documented override at a stub
-        // rather than depending on whether the real CLI happens to be installed on this machine.
-        var stub = Path.Combine(_stubDir, "op.exe");
-        File.WriteAllText(stub, "");
-        Environment.SetEnvironmentVariable(VaultProbe.OnePasswordPathVariable, stub);
+        _stub = Path.Combine(_stubDir, "op.exe");
+        File.WriteAllText(_stub, "");
     }
 
     // ---- Probe ----------------------------------------------------------------------------------
@@ -40,12 +41,10 @@ public class OnePasswordProviderTests : IDisposable
     [Fact]
     public async Task NotInstalled_WhenTheBinaryIsMissing()
     {
-        Environment.SetEnvironmentVariable(VaultProbe.OnePasswordPathVariable,
-            Path.Combine(_stubDir, "not-here.exe"));
+        var provider = new OnePasswordVaultProvider(
+            new FakeCliRunner(), new ActivityLog(_logPath), Path.Combine(_stubDir, "not-here.exe"));
 
-        var status = await NewProvider(new FakeCliRunner()).ProbeAsync();
-
-        Assert.Equal(VaultAvailability.NotInstalled, status.Availability);
+        Assert.Equal(VaultAvailability.NotInstalled, (await provider.ProbeAsync()).Availability);
     }
 
     [Fact]
@@ -318,7 +317,7 @@ public class OnePasswordProviderTests : IDisposable
     }
 
     private OnePasswordVaultProvider NewProvider(FakeCliRunner runner) =>
-        new(runner, new ActivityLog(_logPath));
+        new(runner, new ActivityLog(_logPath), _stub);
 
     private static ConfigStore StoreWithSecrets()
     {
@@ -364,8 +363,6 @@ public class OnePasswordProviderTests : IDisposable
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(VaultProbe.OnePasswordPathVariable, null);
-
         try { Directory.Delete(_stubDir, recursive: true); } catch { /* best effort */ }
         try { Directory.Delete(_logPath, recursive: true); } catch { /* best effort */ }
     }

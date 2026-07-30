@@ -8,6 +8,19 @@ using Application = System.Windows.Application;
 namespace OAuthProxy.App.Tray;
 
 /// <summary>
+/// What the app is currently doing, as far as the tray is concerned. The proxy no longer starts
+/// unconditionally — it waits for a password manager — so "there is an icon" stopped meaning
+/// "requests are being served", and the tooltip has to say which.
+/// </summary>
+public enum TrayState
+{
+    Starting,
+    SetupRequired,
+    Running,
+    VaultLocked,
+}
+
+/// <summary>
 /// Uses plain WinForms NotifyIcon rather than a third-party WPF tray-icon library —
 /// WPF-specific tray libraries (Hardcodet.NotifyIcon.Wpf, H.NotifyIcon.Wpf) have proven
 /// flaky across .NET versions; System.Windows.Forms.NotifyIcon is the reliable baseline.
@@ -17,6 +30,8 @@ public sealed class TrayIconManager(AutostartService autostartService) : IDispos
     private NotifyIcon? _notifyIcon;
     private MainWindow? _mainWindow;
     private Action? _onAutostartChanged;
+    private ToolStripItem? _openItem;
+    private TrayState _state = TrayState.Starting;
 
     /// <param name="onAutostartChanged">
     /// Invoked after the tray menu changes the autostart setting, so the Settings tab can
@@ -33,7 +48,7 @@ public sealed class TrayIconManager(AutostartService autostartService) : IDispos
             BackColor = Color.FromArgb(0x1A, 0x1A, 0x1A),
             ForeColor = Color.FromArgb(0xEB, 0xEB, 0xEB),
         };
-        contextMenu.Items.Add("Open Settings", null, (_, _) => ShowMainWindow());
+        _openItem = contextMenu.Items.Add("Open Settings", null, (_, _) => ShowMainWindow());
 
         var startupItem = new ToolStripMenuItem("Start with Windows") { CheckOnClick = true, Checked = autostartService.IsEnabled() };
         startupItem.Click += (_, _) =>
@@ -66,6 +81,50 @@ public sealed class TrayIconManager(AutostartService autostartService) : IDispos
         {
             if (e.Button == MouseButtons.Left) ShowMainWindow();
         };
+
+        SetState(_state);
+    }
+
+    /// <summary>
+    /// Updates the tooltip and the first menu item. Tooltip-only rather than a second icon: a
+    /// distinct overlay would be better, but the wrong-looking icon is a worse first impression
+    /// than a clear tooltip, and this can be read without hovering over a 16px glyph.
+    /// </summary>
+    public void SetState(TrayState state)
+    {
+        _state = state;
+
+        if (_notifyIcon is null) return;
+
+        // NotifyIcon.Text throws above 63 characters, which is short enough that a well-meaning
+        // longer message would crash the tray at runtime rather than at build time.
+        _notifyIcon.Text = state switch
+        {
+            TrayState.Starting => "OAuthProxy — starting",
+            TrayState.SetupRequired => "OAuthProxy — setup required",
+            TrayState.VaultLocked => "OAuthProxy — vault locked",
+            _ => "OAuthProxy",
+        };
+
+        if (_openItem is not null)
+        {
+            _openItem.Text = state is TrayState.SetupRequired or TrayState.Starting
+                ? "Set up OAuthProxy…"
+                : "Open Settings";
+        }
+    }
+
+    /// <summary>
+    /// A balloon for the one case the user cannot otherwise see: they closed the setup window
+    /// without finishing, so the app is sitting in the tray serving nothing.
+    /// </summary>
+    public void NotifyIdleWhileGated()
+    {
+        _notifyIcon?.ShowBalloonTip(
+            5000,
+            "OAuthProxy is idle",
+            "No proxy is running until a password manager is set up. Click the tray icon to finish.",
+            ToolTipIcon.Info);
     }
 
     private static Icon LoadTrayIcon()

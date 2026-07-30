@@ -23,10 +23,15 @@ public static class ProxyStartupExtensions
         services.AddSingleton<ActivityLog>();
         services.AddSingleton<ICliRunner, CliRunner>();
 
-        // Placeholder backend. The real one is chosen at startup once the setup gate knows which
-        // password manager is installed and unlocked, and is registered over this — so the app
-        // always has *an* IConfigVault to resolve, and an unconfigured one is empty rather than null.
-        services.AddSingleton<IConfigVault, InMemoryVault>();
+        services.AddSingleton<OnePasswordVaultProvider>();
+        services.AddSingleton<ProtonPassVaultProvider>();
+        services.AddSingleton<VaultGateService>();
+
+        // Not a provider directly: which one is active is not known until the gate has probed both
+        // managers, which happens after this container is built. GatedConfigVault forwards to
+        // whatever the gate settles on, so ConfigStoreCache can be constructed before the answer
+        // exists without capturing the wrong backend for the life of the process.
+        services.AddSingleton<IConfigVault, GatedConfigVault>();
 
         services.AddSingleton<ConfigStoreCache>();
         services.AddHostedService<ConfigStoreInitializerHostedService>();

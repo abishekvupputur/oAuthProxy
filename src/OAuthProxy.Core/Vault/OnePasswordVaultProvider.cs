@@ -12,7 +12,15 @@ namespace OAuthProxy.Core.Vault;
 /// Windows process command line is readable by any process in the session — putting a client
 /// secret there would make this strictly worse than the encrypted local file it replaces.
 /// </summary>
-public sealed class OnePasswordVaultProvider(ICliRunner cliRunner, ActivityLog activityLog) : IConfigVault
+/// <param name="exePathOverride">
+/// Skips the search for the binary. For tests, which must not depend on whether the real CLI
+/// happens to be installed — and must not reach for the process-wide environment variable, since
+/// test classes run in parallel and would clobber each other's.
+/// </param>
+public sealed class OnePasswordVaultProvider(
+    ICliRunner cliRunner,
+    ActivityLog activityLog,
+    string? exePathOverride = null) : IConfigVault
 {
     /// <summary>Fields that can legitimately become absent, and so must be actively cleared.</summary>
     private static readonly string[] ClearableSecretFields =
@@ -37,8 +45,8 @@ public sealed class OnePasswordVaultProvider(ICliRunner cliRunner, ActivityLog a
 
     public async Task<VaultStatus> ProbeAsync(CancellationToken ct = default)
     {
-        _exePath = VaultProbe.FindOnePassword();
-        if (_exePath is null) return VaultStatus.NotInstalled(Kind);
+        _exePath = exePathOverride ?? VaultProbe.FindOnePassword();
+        if (_exePath is null || !File.Exists(_exePath)) return VaultStatus.NotInstalled(Kind);
 
         Version? version;
         try

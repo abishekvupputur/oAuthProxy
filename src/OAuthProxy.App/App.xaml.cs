@@ -27,6 +27,12 @@ public partial class App : Application
     private WebApplication? _webApp;
     private TrayIconManager? _trayIconManager;
 
+    /// <summary>
+    /// Kestrel can only be started once. The setup page can raise its ready event more than once —
+    /// "Check again" after the gate has already opened, say — and a second Start() would throw.
+    /// </summary>
+    private bool _proxyStarted;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -99,6 +105,8 @@ public partial class App : Application
 
         builder.Services.AddSingleton<AutostartService>();
 
+        builder.Services.AddSingleton<MainWindowViewModel>();
+        builder.Services.AddSingleton<SetupViewModel>();
         builder.Services.AddSingleton<CredentialsViewModel>();
         builder.Services.AddSingleton<RoutesViewModel>();
         builder.Services.AddSingleton<McpFunnelViewModel>();
@@ -120,41 +128,79 @@ public partial class App : Application
         _trayIconManager.Initialize(
             mainWindow,
             onAutostartChanged: () => Dispatcher.Invoke(settingsViewModel.Reload));
+        _trayIconManager.SetState(TrayState.Starting);
+        mainWindow.HiddenWhileGated += () => _trayIconManager.NotifyIdleWhileGated();
 
-        StartProxy();
+        // The setup page drives everything from here: it decides when there is a usable vault and
+        // calls back to start the proxy. Wired before the first check so a gate that opens
+        // immediately still gets a listener.
+        var setupViewModel = _webApp.Services.GetRequiredService<SetupViewModel>();
+        setupViewModel.ReadyToStart += StartProxyAsync;
+
+        // Fire and forget on the Dispatcher rather than blocking it. The original deadlock hazard
+        // was blocking this thread while a continuation tried to post back onto it; this never
+        // blocks, and every piece of work below is still wrapped in Task.Run so nothing captures
+        // the Dispatcher's SynchronizationContext.
+        _ = setupViewModel.CheckAsync();
     }
 
     /// <summary>
-    /// Loads the store, then binds and starts Kestrel. Separate from host *build* because the
-    /// listen port is not knowable until the vault has been read.
+    /// Loads the store, then binds and starts Kestrel. Separate from host <em>build</em> because
+    /// the listen port lives in the vault, so it is not knowable until a password manager has been
+    /// unlocked — which may involve a prompt the user takes a minute to notice.
     /// </summary>
-    private void StartProxy()
+    private async Task StartProxyAsync()
     {
+        if (_proxyStarted) return;
+
         var configStoreCache = _webApp!.Services.GetRequiredService<ConfigStoreCache>();
+        var mainWindowViewModel = _webApp.Services.GetRequiredService<MainWindowViewModel>();
+        var setupViewModel = _webApp.Services.GetRequiredService<SetupViewModel>();
 
-        // Same Dispatcher-deadlock reasoning as the build above: this loads from the vault and
-        // then runs hosted-service startup, both of which await.
-        Task.Run(async () =>
+        var port = 0;
+
+        try
         {
-            await configStoreCache.InitializeAsync();
+            // Task.Run for the same reason as the build above: this awaits vault I/O and then runs
+            // hosted-service startup, and neither may capture the Dispatcher.
+            await Task.Run(async () =>
+            {
+                await configStoreCache.InitializeAsync();
 
-            _webApp.Urls.Clear();
-            _webApp.Urls.Add($"http://127.0.0.1:{configStoreCache.Current.Settings.ListenPort}");
+                port = configStoreCache.Current.Settings.ListenPort;
 
-            // Must sit ahead of MapReverseProxy: it rejects callers that cannot present the
-            // endpoint's proxy key, and blocks DNS-rebinding and browser-originated requests.
-            // Without it, any process on this machine can spend the user's OAuth grant.
-            _webApp.UseLocalAccessGuard();
+                _webApp.Urls.Clear();
+                _webApp.Urls.Add($"http://127.0.0.1:{port}");
 
-            // After the guard, so funnel callers must present a proxy key like anyone else, and
-            // before MapReverseProxy so /mcp is unambiguously the funnel's — routes are forbidden
-            // from claiming that prefix.
-            _webApp.UseMcpFunnelGate();
-            _webApp.MapMcpFunnel();
+                // Must sit ahead of MapReverseProxy: it rejects callers that cannot present the
+                // endpoint's proxy key, and blocks DNS-rebinding and browser-originated requests.
+                // Without it, any process on this machine can spend the user's OAuth grant.
+                _webApp.UseLocalAccessGuard();
 
-            _webApp.MapReverseProxy();
-            _webApp.Start();
-        }).GetAwaiter().GetResult();
+                // After the guard, so funnel callers must present a proxy key like anyone else, and
+                // before MapReverseProxy so /mcp is unambiguously the funnel's — routes are
+                // forbidden from claiming that prefix.
+                _webApp.UseMcpFunnelGate();
+                _webApp.MapMcpFunnel();
+
+                _webApp.MapReverseProxy();
+                _webApp.Start();
+            });
+        }
+        catch (Exception ex)
+        {
+            // A port clash used to be a dead end: the app shut down telling the user to edit a
+            // file that no longer exists. The port lives in the vault now, so it can be changed
+            // from the setup page while the proxy is down — which is the only moment it matters.
+            _webApp.Services.GetService<ActivityLog>()?.LogError("Could not start the proxy", ex);
+            setupViewModel.ReportPortConflict(port, ex.Message);
+            _trayIconManager?.SetState(TrayState.SetupRequired);
+            return;
+        }
+
+        _proxyStarted = true;
+        mainWindowViewModel.EnterNormalMode();
+        _trayIconManager?.SetState(TrayState.Running);
     }
 
     private static void ReportStartupFailure(Exception ex)

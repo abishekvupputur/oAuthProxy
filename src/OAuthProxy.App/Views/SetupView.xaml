@@ -1,0 +1,158 @@
+<UserControl x:Class="OAuthProxy.App.Views.SetupView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:helpers="clr-namespace:OAuthProxy.App.Helpers"
+             mc:Ignorable="d" d:DesignWidth="640"
+             Background="{StaticResource BgBrush}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                      helpers:SmoothScroll.Enable="True" Padding="0,0,4,0">
+            <StackPanel Margin="16">
+
+                <TextBlock Text="Set up your password manager" Style="{StaticResource SectionHeaderStyle}"
+                           FontSize="18" Margin="0,0,0,6"/>
+                <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,16"
+                           Text="OAuthProxy keeps everything — credentials, tokens, API keys, proxy keys, routes and MCP funnels — in a vault called 'threeEyedRaven' in 1Password or Proton Pass. Nothing is stored on this PC, so the proxy does not start until one of them is unlocked."/>
+
+                <!-- Port conflict: shown instead of the manager cards, since the vault is fine and
+                     the only thing wrong is the port. -->
+                <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14"
+                        Visibility="{Binding HasPortConflict, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <StackPanel>
+                        <TextBlock Text="That port is already in use" Style="{StaticResource SectionHeaderStyle}"
+                                   Foreground="{StaticResource ErrorBrush}"/>
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
+                                   Text="Close whatever else is listening on it, or pick another. The port is stored in your vault, so changing it here writes it there."/>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBox Width="100" Text="{Binding ListenPort, UpdateSourceTrigger=PropertyChanged}"/>
+                            <Button Content="Use this port" Margin="8,0,0,0" Command="{Binding RetryPortCommand}"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Both managers qualify and neither can be shown to hold the configuration.
+                     Asked every launch: the choice is the one thing that cannot live in the vault,
+                     and nothing about this app is stored locally. -->
+                <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14"
+                        Visibility="{Binding NeedsAChoice, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <StackPanel>
+                        <TextBlock Text="Which one should OAuthProxy use?" Style="{StaticResource SectionHeaderStyle}"/>
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
+                                   Text="Both are ready. OAuthProxy uses one at a time — writing to both would leave two vaults that quietly disagree. You will be asked again next time you start it."/>
+                        <ItemsControl ItemsSource="{Binding Managers}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Button Content="{Binding Name}" Margin="0,0,8,0" MinWidth="130"
+                                            Visibility="{Binding IsReady, Converter={StaticResource BoolToVisibilityConverter}}"
+                                            Command="{Binding DataContext.ChooseCommand,
+                                                      RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding}"/>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+
+                <ItemsControl ItemsSource="{Binding Managers}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14">
+                                <StackPanel>
+                                    <DockPanel Margin="0,0,0,4">
+                                        <TextBlock Text="{Binding StateLabel}" DockPanel.Dock="Right"
+                                                   Style="{StaticResource HintTextStyle}" VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding Name}" Style="{StaticResource SectionHeaderStyle}"
+                                                   Margin="0"/>
+                                    </DockPanel>
+
+                                    <TextBlock Text="{Binding DetectedAt}" Style="{StaticResource HintTextStyle}"
+                                               TextWrapping="Wrap" Margin="0,0,0,6"/>
+
+                                    <!-- The CLI's own words. It distinguishes locked from signed out
+                                         from integration-disabled far better than this app can. -->
+                                    <TextBlock Text="{Binding Detail}" Style="{StaticResource HintTextStyle}"
+                                               Foreground="{StaticResource ErrorBrush}" TextWrapping="Wrap"
+                                               Margin="0,0,0,6"
+                                               Visibility="{Binding HasDetail, Converter={StaticResource BoolToVisibilityConverter}}"/>
+
+                                    <StackPanel Visibility="{Binding ShowInstall, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <TextBlock Text="Install it, then choose Check again."
+                                                   Style="{StaticResource HintTextStyle}" Margin="0,0,0,6"/>
+                                        <TextBox Text="{Binding InstallCommand, Mode=OneWay}" IsReadOnly="True"
+                                                 FontFamily="Cascadia Code, Consolas" FontSize="11"
+                                                 Margin="0,0,0,8"/>
+                                        <Button Content="Open download page" HorizontalAlignment="Left"
+                                                Style="{StaticResource GhostButtonStyle}"
+                                                Command="{Binding DataContext.OpenDownloadPageCommand,
+                                                          RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                CommandParameter="{Binding}"/>
+                                    </StackPanel>
+
+                                    <StackPanel Visibility="{Binding ShowSignIn, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <TextBlock Text="{Binding SignInSteps}" Style="{StaticResource HintTextStyle}"
+                                                   TextWrapping="Wrap" Margin="0,0,0,6"/>
+                                        <TextBlock Text="{Binding TokenCaveat}" Style="{StaticResource HintTextStyle}"
+                                                   TextWrapping="Wrap"
+                                                   Visibility="{Binding HasTokenCaveat, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                                    </StackPanel>
+
+                                    <StackPanel Visibility="{Binding ShowCreateVault, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
+                                                   Margin="0,0,0,8"
+                                                   Text="Signed in, but there is no 'threeEyedRaven' vault yet. OAuthProxy can create it — it only ever touches items it created, so the vault stays safe to keep other things in."/>
+                                        <Button Content="Create the threeEyedRaven vault" HorizontalAlignment="Left"
+                                                Command="{Binding DataContext.CreateVaultCommand,
+                                                          RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                CommandParameter="{Binding}"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- Only shown when the pre-vault file is actually there. -->
+                <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14"
+                        Visibility="{Binding HasLegacyStore, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <StackPanel>
+                        <TextBlock Text="Your old configuration" Style="{StaticResource SectionHeaderStyle}"/>
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
+                                   Text="This version does not read the old store.dat file in %AppData%\OAuthProxy — credentials, routes, funnels and proxy keys all need to be set up again, and every client needs its new key. The old file is left alone in case you still want anything out of it."/>
+                        <Button Content="Delete the old file" HorizontalAlignment="Left"
+                                Style="{StaticResource GhostButtonStyle}"
+                                Command="{Binding DeleteLegacyStoreCommand}"/>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource SectionCardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="Keeping the vault available" Style="{StaticResource SectionHeaderStyle}"/>
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
+                                   Text="While your password manager is locked, OAuthProxy cannot save changes and does not refresh OAuth tokens — so routes using them stop working once their current token expires. API-key routes keep working. If that happens often, the Settings tab explains how to keep the vault reachable, including token options that do not require leaving anything unlocked."/>
+                    </StackPanel>
+                </Border>
+
+            </StackPanel>
+        </ScrollViewer>
+
+        <Border Grid.Row="1" Style="{StaticResource FooterBarStyle}">
+            <DockPanel>
+                <Button Content="Check again" DockPanel.Dock="Right" MinWidth="100"
+                        IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBoolConverter}}"
+                        Command="{Binding CheckCommand}"/>
+                <TextBlock Text="{Binding StatusMessage}" Style="{StaticResource FooterTextStyle}"
+                           VerticalAlignment="Center"/>
+            </DockPanel>
+        </Border>
+    </Grid>
+</UserControl>
