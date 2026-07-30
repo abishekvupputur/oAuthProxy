@@ -11,6 +11,24 @@ namespace OAuthProxy.App.ViewModels;
 
 public sealed partial class CredentialsViewModel : ObservableObject
 {
+
+    /// <summary>
+    /// False while the password manager is locked. Every command that writes to the vault is
+    /// gated on this, so the buttons grey out the moment it locks rather than staying clickable
+    /// and failing — ConfigStoreCache refuses the write either way, but an error the user could
+    /// not have avoided is a worse way to find out.
+    /// </summary>
+    [ObservableProperty]
+    private bool _canEdit = true;
+
+    partial void OnCanEditChanged(bool value)
+    {
+        SaveCredentialCommand.NotifyCanExecuteChanged();
+        DeleteCredentialCommand.NotifyCanExecuteChanged();
+        ConnectCommand.NotifyCanExecuteChanged();
+        DisconnectCommand.NotifyCanExecuteChanged();
+        RefreshNowCommand.NotifyCanExecuteChanged();
+    }
     private readonly ConfigStoreCache _configStoreCache;
     private readonly OAuth2Service _oAuth2Service;
     private readonly TokenRefreshService _tokenRefreshService;
@@ -136,10 +154,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
         _activityLog = activityLog;
         ApplyPresetDefaults(_selectedPreset);
 
-        foreach (var record in _configStoreCache.Current.Credentials)
-        {
-            Credentials.Add(new CredentialItemViewModel(record).Refresh());
-        }
+        Reload();
 
         // Empty-state visibility is derived from the collection, so it has to be re-evaluated
         // whenever rows are added or removed.
@@ -152,6 +167,20 @@ public sealed partial class CredentialsViewModel : ObservableObject
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
         _statusTimer.Tick += (_, _) => RefreshStatuses();
         _statusTimer.Start();
+    }
+
+    /// <summary>
+    /// Rebuilds the rows from the store. Needed because "Reload from vault" replaces the contents
+    /// of the store's lists, which leaves every row here bound to a record that is no longer in it.
+    /// </summary>
+    public void Reload()
+    {
+        Credentials.Clear();
+
+        foreach (var record in _configStoreCache.Current.Credentials)
+        {
+            Credentials.Add(new CredentialItemViewModel(record).Refresh());
+        }
     }
 
     partial void OnSelectedPresetChanged(OAuthProviderPreset value)
@@ -181,7 +210,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEdit))]
     private async Task SaveCredentialAsync()
     {
         if (SelectedKind == CredentialKind.ApiKey)
@@ -444,7 +473,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
         ApplyPresetDefaults(SelectedPreset);
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEdit))]
     private async Task DeleteCredentialAsync(CredentialItemViewModel? item)
     {
         if (item is null) return;
@@ -453,7 +482,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
         Credentials.Remove(item);
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEdit))]
     private async Task ConnectAsync(CredentialItemViewModel? item)
     {
         if (item is null) return;
@@ -494,7 +523,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
         item.Refresh();
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEdit))]
     private async Task DisconnectAsync(CredentialItemViewModel? item)
     {
         if (item is null) return;
@@ -511,7 +540,7 @@ public sealed partial class CredentialsViewModel : ObservableObject
         _activityLog.Log($"DISCONNECT '{item.Name}' — stored token cleared");
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEdit))]
     private async Task RefreshNowAsync(CredentialItemViewModel? item)
     {
         if (item is null) return;

@@ -37,6 +37,27 @@ public sealed class ConfigStoreCache
     public bool IsInitialized => _initialized;
 
     /// <summary>
+    /// Whether the vault will currently accept a write. Flipped by the health monitor when the
+    /// password manager locks or signs out, and back on recovery.
+    ///
+    /// Read-only is a real mode rather than an error to retry past, because there is nowhere else
+    /// for a change to live: holding an edit in memory until the vault reopens would mean the UI
+    /// showing something as saved that a restart would lose.
+    /// </summary>
+    public VaultAccess Access { get; private set; } = VaultAccess.Writable;
+
+    /// <summary>Raised on the thread that changed it — the UI marshals if it needs to.</summary>
+    public event Action<VaultAccess>? AccessChanged;
+
+    public void SetAccess(VaultAccess access)
+    {
+        if (Access == access) return;
+
+        Access = access;
+        AccessChanged?.Invoke(access);
+    }
+
+    /// <summary>
     /// Loads the store and issues any missing endpoint keys. Idempotent: startup calls this
     /// directly (it needs the listen port before Kestrel can bind) and
     /// <see cref="ConfigStoreInitializerHostedService"/> calls it again as the host starts, which
@@ -91,6 +112,8 @@ public sealed class ConfigStoreCache
     /// </summary>
     public async Task SaveAsync(CancellationToken ct = default)
     {
+        RequireWritable();
+
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -101,6 +124,19 @@ public sealed class ConfigStoreCache
         {
             _writeLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Refuses a write while the vault is locked, before anything is mutated.
+    ///
+    /// Deliberately not a queue. The vault is the only copy of the config, so a change parked in
+    /// memory for an indefinite period is one the user believes is saved and a restart would lose.
+    /// The UI disables every write command on the same signal, so reaching this is a backstop
+    /// rather than something a user should normally be able to do.
+    /// </summary>
+    private void RequireWritable()
+    {
+        if (Access == VaultAccess.ReadOnly) throw new VaultLockedException(_vault.Kind);
     }
 
     /// <summary>
@@ -121,6 +157,10 @@ public sealed class ConfigStoreCache
     /// </summary>
     public async Task MutateAsync(Action<ConfigStore> mutate, CancellationToken ct = default)
     {
+        // Checked before the lock and before the mutation runs, so a refused write leaves the
+        // store exactly as it was rather than relying on the rollback below to undo it.
+        RequireWritable();
+
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {

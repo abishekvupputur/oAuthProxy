@@ -11,11 +11,23 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!--
+      System.Security.Cryptography.ProtectedData is gone with SecureStore: DPAPI was the whole of
+      the old local store, and secrets now live in the user's password manager instead.
+    -->
     <PackageReference Include="Google.Apis.Auth" Version="1.75.0" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.0.0" />
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
     <PackageReference Include="IdentityModel.OidcClient" Version="6.0.0" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      The refresh loop's tick is timer-driven on a 60-second interval, so the one thing worth
+      asserting about it — that it attempts nothing while the vault is locked — is unreachable
+      from outside without waiting a minute per test.
+    -->
+    <InternalsVisibleTo Include="OAuthProxy.Core.Tests" />
   </ItemGroup>
 
 </Project>

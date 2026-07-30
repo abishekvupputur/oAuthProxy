@@ -9,6 +9,23 @@ namespace OAuthProxy.App.ViewModels;
 
 public sealed partial class RoutesViewModel : ObservableObject
 {
+
+    /// <summary>
+    /// False while the password manager is locked. Every command that writes to the vault is
+    /// gated on this, so the buttons grey out the moment it locks rather than staying clickable
+    /// and failing — ConfigStoreCache refuses the write either way, but an error the user could
+    /// not have avoided is a worse way to find out.
+    /// </summary>
+    [ObservableProperty]
+    private bool _canEdit = true;
+
+    partial void OnCanEditChanged(bool value)
+    {
+        AddUpstreamCommand.NotifyCanExecuteChanged();
+        DeleteUpstreamCommand.NotifyCanExecuteChanged();
+        AddRouteCommand.NotifyCanExecuteChanged();
+        DeleteRouteCommand.NotifyCanExecuteChanged();
+    }
     private readonly ConfigStoreCache _configStoreCache;
     private readonly ProxyConfigChangeNotifier _proxyConfigChangeNotifier;
 
@@ -195,7 +212,7 @@ public sealed partial class RoutesViewModel : ObservableObject
         StatusMessage = $"Refreshed — {Credentials.Count} credential(s), {Upstreams.Count} upstream(s), {Routes.Count} route(s).";
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEdit))]
     private async Task AddUpstreamAsync()
     {
         if (string.IsNullOrWhiteSpace(NewUpstreamName) || string.IsNullOrWhiteSpace(NewUpstreamBaseUrl)) return;
@@ -219,7 +236,7 @@ public sealed partial class RoutesViewModel : ObservableObject
         StatusMessage = $"Upstream '{upstream.Name}' added.";
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEdit))]
     private async Task DeleteUpstreamAsync(UpstreamRecord? upstream)
     {
         if (upstream is null) return;
@@ -236,7 +253,7 @@ public sealed partial class RoutesViewModel : ObservableObject
             : $"Upstream '{upstream.Name}' deleted — {affected} route(s) now have no upstream and will not be served.";
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEdit))]
     private async Task AddRouteAsync()
     {
         // The credential is deliberately not required. A route with none is a plain forwarding
@@ -321,7 +338,7 @@ public sealed partial class RoutesViewModel : ObservableObject
             + keyNote;
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEdit))]
     private async Task DeleteRouteAsync(RouteItemViewModel? item)
     {
         if (item is null) return;

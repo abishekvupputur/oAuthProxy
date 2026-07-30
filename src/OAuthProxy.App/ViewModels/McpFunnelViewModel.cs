@@ -19,6 +19,23 @@ namespace OAuthProxy.App.ViewModels;
 /// </summary>
 public sealed partial class McpFunnelViewModel : ObservableObject
 {
+
+    /// <summary>
+    /// False while the password manager is locked. Every command that writes to the vault is
+    /// gated on this, so the buttons grey out the moment it locks rather than staying clickable
+    /// and failing — ConfigStoreCache refuses the write either way, but an error the user could
+    /// not have avoided is a worse way to find out.
+    /// </summary>
+    [ObservableProperty]
+    private bool _canEdit = true;
+
+    partial void OnCanEditChanged(bool value)
+    {
+        AddSourceCommand.NotifyCanExecuteChanged();
+        DeleteSourceCommand.NotifyCanExecuteChanged();
+        AddFunnelCommand.NotifyCanExecuteChanged();
+        DeleteFunnelCommand.NotifyCanExecuteChanged();
+    }
     private readonly ConfigStoreCache _configStoreCache;
     private readonly McpSourceConnectionPool _connectionPool;
     private readonly McpCatalogCache _catalogCache;
@@ -191,7 +208,7 @@ public sealed partial class McpFunnelViewModel : ObservableObject
 
     // ---- sources ---------------------------------------------------------------------------
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEdit))]
     private async Task AddSourceAsync()
     {
         var store = _configStoreCache.Current;
@@ -242,7 +259,7 @@ public sealed partial class McpFunnelViewModel : ObservableObject
         Reload();
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEdit))]
     private async Task DeleteSourceAsync(McpSourceItemViewModel? item)
     {
         if (item is null) return;
@@ -302,7 +319,7 @@ public sealed partial class McpFunnelViewModel : ObservableObject
 
     // ---- funnels ---------------------------------------------------------------------------
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEdit))]
     private async Task AddFunnelAsync()
     {
         var store = _configStoreCache.Current;
@@ -343,7 +360,7 @@ public sealed partial class McpFunnelViewModel : ObservableObject
         SelectedFunnel = Funnels.FirstOrDefault(f => f.Funnel.Id == funnel.Id);
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEdit))]
     private async Task DeleteFunnelAsync(McpFunnelItemViewModel? item)
     {
         if (item is null) return;
