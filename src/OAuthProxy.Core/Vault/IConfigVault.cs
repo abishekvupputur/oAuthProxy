@@ -17,6 +17,12 @@ public interface IConfigVault
     VaultBackendKind Kind { get; }
 
     /// <summary>
+    /// The vault being read and written — <see cref="VaultConstants.VaultName"/> unless the user
+    /// pointed this backend at a vault they already had.
+    /// </summary>
+    string VaultName { get; }
+
+    /// <summary>
     /// Checks whether the backend is installed, signed in, and holding the vault. Cheap enough to
     /// call on a timer — implementations must not fetch item contents here.
     /// </summary>
@@ -24,6 +30,22 @@ public interface IConfigVault
 
     /// <summary>Creates the vault if it does not exist. No-op when it already does.</summary>
     Task EnsureVaultAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Uses a vault the user already has, instead of creating threeEyedRaven. Accepts only a vault
+    /// OAuthProxy has written to before or one that is completely empty, and throws
+    /// <see cref="VaultAdoptionException"/> with the reason otherwise — see <see cref="VaultAdoption"/>
+    /// for why anything else is refused. An empty one is stamped with the config item on the way in,
+    /// since that item is what identifies the vault again on the next launch.
+    /// </summary>
+    Task UseExistingVaultAsync(string vaultName, CancellationToken ct = default);
+
+    /// <summary>
+    /// Drops everything learned about this backend — the vault it resolved and the revision it
+    /// loaded. For disconnecting: without it, reconnecting would keep writing to the vault the user
+    /// just walked away from.
+    /// </summary>
+    void Forget();
 
     Task<ConfigStore> LoadAsync(CancellationToken ct = default);
 

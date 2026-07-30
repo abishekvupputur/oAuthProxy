@@ -18,11 +18,18 @@ public sealed class GatedConfigVault(VaultGateService gate) : IConfigVault
 
     public VaultBackendKind Kind => Current.Kind;
 
+    public string VaultName => Current.VaultName;
+
     public string? LastLoadWarning => Current.LastLoadWarning;
 
     public Task<VaultStatus> ProbeAsync(CancellationToken ct = default) => Current.ProbeAsync(ct);
 
     public Task EnsureVaultAsync(CancellationToken ct = default) => Current.EnsureVaultAsync(ct);
+
+    public Task UseExistingVaultAsync(string vaultName, CancellationToken ct = default) =>
+        Current.UseExistingVaultAsync(vaultName, ct);
+
+    public void Forget() => Current.Forget();
 
     public Task<ConfigStore> LoadAsync(CancellationToken ct = default) => Current.LoadAsync(ct);
 

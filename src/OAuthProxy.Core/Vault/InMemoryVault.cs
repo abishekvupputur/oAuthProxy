@@ -47,6 +47,8 @@ public sealed class InMemoryVault : IConfigVault
 
     public VaultBackendKind Kind => VaultBackendKind.None;
 
+    public string VaultName { get; private set; } = VaultConstants.VaultName;
+
     public string? LastLoadWarning { get; private set; }
 
     /// <summary>Every item currently stored, for tests that assert on the vault's shape.</summary>
@@ -121,6 +123,21 @@ public sealed class InMemoryVault : IConfigVault
         Task.FromResult(new VaultStatus(Kind, _availability, VaultId: "in-memory"));
 
     public Task EnsureVaultAsync(CancellationToken ct = default) => Task.CompletedTask;
+
+    /// <summary>Records the name. There is only ever one vault here, and it is always usable.</summary>
+    public Task UseExistingVaultAsync(string vaultName, CancellationToken ct = default)
+    {
+        VaultName = vaultName;
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Nothing to forget: this vault <em>is</em> its storage, so dropping the items would destroy
+    /// the store rather than release a backend the app is disconnecting from.
+    /// </summary>
+    public void Forget()
+    {
+    }
 
     public async Task<ConfigStore> LoadAsync(CancellationToken ct = default)
     {

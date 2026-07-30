@@ -15,8 +15,11 @@ namespace OAuthProxy.Core.Tests.Vault;
 /// </summary>
 public sealed class FakeProtonPass
 {
-    /// <summary>Item id to the template it was created from.</summary>
-    private readonly Dictionary<string, JsonObject> _items = [];
+    /// <summary>Share id to that vault's items, keyed by item id.</summary>
+    private readonly Dictionary<string, Dictionary<string, JsonObject>> _byShare = [];
+
+    /// <summary>Vault name to share id, in the order <c>vault list</c> reports them.</summary>
+    private readonly List<(string Name, string ShareId)> _vaults = [];
 
     private int _nextId = 1;
 
@@ -34,7 +37,8 @@ public sealed class FakeProtonPass
     /// </summary>
     public bool MaskSecrets { get; set; }
 
-    public IReadOnlyCollection<JsonObject> Items => _items.Values;
+    /// <summary>Items in the threeEyedRaven vault — what most tests mean by "the vault".</summary>
+    public IReadOnlyCollection<JsonObject> Items => ItemsIn(ShareId).Values;
 
     /// <summary>
     /// Plants a second item claiming a record that already has one — what a failed delete used to
@@ -44,13 +48,48 @@ public sealed class FakeProtonPass
     {
         var id = $"-forged{_nextId++}_x";
 
-        _items[id] = new JsonObject
+        ItemsIn(ShareId)[id] = new JsonObject
         {
             ["title"] = title,
             ["username"] = "",
             ["password"] = password,
             ["__type"] = "login",
         };
+    }
+
+    /// <summary>
+    /// Another vault the account can see, for the "use a vault I already have" path. Returns its
+    /// share id, which is what every item call takes.
+    /// </summary>
+    public string AddVault(string name)
+    {
+        var shareId = $"share-{name.ToLowerInvariant()}";
+        _vaults.Add((name, shareId));
+
+        return shareId;
+    }
+
+    /// <summary>Puts one of the user's own entries in a vault, so it is not empty.</summary>
+    public void AddItem(string shareId, string title, string password = "hunter2") =>
+        ItemsIn(shareId)[$"-item{_nextId++}_x"] = new JsonObject
+        {
+            ["title"] = title,
+            ["username"] = "",
+            ["password"] = password,
+            ["__type"] = "login",
+        };
+
+    public IReadOnlyCollection<JsonObject> ItemsInVault(string shareId) => ItemsIn(shareId).Values;
+
+    private Dictionary<string, JsonObject> ItemsIn(string shareId)
+    {
+        if (!_byShare.TryGetValue(shareId, out var items))
+        {
+            items = [];
+            _byShare[shareId] = items;
+        }
+
+        return items;
     }
 
     public FakeCliRunner AsRunner()
@@ -62,8 +101,8 @@ public sealed class FakeProtonPass
             ["--version"] => Ok(Version),
             ["vault", "list", ..] => Ok(VaultListJson()),
             ["vault", "create", ..] => CreateVault(),
-            ["item", "list", ..] => Ok(ItemListJson(HasFlag(args, "--show-secrets"))),
-            ["item", "create", var type, ..] => CreateItem(runner, type),
+            ["item", "list", ..] => Ok(ItemListJson(ShareOf(args), HasFlag(args, "--show-secrets"))),
+            ["item", "create", var type, ..] => CreateItem(runner, type, ShareOf(args)),
             ["item", "delete", ..] => DeleteItem(args),
             _ => null,
         });
@@ -102,6 +141,9 @@ public sealed class FakeProtonPass
     private static bool HasFlag(IReadOnlyList<string> args, string flag) =>
         args.Any(a => a == flag || a.StartsWith(flag + "=", StringComparison.Ordinal));
 
+    /// <summary>The vault a call names, defaulting to threeEyedRaven for calls that name none.</summary>
+    private string ShareOf(IReadOnlyList<string> args) => ValueOf(args, "--share-id") ?? ShareId;
+
     private CliResult CreateVault()
     {
         VaultExists = true;
@@ -125,14 +167,24 @@ public sealed class FakeProtonPass
             });
         }
 
+        foreach (var (name, shareId) in _vaults)
+        {
+            vaults.Add(new JsonObject
+            {
+                ["name"] = name,
+                ["vault_id"] = $"v-{name}",
+                ["share_id"] = shareId,
+            });
+        }
+
         return new JsonObject { ["vaults"] = vaults }.ToJsonString();
     }
 
-    private string ItemListJson(bool withSecrets)
+    private string ItemListJson(string shareId, bool withSecrets)
     {
         var array = new JsonArray();
 
-        foreach (var (id, template) in _items)
+        foreach (var (id, template) in ItemsIn(shareId))
         {
             var title = template["title"]?.GetValue<string>() ?? "";
 
@@ -142,7 +194,7 @@ public sealed class FakeProtonPass
                 array.Add(new JsonObject
                 {
                     ["id"] = id,
-                    ["share_id"] = ShareId,
+                    ["share_id"] = shareId,
                     ["state"] = "Active",
                     ["title"] = title,
                     ["item_type"] = template["__type"]?.GetValue<string>(),
@@ -154,7 +206,7 @@ public sealed class FakeProtonPass
             array.Add(new JsonObject
             {
                 ["id"] = id,
-                ["share_id"] = ShareId,
+                ["share_id"] = shareId,
                 ["state"] = "Active",
                 ["content"] = BuildContent(template, title),
             });
@@ -227,7 +279,7 @@ public sealed class FakeProtonPass
     private string Mask(string value, bool concealed) =>
         MaskSecrets && concealed && value.Length > 0 ? "<concealed by Proton Pass>" : value;
 
-    private CliResult CreateItem(FakeCliRunner runner, string type)
+    private CliResult CreateItem(FakeCliRunner runner, string type, string shareId)
     {
         if (WriteFailure is { } failure) return Fail(failure);
 
@@ -241,7 +293,7 @@ public sealed class FakeProtonPass
         // Leading hyphen on purpose: real ids are base64url and roughly one in sixty
         // looks like this, which is what broke deletes passed as two arguments.
         var id = $"-item{_nextId++}_x";
-        _items[id] = template;
+        ItemsIn(shareId)[id] = template;
 
         // The real CLI prints the bare item id, not JSON.
         return Ok(id + "\n");
@@ -257,6 +309,6 @@ public sealed class FakeProtonPass
             return Fail("error: unexpected argument found");
         }
 
-        return _items.Remove(id) ? Ok($"Item {id} deleted successfully") : Fail("item not found");
+        return ItemsIn(ShareOf(args)).Remove(id) ? Ok($"Item {id} deleted successfully") : Fail("item not found");
     }
 }

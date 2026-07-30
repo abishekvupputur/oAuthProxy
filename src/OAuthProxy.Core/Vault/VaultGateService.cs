@@ -46,7 +46,19 @@ public sealed class VaultGateService
         Status = new VaultGateStatus([], VaultBackendKind.None, NeedsAChoice: false);
     }
 
+    /// <summary>
+    /// Set by <see cref="Disconnect"/> until the user picks a manager again.
+    ///
+    /// Without it, disconnecting would be undone by the very next probe: a single ready manager
+    /// resolves itself with no question asked, which is right at startup and wrong immediately
+    /// after someone has said they want to stop using it.
+    /// </summary>
+    private bool _disconnected;
+
     public VaultGateStatus Status { get; private set; }
+
+    /// <summary>True after a disconnect, until a backend is chosen again.</summary>
+    public bool IsDisconnected => _disconnected;
 
     /// <summary>The active backend. Never null so callers do not have to special-case startup.</summary>
     public IConfigVault Selected { get; private set; } = new InMemoryVault();
@@ -66,6 +78,13 @@ public sealed class VaultGateService
             ProbeSafelyAsync(_protonPass, ct));
 
         var ready = probes.Where(p => p.IsReady).ToList();
+
+        // Disconnected means the answer to "which backend" is nobody, no matter what the probes
+        // found. NeedsAChoice so the setup page offers the ready ones as buttons to connect back.
+        if (_disconnected)
+        {
+            return Publish(new VaultGateStatus(probes, VaultBackendKind.None, NeedsAChoice: ready.Count > 0));
+        }
 
         return ready.Count switch
         {
@@ -105,6 +124,8 @@ public sealed class VaultGateService
     /// <summary>Records the user's answer for this run. Deliberately not persisted anywhere.</summary>
     public VaultGateStatus SelectBackend(VaultBackendKind kind)
     {
+        _disconnected = false;
+
         var status = Status with { Selected = kind, NeedsAChoice = false };
         return Publish(status, kind);
     }
@@ -112,10 +133,59 @@ public sealed class VaultGateService
     /// <summary>Creates threeEyedRaven in the given manager, then re-evaluates.</summary>
     public async Task<VaultGateStatus> CreateVaultAsync(VaultBackendKind kind, CancellationToken ct = default)
     {
-        await ProviderFor(kind).EnsureVaultAsync(ct);
-        _activityLog.Log($"STARTUP created the '{VaultConstants.VaultName}' vault in {VaultLockGuidance.DisplayName(kind)}");
+        _disconnected = false;
 
-        return await EvaluateAsync(ct);
+        await ProviderFor(kind).EnsureVaultAsync(ct);
+        _activityLog.Log($"STARTUP created the '{ProviderFor(kind).VaultName}' vault in {VaultLockGuidance.DisplayName(kind)}");
+
+        return await ResolveAfterUserChoiceAsync(kind, ct);
+    }
+
+    /// <summary>
+    /// Points a manager at a vault the user already has, then re-evaluates. Throws
+    /// <see cref="VaultAdoptionException"/> when that vault may not be used.
+    /// </summary>
+    public async Task<VaultGateStatus> UseExistingVaultAsync(
+        VaultBackendKind kind, string vaultName, CancellationToken ct = default)
+    {
+        _disconnected = false;
+
+        await ProviderFor(kind).UseExistingVaultAsync(vaultName, ct);
+
+        return await ResolveAfterUserChoiceAsync(kind, ct);
+    }
+
+    /// <summary>
+    /// Stops using the password manager: both providers forget the vault they resolved, and the
+    /// app is back where it starts, holding nothing.
+    ///
+    /// The caller is expected to clear the in-memory store as well. Leaving it loaded would be the
+    /// worst of both worlds — the proxy would still be spending the user's tokens using a
+    /// configuration they have just disconnected from, and with nowhere to save changes to.
+    /// </summary>
+    public VaultGateStatus Disconnect()
+    {
+        _onePassword.Forget();
+        _protonPass.Forget();
+
+        _disconnected = true;
+        Selected = new InMemoryVault();
+
+        _activityLog.Log("VAULT disconnected from the password manager — OAuthProxy is holding no configuration");
+
+        return Publish(new VaultGateStatus([], VaultBackendKind.None, NeedsAChoice: false));
+    }
+
+    /// <summary>
+    /// Re-probes after the user has said which manager to use, and keeps that answer. Without the
+    /// explicit select, a tie-break could hand the app to the <em>other</em> manager immediately
+    /// after someone created or named a vault in this one.
+    /// </summary>
+    private async Task<VaultGateStatus> ResolveAfterUserChoiceAsync(VaultBackendKind kind, CancellationToken ct)
+    {
+        var status = await EvaluateAsync(ct);
+
+        return status.For(kind)?.IsReady == true ? SelectBackend(kind) : status;
     }
 
     public IConfigVault ProviderFor(VaultBackendKind kind) => kind switch

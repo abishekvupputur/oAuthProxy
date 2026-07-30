@@ -33,6 +33,10 @@ public sealed partial class SetupViewModel(
     /// <summary>Set when both managers qualify and neither can be shown to hold the configuration.</summary>
     [ObservableProperty] private bool _needsAChoice;
 
+    /// <summary>Set while the user has deliberately disconnected, so the page says so rather than
+    /// presenting itself as a first-run setup.</summary>
+    [ObservableProperty] private bool _isDisconnected;
+
     /// <summary>Set when the port could not be bound, which is fixable without a working proxy.</summary>
     [ObservableProperty] private bool _hasPortConflict;
     [ObservableProperty] private string _listenPort = "5559";
@@ -41,6 +45,10 @@ public sealed partial class SetupViewModel(
 
     /// <summary>Raised when the gate opens, so the host can start the proxy.</summary>
     public event Func<Task>? ReadyToStart;
+
+    /// <summary>Set by the host when a vault connected after a disconnect could not be read.</summary>
+    public void ReportReconnectFailure(string message) =>
+        StatusMessage = $"Connected, but the vault could not be read: {message}";
 
     /// <summary>Set by the host when binding the listen port failed.</summary>
     public void ReportPortConflict(int port, string message)
@@ -115,6 +123,50 @@ public sealed partial class SetupViewModel(
         }
     }
 
+    /// <summary>
+    /// Uses a vault the user already has instead of creating threeEyedRaven. The gate refuses
+    /// anything that is neither empty nor already OAuthProxy's, and says why — see
+    /// <see cref="VaultAdoption"/>.
+    /// </summary>
+    [RelayCommand]
+    private async Task UseExistingVaultAsync(ManagerCardViewModel card)
+    {
+        if (IsBusy) return;
+
+        var name = card.ExistingVaultName.Trim();
+        if (name.Length == 0)
+        {
+            StatusMessage = "Type the name of the vault OAuthProxy should use.";
+            return;
+        }
+
+        IsBusy = true;
+        StatusMessage = $"Checking the '{name}' vault in {card.Name}…";
+
+        try
+        {
+            var status = await Task.Run(() => gate.UseExistingVaultAsync(card.Kind, name));
+            Apply(status);
+
+            if (status.IsReady) await RaiseReadyAsync();
+        }
+        catch (VaultAdoptionException ex)
+        {
+            // The user's answer is wrong rather than broken — a typo, or a vault with their own
+            // things in it. Says which, and leaves the name in the box to be corrected.
+            StatusMessage = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            activityLog.LogError($"Could not use the '{name}' vault", ex);
+            StatusMessage = ex.Message;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
     [RelayCommand]
     private async Task RetryPortAsync()
     {
@@ -178,10 +230,13 @@ public sealed partial class SetupViewModel(
         foreach (var manager in status.Statuses) Managers.Add(new ManagerCardViewModel(manager));
 
         NeedsAChoice = status.NeedsAChoice;
+        IsDisconnected = gate.IsDisconnected;
         HasLegacyStore = File.Exists(LegacyStorePath);
 
         StatusMessage = status switch
         {
+            { NeedsAChoice: true } when gate.IsDisconnected =>
+                "Disconnected. Choose a password manager to connect to it again.",
             { NeedsAChoice: true } => "Both password managers are set up. Choose which one OAuthProxy should use.",
             { IsReady: true } => "Ready.",
             _ when status.Statuses.Any(s => s.CanCreateVault) =>

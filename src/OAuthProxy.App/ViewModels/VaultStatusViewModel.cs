@@ -93,12 +93,30 @@ public sealed partial class VaultStatusViewModel : ObservableObject
     {
         await _configStoreCache.ReloadAsync();
 
+        ReloadTabs();
+        Apply();
+    }
+
+    /// <summary>
+    /// Loads the store of a password manager that has just been connected again after a
+    /// disconnect. Separate from <see cref="ReloadFromVaultAsync"/> because the cache was reset
+    /// rather than merely stale, so this is a first load — key backfill and all.
+    /// </summary>
+    public async Task ReconnectAsync()
+    {
+        // Off the dispatcher: this is vault I/O, and it can sit on an unlock prompt.
+        await Task.Run(() => _configStoreCache.InitializeAsync());
+
+        ReloadTabs();
+        Apply();
+    }
+
+    private void ReloadTabs()
+    {
         _credentials.Reload();
         _routes.Reload();
         _funnels.Reload();
         _settings.Reload();
-
-        Apply();
     }
 
     private void Apply()

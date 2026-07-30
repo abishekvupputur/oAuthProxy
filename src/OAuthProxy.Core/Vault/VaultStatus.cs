@@ -37,13 +37,17 @@ public enum VaultAvailability
 /// own CLI.</param>
 /// <param name="Detail">Human-readable reason, shown verbatim on the setup page. Never contains a
 /// secret: it is built from the first line of stderr, which the CLIs use for diagnostics only.</param>
+/// <param name="VaultName">Name of the vault in use — threeEyedRaven unless the user pointed
+/// OAuthProxy at one they already had. Reported so the Settings tab can say which vault the
+/// configuration is actually in, which is not guessable once it is not the default.</param>
 public sealed record VaultStatus(
     VaultBackendKind Kind,
     VaultAvailability Availability,
     string? ExePath = null,
     string? Version = null,
     string? VaultId = null,
-    string? Detail = null)
+    string? Detail = null,
+    string? VaultName = null)
 {
     public bool IsReady => Availability == VaultAvailability.Ready;
 

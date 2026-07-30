@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using OAuthProxy.Core.Diagnostics;
 using OAuthProxy.Core.Models;
@@ -40,9 +41,12 @@ public sealed class ProtonPassVaultProvider(
 
     private string? _exePath;
     private string? _shareId;
+    private string _vaultName = VaultConstants.VaultName;
     private long _loadedRevision;
 
     public VaultBackendKind Kind => VaultBackendKind.ProtonPass;
+
+    public string VaultName => _vaultName;
 
     public string? LastLoadWarning { get; private set; }
 
@@ -81,14 +85,29 @@ public sealed class ProtonPassVaultProvider(
                 _exePath, version, Detail: vaultList.FirstErrorLine());
         }
 
-        _shareId = FindShareId(vaultList.StdOut);
+        var vaults = ParseVaults(vaultList.StdOut);
+        _shareId = vaults.FirstOrDefault(v => v.Name == _vaultName)?.ShareId;
+
+        if (_shareId is null && await FindConfiguredVaultAsync(vaults, ct) is { } adopted)
+        {
+            // A vault the user pointed OAuthProxy at is not remembered on this PC — nothing about
+            // this app is — so it is found the same way the backend itself is: whichever vault
+            // actually holds the configuration is the one that was being used. Only reached when
+            // threeEyedRaven is absent, so the ordinary path is still one `vault list`.
+            _vaultName = adopted.Name;
+            _shareId = adopted.ShareId;
+
+            activityLog.Log($"VAULT Proton Pass — using the existing '{_vaultName}' vault, "
+                            + "which holds the OAuthProxy configuration");
+        }
 
         return new VaultStatus(
             Kind,
             _shareId is null ? VaultAvailability.VaultMissing : VaultAvailability.Ready,
             _exePath,
             version,
-            _shareId);
+            _shareId,
+            VaultName: _vaultName);
     }
 
     public async Task EnsureVaultAsync(CancellationToken ct = default)
@@ -96,26 +115,83 @@ public sealed class ProtonPassVaultProvider(
         if (_shareId is not null) return;
 
         var result = await RunAsync(
-            ["vault", "create", "--name", VaultConstants.VaultName],
+            ["vault", "create", "--name", _vaultName],
             timeout: CliRunner.WriteTimeout, ct: ct);
 
         if (!result.Succeeded)
         {
             throw new VaultSaveException(
-                $"Could not create the '{VaultConstants.VaultName}' vault: {result.FirstErrorLine()}",
+                $"Could not create the '{_vaultName}' vault: {result.FirstErrorLine()}",
                 partiallyApplied: false);
         }
 
         // `vault create` does not report the share id, so re-list rather than parse its output.
         var listed = await RunAsync(["vault", "list", "--output", "json"], ct: ct);
-        _shareId = listed.Succeeded ? FindShareId(listed.StdOut) : null;
+        _shareId = listed.Succeeded
+            ? ParseVaults(listed.StdOut).FirstOrDefault(v => v.Name == _vaultName)?.ShareId
+            : null;
 
         if (_shareId is null)
         {
             throw new VaultSaveException(
-                $"Proton Pass reported creating '{VaultConstants.VaultName}' but it is not in the vault list.",
+                $"Proton Pass reported creating '{_vaultName}' but it is not in the vault list.",
                 partiallyApplied: false);
         }
+    }
+
+    /// <summary>
+    /// Takes over a vault the user already has. See <see cref="VaultAdoption"/> for why only an
+    /// empty vault or one OAuthProxy has written to is accepted.
+    /// </summary>
+    public async Task UseExistingVaultAsync(string vaultName, CancellationToken ct = default)
+    {
+        var name = vaultName.Trim();
+        if (name.Length == 0) throw VaultAdoption.NameRequired();
+
+        _exePath ??= exePathOverride ?? VaultProbe.FindProtonPass();
+        if (_exePath is null || !File.Exists(_exePath))
+        {
+            throw new VaultCliException("The Proton Pass CLI is not installed.");
+        }
+
+        var listed = await RunAsync(["vault", "list", "--output", "json"], ct: ct);
+        if (!listed.Succeeded) throw new VaultLockedException(Kind, listed.FirstErrorLine());
+
+        var vaults = ParseVaults(listed.StdOut);
+
+        // Case-insensitive, because the user is typing a name they read in the Proton Pass UI and
+        // being told "no such vault" over capitalisation would be a poor way to spend their time.
+        var match = vaults.FirstOrDefault(v => string.Equals(v.Name, name, StringComparison.OrdinalIgnoreCase))
+                    ?? throw VaultAdoption.NoSuchVault(name, vaults.Select(v => v.Name));
+
+        var (items, _) = await ListAllAsync(match.ShareId, match.Name, withSecrets: true, ct);
+
+        var note = items.FirstOrDefault(i => i.Title == VaultItemNaming.ConfigTitle);
+        var outcome = VaultAdoption.Judge(
+            match.Name, items.Count, note is null ? null : note.Contents.Field(VaultFields.NoteContent) ?? "");
+
+        _vaultName = match.Name;
+        _shareId = match.ShareId;
+        _loadedRevision = 0;
+        LastLoadWarning = null;
+
+        if (outcome == VaultAdoptionOutcome.Empty)
+        {
+            // Stamped now rather than on the first real edit: the config item is the only thing
+            // that identifies this vault as OAuthProxy's next launch, and the name the user just
+            // typed is deliberately not written down anywhere on this PC.
+            await SaveAsync(new ConfigStore(), ct);
+        }
+
+        activityLog.Log($"VAULT Proton Pass — using the existing '{_vaultName}' vault");
+    }
+
+    public void Forget()
+    {
+        _shareId = null;
+        _vaultName = VaultConstants.VaultName;
+        _loadedRevision = 0;
+        LastLoadWarning = null;
     }
 
     public async Task<ConfigStore> LoadAsync(CancellationToken ct = default)
@@ -245,7 +321,9 @@ public sealed class ProtonPassVaultProvider(
     /// item behind on every save, so a route ended up with two key items and no way to tell which
     /// one the proxy was actually accepting.
     /// </summary>
-    private string Share => $"--share-id={_shareId}";
+    private string Share => ShareArg(_shareId!);
+
+    private static string ShareArg(string shareId) => $"--share-id={shareId}";
 
     private static string ItemId(string itemId) => $"--item-id={itemId}";
 
@@ -280,32 +358,10 @@ public sealed class ProtonPassVaultProvider(
                 "Proton Pass created the item but did not report its id.", partiallyApplied: false);
     }
 
+    /// <summary>Items in the active vault that this app owns.</summary>
     private async Task<List<ProtonItem>> ListAsync(bool withSecrets, CancellationToken ct)
     {
-        string[] args = withSecrets
-            ? ["item", "list", Share, "--output", "json", "--show-secrets"]
-            : ["item", "list", Share, "--output", "json"];
-
-        var result = await RunAsync(args, ct: ct);
-
-        if (!result.Succeeded)
-        {
-            throw new VaultCliException(
-                $"Could not list the '{VaultConstants.VaultName}' vault: {result.FirstErrorLine()}");
-        }
-
-        var items = new List<ProtonItem>();
-        var concealed = 0;
-
-        foreach (var node in JsonNode.Parse(result.StdOut)?["items"] as JsonArray ?? [])
-        {
-            if (ParseItem(node, ref concealed) is { } item && VaultItemNaming.IsOwned(item.Title))
-            {
-                // Only items this app owns. The rest of the vault is the user's and is never read,
-                // never written, and never a candidate for deletion.
-                items.Add(item);
-            }
-        }
+        var (items, concealed) = await ListAllAsync(_shareId!, _vaultName, withSecrets, ct);
 
         if (concealed > 0)
         {
@@ -316,7 +372,39 @@ public sealed class ProtonPassVaultProvider(
                               + "so some credentials loaded without them.";
         }
 
-        return items;
+        // Only items this app owns. The rest of the vault is the user's and is never read, never
+        // written, and never a candidate for deletion.
+        return items.Where(i => VaultItemNaming.IsOwned(i.Title)).ToList();
+    }
+
+    /// <summary>
+    /// Everything in a vault, owned or not. The unfiltered count is what decides whether a vault
+    /// the user named is empty enough to take over, so this deliberately does not filter.
+    /// </summary>
+    private async Task<(List<ProtonItem> Items, int Concealed)> ListAllAsync(
+        string shareId, string vaultLabel, bool withSecrets, CancellationToken ct)
+    {
+        string[] args = withSecrets
+            ? ["item", "list", ShareArg(shareId), "--output", "json", "--show-secrets"]
+            : ["item", "list", ShareArg(shareId), "--output", "json"];
+
+        var result = await RunAsync(args, ct: ct);
+
+        if (!result.Succeeded)
+        {
+            throw new VaultCliException(
+                $"Could not list the '{vaultLabel}' vault: {result.FirstErrorLine()}");
+        }
+
+        var items = new List<ProtonItem>();
+        var concealed = 0;
+
+        foreach (var node in JsonNode.Parse(result.StdOut)?["items"] as JsonArray ?? [])
+        {
+            if (ParseItem(node, ref concealed) is { } item) items.Add(item);
+        }
+
+        return (items, concealed);
     }
 
     /// <summary>
@@ -582,13 +670,40 @@ public sealed class ProtonPassVaultProvider(
         return resolved;
     }
 
-    private static string? FindShareId(string vaultListJson)
+    private static List<ProtonVault> ParseVaults(string vaultListJson)
     {
+        var vaults = new List<ProtonVault>();
+
         foreach (var node in JsonNode.Parse(vaultListJson)?["vaults"] as JsonArray ?? [])
         {
-            if (string.Equals(ReadString(node, "name"), VaultConstants.VaultName, StringComparison.Ordinal))
+            if (ReadString(node, "name") is { } name && ReadString(node, "share_id") is { } shareId)
             {
-                return ReadString(node, "share_id");
+                vaults.Add(new ProtonVault(name, shareId));
+            }
+        }
+
+        return vaults;
+    }
+
+    /// <summary>
+    /// The vault holding an OAuthProxy configuration, when the expected one is not there. Reads
+    /// item titles only — no <c>--show-secrets</c> — because all that is being asked is which vault
+    /// this app was last pointed at, and the rest of the user's vaults are none of its business.
+    /// </summary>
+    private async Task<ProtonVault?> FindConfiguredVaultAsync(List<ProtonVault> vaults, CancellationToken ct)
+    {
+        foreach (var vault in vaults)
+        {
+            try
+            {
+                var (items, _) = await ListAllAsync(vault.ShareId, vault.Name, withSecrets: false, ct);
+                if (items.Any(i => i.Title == VaultItemNaming.ConfigTitle)) return vault;
+            }
+            catch (Exception ex) when (ex is VaultCliException or JsonException)
+            {
+                // A vault this session cannot list is simply not a candidate — a shared vault whose
+                // access was revoked, say. Probing must still reach an answer for the others.
+                activityLog.Log($"VAULT could not look inside the '{vault.Name}' vault: {ex.Message}");
             }
         }
 
@@ -620,7 +735,7 @@ public sealed class ProtonPassVaultProvider(
             VaultAvailability.NotSignedIn => new VaultLockedException(Kind, status.Detail),
             VaultAvailability.NotInstalled => new VaultCliException("The Proton Pass CLI is not installed."),
             VaultAvailability.VaultMissing =>
-                new VaultCliException($"The '{VaultConstants.VaultName}' vault does not exist yet."),
+                new VaultCliException($"The '{_vaultName}' vault does not exist yet."),
             _ => (Exception)new VaultCliException(status.Detail ?? "Proton Pass is unavailable."),
         });
     }
@@ -639,4 +754,7 @@ public sealed class ProtonPassVaultProvider(
 
     /// <summary>An item as this provider needs it: its id, its title, and its fields flattened.</summary>
     private sealed record ProtonItem(string ItemId, string Title, VaultItemContents Contents);
+
+    /// <summary>One vault from <c>vault list</c>. The share id is what every other call takes.</summary>
+    private sealed record ProtonVault(string Name, string ShareId);
 }

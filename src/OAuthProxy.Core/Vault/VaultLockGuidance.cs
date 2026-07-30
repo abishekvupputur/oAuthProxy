@@ -49,32 +49,52 @@ public static class VaultLockGuidance
     };
 
     /// <summary>
-    /// How to stop the vault locking between saves. Ordered so the option that weakens nothing is
-    /// read first.
+    /// How to stop the vault locking between saves.
+    ///
+    /// Deliberately only the steps taken in the password manager itself. The token option lives in
+    /// <see cref="UnattendedTokenSteps"/> and is shown on the Settings tab instead: this text
+    /// appears in the banner over the tabs, where a user is being interrupted mid-task and needs
+    /// the thing they can do in the next thirty seconds — not a walkthrough of creating,
+    /// scoping and installing a long-lived credential.
     /// </summary>
     public static string StayingUnlockedSteps(VaultBackendKind kind) => kind switch
     {
         VaultBackendKind.OnePassword =>
-            "Best option — a token, so nothing has to stay unlocked:\n"
-            + "Create a 1Password service account, grant it access to the "
-            + $"\"{VaultConstants.VaultName}\" vault specifically, and put its token in the "
-            + "OP_SERVICE_ACCOUNT_TOKEN environment variable. A service account cannot see your "
-            + "Private vault, so it reaches only what you gave it.\n\n"
-            + "Otherwise — longer unlock window:\n"
+            "Longer unlock window:\n"
             + "1Password → Settings → Security, and raise \"Lock after\". You can also turn off "
             + "\"Lock on sleep\" and \"Lock when the screen saver starts\".\n\n"
-            + "That last option is a real trade: the timeout exists to limit how long this machine "
-            + "holds your secrets decrypted while you are away from it. Raise it only on a machine "
-            + "you would be comfortable leaving unlocked for that long.",
+            + "That is a real trade: the timeout exists to limit how long this machine holds your "
+            + "secrets decrypted while you are away from it. Raise it only on a machine you would "
+            + "be comfortable leaving unlocked for that long.\n\n"
+            + "There is also a way to keep the vault reachable without leaving anything unlocked — "
+            + "see \"Running unattended\" on the Settings tab.",
 
         VaultBackendKind.ProtonPass =>
-            "Best option — a token, so nothing has to stay signed in interactively:\n"
-            + "Create a Proton Pass personal access token scoped to the "
-            + $"\"{VaultConstants.VaultName}\" vault and put it in the "
-            + "PROTON_PASS_PERSONAL_ACCESS_TOKEN environment variable.\n\n"
-            + "Otherwise:\n"
-            + "A pass-cli session lasts until you run \"pass-cli logout\", so a vault that has "
-            + "become unavailable usually means the session ended. Run \"pass-cli login\" again.",
+            "A pass-cli session lasts until you run \"pass-cli logout\", so a vault that has become "
+            + "unavailable usually means the session ended. Run \"pass-cli login\" again.\n\n"
+            + "There is also a way to keep the vault reachable without signing in interactively — "
+            + "see \"Running unattended\" on the Settings tab.",
+
+        _ => "",
+    };
+
+    /// <summary>
+    /// The token option, for a machine that should never show an unlock prompt. Kept out of the
+    /// lock banner (see <see cref="StayingUnlockedSteps"/>) and shown on the Settings tab, where
+    /// setting up a long-lived credential is a decision being made rather than an interruption.
+    /// </summary>
+    public static string UnattendedTokenSteps(VaultBackendKind kind) => kind switch
+    {
+        VaultBackendKind.OnePassword =>
+            "Create a 1Password service account, grant it access to this vault specifically, and put "
+            + "its token in the OP_SERVICE_ACCOUNT_TOKEN environment variable. Nothing then has to "
+            + "stay unlocked. A service account cannot see your Private vault, so it reaches only "
+            + "what you gave it.",
+
+        VaultBackendKind.ProtonPass =>
+            "Create a Proton Pass personal access token scoped to this vault and put it in the "
+            + "PROTON_PASS_PERSONAL_ACCESS_TOKEN environment variable. Nothing then has to stay "
+            + "signed in interactively.",
 
         _ => "",
     };
