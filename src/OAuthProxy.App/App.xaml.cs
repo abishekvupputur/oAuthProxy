@@ -82,14 +82,13 @@ public partial class App : Application
 
     private void StartHost()
     {
-        // Read the configured listen port before Kestrel binds — the port can't be changed
-        // once bound, so this one synchronous read happens before host build. The "real"
-        // config load into ConfigStoreCache still happens via ConfigStoreInitializerHostedService.
-        var bootstrapStore = new SecureStore();
-        var initialSettings = bootstrapStore.LoadAsync().GetAwaiter().GetResult().Settings;
-
         var builder = WebApplication.CreateBuilder();
-        builder.WebHost.UseUrls($"http://127.0.0.1:{initialSettings.ListenPort}");
+
+        // Deliberately no UseUrls here. The listen port lives in the vault along with everything
+        // else, and the vault cannot be read until the password manager is unlocked — which may
+        // involve a biometric prompt and cannot be made to happen before the host is built.
+        // WebApplication.Urls stays writable right up until Start(), so the port is set in
+        // StartProxyAsync once the store has actually been loaded.
         builder.WebHost.ConfigureKestrel(options =>
         {
             // Long-lived MCP SSE/streamable-HTTP sessions shouldn't be dropped by Kestrel.
@@ -97,13 +96,6 @@ public partial class App : Application
         });
 
         builder.Services.AddOAuthProxy();
-
-        // Registered after AddOAuthProxy so this instance wins (last registration is what
-        // GetRequiredService resolves). Two reasons it has to be the same object: the store is
-        // otherwise loaded and decrypted twice at every launch, and — the one that mattered —
-        // a quarantine detected during the bootstrap load was recorded on an instance that was
-        // then thrown away, so nothing downstream could report it.
-        builder.Services.AddSingleton(bootstrapStore);
 
         builder.Services.AddSingleton<AutostartService>();
 
@@ -114,31 +106,12 @@ public partial class App : Application
         builder.Services.AddSingleton<MainWindow>();
         builder.Services.AddSingleton<TrayIconManager>();
 
-        // Build + start the host on a thread-pool thread (via Task.Run) rather than inline
-        // on the WPF Dispatcher thread. Hosted-service startup (ConfigStoreInitializerHostedService)
-        // awaits async I/O; if that ran with the Dispatcher's SynchronizationContext still
-        // ambient, its continuation would try to post back onto this very thread, which is
-        // blocked waiting for it — a deadlock. Task.Run runs the delegate with no
-        // SynchronizationContext, so nothing in that call graph captures it.
-        _webApp = Task.Run(() =>
-        {
-            var app = builder.Build();
-
-            // Must sit ahead of MapReverseProxy: it rejects callers that cannot present the
-            // local API key, and blocks DNS-rebinding and browser-originated requests. Without
-            // it, any process on this machine can spend the user's OAuth grant.
-            app.UseLocalAccessGuard();
-
-            // After the guard, so funnel callers must present the local API key like anyone
-            // else, and before MapReverseProxy so /mcp is unambiguously the funnel's — routes
-            // are forbidden from claiming that prefix.
-            app.UseMcpFunnelGate();
-            app.MapMcpFunnel();
-
-            app.MapReverseProxy();
-            app.Start();
-            return app;
-        }).GetAwaiter().GetResult();
+        // Build the host on a thread-pool thread (via Task.Run) rather than inline on the WPF
+        // Dispatcher thread. Anything in this call graph that awaits async I/O would, with the
+        // Dispatcher's SynchronizationContext still ambient, try to post its continuation back
+        // onto this very thread — which is blocked waiting for it. Task.Run runs the delegate
+        // with no SynchronizationContext, so nothing in it can capture the Dispatcher.
+        _webApp = Task.Run(builder.Build).GetAwaiter().GetResult();
 
         var mainWindow = _webApp.Services.GetRequiredService<MainWindow>();
         var settingsViewModel = _webApp.Services.GetRequiredService<SettingsViewModel>();
@@ -148,33 +121,40 @@ public partial class App : Application
             mainWindow,
             onAutostartChanged: () => Dispatcher.Invoke(settingsViewModel.Reload));
 
-        // Deliberately last: this is modal, and showing it earlier would stall startup with no
-        // tray icon on screen to explain what the user is looking at.
-        if (bootstrapStore.QuarantinedFilePath is { } quarantinedPath)
-        {
-            ReportQuarantinedStore(quarantinedPath);
-        }
+        StartProxy();
     }
 
     /// <summary>
-    /// An unreadable store means every credential, upstream, and route is gone and a new local
-    /// API key has been issued, so every configured client is about to start failing with 403.
-    /// The app used to recover from this silently, which left the user debugging a working
-    /// proxy that had simply forgotten everything.
+    /// Loads the store, then binds and starts Kestrel. Separate from host *build* because the
+    /// listen port is not knowable until the vault has been read.
     /// </summary>
-    private static void ReportQuarantinedStore(string quarantinedPath)
+    private void StartProxy()
     {
-        MessageBox.Show(
-            "OAuthProxy could not read its saved configuration, so it started with an empty one."
-            + $"{Environment.NewLine}{Environment.NewLine}"
-            + $"The unreadable file was kept as:{Environment.NewLine}{quarantinedPath}"
-            + $"{Environment.NewLine}{Environment.NewLine}"
-            + "Credentials, upstreams, and routes need to be set up again. A new local API key "
-            + "has been generated, so any client using the old key will get 403 until updated."
-            + $"{Environment.NewLine}{Environment.NewLine}"
-            + "This usually means the profile was copied from another machine or user account "
-            + "(DPAPI cannot decrypt it there), or the file was truncated by a hard power loss.",
-            "OAuthProxy", MessageBoxButton.OK, MessageBoxImage.Warning);
+        var configStoreCache = _webApp!.Services.GetRequiredService<ConfigStoreCache>();
+
+        // Same Dispatcher-deadlock reasoning as the build above: this loads from the vault and
+        // then runs hosted-service startup, both of which await.
+        Task.Run(async () =>
+        {
+            await configStoreCache.InitializeAsync();
+
+            _webApp.Urls.Clear();
+            _webApp.Urls.Add($"http://127.0.0.1:{configStoreCache.Current.Settings.ListenPort}");
+
+            // Must sit ahead of MapReverseProxy: it rejects callers that cannot present the
+            // endpoint's proxy key, and blocks DNS-rebinding and browser-originated requests.
+            // Without it, any process on this machine can spend the user's OAuth grant.
+            _webApp.UseLocalAccessGuard();
+
+            // After the guard, so funnel callers must present a proxy key like anyone else, and
+            // before MapReverseProxy so /mcp is unambiguously the funnel's — routes are forbidden
+            // from claiming that prefix.
+            _webApp.UseMcpFunnelGate();
+            _webApp.MapMcpFunnel();
+
+            _webApp.MapReverseProxy();
+            _webApp.Start();
+        }).GetAwaiter().GetResult();
     }
 
     private static void ReportStartupFailure(Exception ex)
@@ -192,8 +172,8 @@ public partial class App : Application
         MessageBox.Show(
             $"OAuthProxy could not start.{Environment.NewLine}{Environment.NewLine}{ex.Message}"
             + $"{Environment.NewLine}{Environment.NewLine}"
-            + "If the listen port is already in use, change it in %APPDATA%\\OAuthProxy or close "
-            + "the other program using it.",
+            + "If the listen port is already in use, close the other program using it — the port "
+            + "is stored in your password manager and can be changed from the Settings tab.",
             "OAuthProxy", MessageBoxButton.OK, MessageBoxImage.Error);
     }
 
@@ -237,15 +217,19 @@ public partial class App : Application
                     // Settings toggles kick off a save without awaiting it, and this method
                     // ends in Environment.Exit — so without draining first, flipping a
                     // checkbox and immediately choosing Exit lost the change.
+                    //
+                    // The budget is 20s rather than the 3s a local file write needed: a save is
+                    // now a CLI subprocess, a sync round trip, and possibly a biometric prompt.
+                    // Anything shorter is a guaranteed silent data loss on exit.
                     var configStoreCache = _webApp.Services.GetService<ConfigStoreCache>();
                     if (configStoreCache is not null)
                     {
-                        await configStoreCache.FlushAsync(TimeSpan.FromSeconds(3));
+                        await configStoreCache.FlushAsync(TimeSpan.FromSeconds(20));
                     }
 
                     await _webApp.StopAsync(TimeSpan.FromSeconds(5));
                     await _webApp.DisposeAsync();
-                }).Wait(TimeSpan.FromSeconds(10));
+                }).Wait(TimeSpan.FromSeconds(35));
             }
             catch
             {

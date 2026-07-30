@@ -48,7 +48,7 @@ public class ProxyUnaffectedByFunnelTests : IAsyncLifetime
             {
                 PathPrefix = prefix,
                 UpstreamId = upstreamRecord.Id,
-                CredentialId = credential.Id,
+                Credentials = [RouteCredential.For(credential.Id, CredentialPlacement.Header)],
                 StripPrefix = true,
             });
 

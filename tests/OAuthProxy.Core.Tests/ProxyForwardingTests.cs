@@ -12,6 +12,7 @@ using OAuthProxy.Core.Diagnostics;
 using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Proxy;
 using OAuthProxy.Core.Storage;
+using OAuthProxy.Core.Vault;
 
 namespace OAuthProxy.Core.Tests;
 
@@ -32,7 +33,6 @@ public class ProxyForwardingTests : IAsyncLifetime
     private const string ApiKey = "forwarding-test-key-0123456789";
     private const string Token = "UPSTREAM-ACCESS-TOKEN";
 
-    private readonly string _storePath = Path.Combine(Path.GetTempPath(), $"oauthproxy-fwd-{Guid.NewGuid()}.dat");
     private readonly string _logPath = Path.Combine(Path.GetTempPath(), $"oauthproxy-fwd-logs-{Guid.NewGuid()}");
 
     private WebApplication _upstream = null!;
@@ -92,9 +92,9 @@ public class ProxyForwardingTests : IAsyncLifetime
         proxyBuilder.Logging.ClearProviders();
         proxyBuilder.Services.AddOAuthProxy();
 
-        // Redirect storage and logs to temp paths so the test cannot touch the real
-        // %APPDATA%\OAuthProxy store belonging to whoever runs the suite.
-        proxyBuilder.Services.Replace(ServiceDescriptor.Singleton(_ => new SecureStore(_storePath)));
+        // An in-memory vault and a temp log path, so the test never reaches the password manager
+        // or the log folder belonging to whoever runs the suite.
+        proxyBuilder.Services.Replace(ServiceDescriptor.Singleton<IConfigVault>(_ => new InMemoryVault()));
         proxyBuilder.Services.Replace(ServiceDescriptor.Singleton(_ => new ActivityLog(_logPath)));
 
         _proxy = proxyBuilder.Build();
@@ -176,10 +176,6 @@ public class ProxyForwardingTests : IAsyncLifetime
         _client.Dispose();
         await _proxy.StopAsync();
         await _upstream.StopAsync();
-        foreach (var path in new[] { _storePath, _storePath + ".tmp" })
-        {
-            try { if (File.Exists(path)) File.Delete(path); } catch { /* best effort */ }
-        }
         try { Directory.Delete(_logPath, recursive: true); } catch { /* best effort */ }
     }
 

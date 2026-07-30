@@ -2,34 +2,31 @@ using Microsoft.Extensions.Hosting;
 using OAuthProxy.Core.Diagnostics;
 using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Proxy;
+using OAuthProxy.Core.Vault;
 
 namespace OAuthProxy.Core.Storage;
 
 /// <summary>
-/// Loads the encrypted config store from disk and does the first YARP route/cluster build
+/// Loads the config store from the password manager and does the first YARP route/cluster build
 /// before the host starts accepting requests.
 /// </summary>
 public sealed class ConfigStoreInitializerHostedService(
     ConfigStoreCache configStoreCache,
-    SecureStore secureStore,
+    IConfigVault vault,
     ProxyConfigChangeNotifier proxyConfigChangeNotifier,
     ActivityLog activityLog) : IHostedService
 {
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        activityLog.Log("STARTUP loading encrypted config store");
+        activityLog.Log("STARTUP loading config store from the password manager");
         await configStoreCache.InitializeAsync(cancellationToken);
 
-        // The quarantine path was recorded but never read outside tests, so a store that could
-        // not be decrypted took every credential, route, and upstream with it in total silence:
-        // a fresh API key was generated and configured clients started getting 403 with nothing
-        // anywhere to explain it. Say so plainly, and point at the file that was kept.
-        if (secureStore.QuarantinedFilePath is { } quarantinedPath)
+        // A load that came back incomplete — a credential whose secret item is missing, say —
+        // otherwise looks identical to a working one until a request fails against the upstream
+        // hours later. Say so at startup instead.
+        if (vault.LastLoadWarning is { } warning)
         {
-            activityLog.Log(
-                $"STARTUP existing config store could not be read and was renamed to '{quarantinedPath}'. "
-                + "Starting with empty configuration — credentials, upstreams, and routes must be set up "
-                + "again, and a new local API key has been generated.");
+            activityLog.Log($"STARTUP {warning}");
         }
 
         var store = configStoreCache.Current;
@@ -41,13 +38,14 @@ public sealed class ConfigStoreInitializerHostedService(
     }
 
     /// <summary>
-    /// URL validation only ran when a record was added, so anything stored by a build that
-    /// predates it kept working unchecked — a plain-http upstream putting the access token on
-    /// the wire in cleartext, or a plain-http token endpoint doing the same for the client
-    /// secret and refresh token. Re-checking on load catches those.
+    /// URL validation runs when a record is added, but the store is no longer only written by
+    /// this app — every record is an item the user can edit directly in their password manager.
+    /// Re-checking on load catches what that lets through: a plain-http upstream putting the
+    /// access token on the wire in cleartext, or a plain-http token endpoint doing the same for
+    /// the client secret and refresh token.
     ///
-    /// Warn rather than drop: refusing to serve a route the user has been relying on, with no
-    /// way to edit it from a store that will not load, is worse than telling them about it.
+    /// Warn rather than drop: refusing to serve a route the user has been relying on, over a URL
+    /// they can fix in ten seconds, is worse than telling them about it.
     /// </summary>
     private void WarnAboutInsecureEndpoints(ConfigStore store)
     {

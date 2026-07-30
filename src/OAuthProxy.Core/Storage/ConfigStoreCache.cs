@@ -1,16 +1,22 @@
 using OAuthProxy.Core.Models;
+using OAuthProxy.Core.Vault;
 
 namespace OAuthProxy.Core.Storage;
 
 /// <summary>
 /// In-memory source of truth for the app's config, loaded once at host startup. UI, the
-/// proxy transform, and the refresh loop all read/write through this instead of touching
-/// disk directly.
+/// proxy transform, and the refresh loop all read/write through this instead of reaching for
+/// the vault directly.
+///
+/// Reads are free and writes are not: the vault is a subprocess and a network round trip, so
+/// everything on the request path reads <see cref="Current"/> and only deliberate edits and
+/// token refreshes go through <see cref="MutateAsync"/>/<see cref="SaveAsync"/>.
 /// </summary>
 public sealed class ConfigStoreCache
 {
-    private readonly SecureStore _secureStore;
+    private readonly IConfigVault _vault;
     private ConfigStore _current = new();
+    private bool _initialized;
 
     /// <summary>
     /// Held across the whole serialize-and-write, and by callers while they mutate the store.
@@ -21,17 +27,28 @@ public sealed class ConfigStoreCache
     /// </summary>
     private readonly SemaphoreSlim _writeLock = new(1, 1);
 
-    public ConfigStoreCache(SecureStore secureStore)
+    public ConfigStoreCache(IConfigVault vault)
     {
-        _secureStore = secureStore;
+        _vault = vault;
     }
 
     public ConfigStore Current => _current;
 
+    public bool IsInitialized => _initialized;
+
+    /// <summary>
+    /// Loads the store and issues any missing endpoint keys. Idempotent: startup calls this
+    /// directly (it needs the listen port before Kestrel can bind) and
+    /// <see cref="ConfigStoreInitializerHostedService"/> calls it again as the host starts, which
+    /// must not re-read the vault and discard edits made in between.
+    /// </summary>
     public async Task InitializeAsync(CancellationToken ct = default)
     {
-        var loaded = await _secureStore.LoadAsync(ct);
+        if (_initialized) return;
+
+        var loaded = await _vault.LoadAsync(ct);
         _current = loaded;
+        _initialized = true;
 
         // Every route and funnel needs its own key. This covers a store written before
         // per-endpoint keys existed (where the single Settings.LocalApiKey was the only secret,
@@ -77,7 +94,8 @@ public sealed class ConfigStoreCache
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await _secureStore.SaveAsync(_current, ct).ConfigureAwait(false);
+            await _vault.SaveAsync(_current, ct).ConfigureAwait(false);
+            IsOutOfSync = false;
         }
         finally
         {
@@ -90,10 +108,16 @@ public sealed class ConfigStoreCache
     /// rather than mutating <see cref="Current"/> and then calling <see cref="SaveAsync"/>
     /// separately — that leaves a window where another thread serializes a half-applied edit.
     ///
-    /// If the write fails the mutation is undone, so memory never claims something disk does
-    /// not have. Previously a failed save (full disk, file locked by antivirus) left the edit
-    /// applied in memory: the UI showed the new credential, the proxy routed to it, and it
-    /// vanished at the next restart — silent data loss the user only discovered hours later.
+    /// If the write fails without reaching the vault the mutation is undone, so memory never
+    /// claims something the vault does not have. Previously a failed save left the edit applied in
+    /// memory: the UI showed the new credential, the proxy routed to it, and it vanished at the
+    /// next restart — silent data loss the user only discovered hours later.
+    ///
+    /// A save that failed *part way* is the one case where rolling back is wrong. Saving the store
+    /// is several vault items, so a mid-save failure leaves some of them durable; reverting memory
+    /// would make the next successful save delete records that are already safely stored. Memory
+    /// stays as the newest truth, <see cref="IsOutOfSync"/> is raised, and the user is offered a
+    /// retry or a reload rather than having the choice made for them.
     /// </summary>
     public async Task MutateAsync(Action<ConfigStore> mutate, CancellationToken ct = default)
     {
@@ -105,13 +129,49 @@ public sealed class ConfigStoreCache
 
             try
             {
-                await _secureStore.SaveAsync(_current, ct).ConfigureAwait(false);
+                await _vault.SaveAsync(_current, ct).ConfigureAwait(false);
+                IsOutOfSync = false;
+            }
+            catch (VaultSaveException ex) when (ex.PartiallyApplied)
+            {
+                IsOutOfSync = true;
+                throw;
             }
             catch
             {
                 RestoreInto(_current, rollback);
                 throw;
             }
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// True when a save reached the vault and failed part way, so some records are stored and some
+    /// are not. Cleared by the next successful save or by <see cref="ReloadAsync"/>.
+    /// </summary>
+    public bool IsOutOfSync { get; private set; }
+
+    /// <summary>
+    /// Discards the in-memory store and re-reads the vault. The escape hatch for the two cases the
+    /// app cannot resolve on its own: a half-applied save, and a secret edited in the password
+    /// manager's own UI, which nothing here can be notified about.
+    ///
+    /// Callers must reload their view models afterwards — this replaces the contents of the
+    /// existing <see cref="ConfigStore"/> lists, so bindings to the store itself survive, but
+    /// bindings to individual records do not.
+    /// </summary>
+    public async Task ReloadAsync(CancellationToken ct = default)
+    {
+        await _writeLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var loaded = await _vault.LoadAsync(ct).ConfigureAwait(false);
+            RestoreInto(_current, Snapshot(loaded));
+            IsOutOfSync = false;
         }
         finally
         {
