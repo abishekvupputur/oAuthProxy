@@ -9,8 +9,11 @@ namespace OAuthProxy.App.ViewModels;
 /// configuration to fall back on — so "not set up" is a whole-window state rather than a banner
 /// over a UI whose every control would fail.
 /// </summary>
-public sealed partial class MainWindowViewModel : ObservableObject
+public sealed partial class MainWindowViewModel(VaultStatusViewModel vaultStatus) : ObservableObject
 {
+    /// <summary>Drives the banner above the tabs. Exposed here so the whole shell binds to one context.</summary>
+    public VaultStatusViewModel VaultStatus { get; } = vaultStatus;
+
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsNormal))]
     private bool _isGated = true;

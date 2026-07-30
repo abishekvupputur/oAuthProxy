@@ -2,6 +2,7 @@ using OAuthProxy.Core.Auth;
 using OAuthProxy.Core.Diagnostics;
 using OAuthProxy.Core.Models;
 using OAuthProxy.Core.Storage;
+using OAuthProxy.Core.Vault;
 using Yarp.ReverseProxy.Transforms;
 using Yarp.ReverseProxy.Transforms.Builder;
 
@@ -79,7 +80,15 @@ public sealed class CredentialInjectionTransformProvider(
 
                 if (token is null)
                 {
-                    failed.Add($"{label} (credential not connected)");
+                    // A locked vault and a never-connected credential both arrive here, and they
+                    // need completely different fixes — unlock your password manager, versus go
+                    // and authorize this credential. Saying which turns a confusing failure into
+                    // an obvious one.
+                    var reason = configStoreCache.Access == VaultAccess.ReadOnly && credential?.Token is not null
+                        ? "vault locked — its token expired and cannot be refreshed"
+                        : "credential not connected";
+
+                    failed.Add($"{label} ({reason})");
                     continue;
                 }
 

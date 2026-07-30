@@ -20,8 +20,38 @@
         <views:SetupView x:Name="SetupViewControl"
                          Visibility="{Binding IsGated, Converter={StaticResource BoolToVisibilityConverter}}"/>
 
-        <TabControl x:Name="TabsControl" SelectionChanged="TabControl_SelectionChanged"
-                    Visibility="{Binding IsNormal, Converter={StaticResource BoolToVisibilityConverter}}">
+        <DockPanel Visibility="{Binding IsNormal, Converter={StaticResource BoolToVisibilityConverter}}">
+            <!--
+                Above the tabs rather than inside one: a locked vault stops every tab working, so a
+                message tucked into Settings would be found only by someone already looking for it.
+            -->
+            <Border x:Name="VaultBanner" DockPanel.Dock="Top" Background="#3A2A1A"
+                    BorderBrush="{StaticResource AccentBrush}" BorderThickness="0,0,0,1" Padding="12,8"
+                    DataContext="{Binding VaultStatus}"
+                    Visibility="{Binding IsDegraded, Converter={StaticResource BoolToVisibilityConverter}}">
+                <StackPanel>
+                    <TextBlock Text="{Binding Headline}" FontWeight="SemiBold" TextWrapping="Wrap"
+                               Foreground="{StaticResource TextBrush}"/>
+                    <TextBlock Text="{Binding Detail}" Style="{StaticResource HintTextStyle}"
+                               TextWrapping="Wrap" Margin="0,2,0,0"/>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <Button Content="I've unlocked it — check again" Margin="0,0,8,0"
+                                Command="{Binding CheckAgainCommand}"/>
+                        <Button Content="Reload from vault" Style="{StaticResource GhostButtonStyle}"
+                                Command="{Binding ReloadFromVaultCommand}"/>
+                    </StackPanel>
+
+                    <Expander Header="Why can't I edit?" Margin="0,8,0,0"
+                              Foreground="{StaticResource MutedTextBrush}"
+                              Visibility="{Binding IsWritable, Converter={StaticResource InverseBoolToVisibilityConverter}}">
+                        <TextBlock Text="{Binding Guidance}" Style="{StaticResource HintTextStyle}"
+                                   TextWrapping="Wrap" Margin="0,6,0,0"/>
+                    </Expander>
+                </StackPanel>
+            </Border>
+
+            <TabControl x:Name="TabsControl" SelectionChanged="TabControl_SelectionChanged">
             <TabItem Header="Credentials">
                 <views:CredentialsView x:Name="CredentialsViewControl"/>
             </TabItem>
@@ -34,6 +64,7 @@
             <TabItem Header="Settings">
                 <views:SettingsView x:Name="SettingsViewControl"/>
             </TabItem>
-        </TabControl>
+            </TabControl>
+        </DockPanel>
     </Grid>
 </Window>

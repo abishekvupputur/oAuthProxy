@@ -106,6 +106,7 @@ public partial class App : Application
         builder.Services.AddSingleton<AutostartService>();
 
         builder.Services.AddSingleton<MainWindowViewModel>();
+        builder.Services.AddSingleton<VaultStatusViewModel>();
         builder.Services.AddSingleton<SetupViewModel>();
         builder.Services.AddSingleton<CredentialsViewModel>();
         builder.Services.AddSingleton<RoutesViewModel>();
