@@ -88,7 +88,7 @@ every release carries a **build provenance attestation** recording the workflow,
 runner that produced it. Verify with the [GitHub CLI](https://cli.github.com/):
 
 ```bash
-gh attestation verify RavensPort-v2.2.0.exe --repo abishekvupputur/oAuthProxy
+gh attestation verify RavensPort-v3.0.2.exe --repo abishekvupputur/ravensPort
 ```
 
 A pass means the file is byte-for-byte what CI built from this repository.
