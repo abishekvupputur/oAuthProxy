@@ -18,8 +18,12 @@
 
                 <TextBlock Text="Set up your password manager" Style="{StaticResource SectionHeaderStyle}"
                            FontSize="18" Margin="0,0,0,6"/>
-                <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,16"
-                           Text="RavensPort keeps everything — credentials, tokens, API keys, proxy keys, routes and MCP funnels — in a vault called 'RavensPort' in 1Password or Proton Pass. Nothing is stored on this PC, so the proxy does not start until one of them is unlocked."/>
+                <!-- xml:space on the runs that end in a space: XAML trims a run's trailing
+                     whitespace otherwise, and the emphasised words run into the words before. -->
+                <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,16"><Run
+                    xml:space="preserve">RavensPort keeps everything — credentials, tokens, API keys, proxy keys, routes and MCP funnels — in a vault called 'RavensPort' in 1Password or Proton Pass. </Run><Run
+                    Style="{StaticResource EmphasisRunStyle}">Nothing is stored on this PC</Run><Run
+                    >, so the proxy does not start until one of them is unlocked.</Run></TextBlock>
 
                 <!-- Port conflict: shown instead of the manager cards, since the vault is fine and
                      the only thing wrong is the port. -->
@@ -52,8 +56,10 @@
                         <!-- After a disconnect the same buttons mean "connect again", and nothing
                              is loaded until one is pressed. -->
                         <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
-                                   Visibility="{Binding IsDisconnected, Converter={StaticResource BoolToVisibilityConverter}}"
-                                   Text="You disconnected from your password manager, so RavensPort is holding no configuration and is proxying nothing. Choose a vault below to load it and start again."/>
+                                   Visibility="{Binding IsDisconnected, Converter={StaticResource BoolToVisibilityConverter}}"><Run
+                            xml:space="preserve">You disconnected from your password manager, so </Run><Run
+                            Style="{StaticResource EmphasisRunStyle}">RavensPort is holding no configuration and is proxying nothing</Run><Run
+                            >. Choose a vault below to load it and start again.</Run></TextBlock>
                         <ItemsControl ItemsSource="{Binding Managers}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
@@ -181,8 +187,12 @@
                                     <StackPanel Visibility="{Binding ShowVaultActions, Converter={StaticResource BoolToVisibilityConverter}}">
                                         <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
                                                    Margin="0,12,0,6"
-                                                   Visibility="{Binding HasVaults, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                   Text="Open a RavensPort vault you already have. Only vaults named after RavensPort and either empty or already RavensPort's are listed — your other vaults are none of this app's business, and its housekeeping deletes items it does not recognise."/>
+                                                   Visibility="{Binding HasVaults, Converter={StaticResource BoolToVisibilityConverter}}"><Run
+                                            xml:space="preserve">Open a RavensPort vault you already have. Listed here are only vaults named after RavensPort that are empty or already RavensPort's, because </Run><Run
+                                            Style="{StaticResource EmphasisRunStyle}">RavensPort works in a vault of its own and never reads or writes your other vaults</Run><Run
+                                            xml:space="preserve">. Inside the one it uses, </Run><Run
+                                            Style="{StaticResource EmphasisRunStyle}">it only ever removes items it created itself</Run><Run
+                                            xml:space="preserve"> — the ones titled 'RavensPort …' — and only once you have deleted the credential, route or funnel they belong to. Anything else in that vault is left untouched.</Run></TextBlock>
                                         <StackPanel Orientation="Horizontal" Margin="0,0,0,10"
                                                     Visibility="{Binding HasVaults, Converter={StaticResource BoolToVisibilityConverter}}">
                                             <!-- Not IsEditable: the dark theme's ComboBox template
@@ -246,8 +256,10 @@
                 <Border Style="{StaticResource SectionCardStyle}">
                     <StackPanel>
                         <TextBlock Text="Keeping the vault available" Style="{StaticResource SectionHeaderStyle}"/>
-                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
-                                   Text="While your password manager is locked, RavensPort cannot save changes and does not refresh OAuth tokens — so routes using them stop working once their current token expires. API-key routes keep working. If that happens often, the Settings tab explains how to keep the vault reachable, including token options that do not require leaving anything unlocked."/>
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"><Run
+                            xml:space="preserve">While your password manager is locked, </Run><Run
+                            Style="{StaticResource EmphasisRunStyle}">RavensPort cannot save changes and does not refresh OAuth tokens</Run><Run
+                            xml:space="preserve"> — so routes using them stop working once their current token expires. API-key routes keep working. If that happens often, the Settings tab explains how to keep the vault reachable, including token options that do not require leaving anything unlocked.</Run></TextBlock>
                     </StackPanel>
                 </Border>
 

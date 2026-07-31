@@ -310,6 +310,13 @@
         <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}"/>
         <Setter Property="TextWrapping" Value="Wrap"/>
     </Style>
+    <!-- For the clause inside a hint paragraph that the user must not skim past —
+         what is stored, and what gets deleted. Full-strength text against the muted
+         rest of the sentence, so it reads as emphasis rather than a second colour. -->
+    <Style x:Key="EmphasisRunStyle" TargetType="Run">
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
 
     <!-- Dark TabControl -->
     <Style TargetType="TabItem">

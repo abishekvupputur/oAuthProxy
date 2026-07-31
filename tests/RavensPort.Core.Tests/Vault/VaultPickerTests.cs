@@ -49,8 +49,8 @@ public class VaultPickerTests : IDisposable
     [Fact]
     public async Task OnePassword_AVaultWithTheUsersOwnEntriesInItIsNotOffered()
     {
-        // Named right, but full of someone's logins. Picking it would be refused, and this app's
-        // housekeeping deletes what it does not recognise — so it is never offered in the first place.
+        // Named right, but full of someone's logins. Picking it would be refused — this app keeps to
+        // a vault of its own — so it is never offered in the first place.
         var onePassword = new FakeOnePassword();
         var theirs = onePassword.AddVault($"{VaultConstants.VaultName} Archive");
         onePassword.AddItem(theirs, "Bank login");

@@ -20,10 +20,12 @@ public enum VaultAdoptionOutcome
 /// Whether a vault the user named may be used, in the same words for both backends.
 ///
 /// Only two kinds are safe to take over: one RavensPort already wrote, and an empty one the user
-/// made for it. Anything else is a vault with the user's own things in it, and using it would put
-/// those entries within reach of this app's delete reconciliation — the very thing the item-name
-/// prefix exists to keep them out of. Refusing here is far cheaper than explaining a deleted
-/// password afterwards.
+/// made for it. Anything else is a vault with the user's own things in it. Reconciliation already
+/// confines itself to items carrying <see cref="VaultItemNaming.Prefix"/>, so sharing a vault is
+/// survivable rather than dangerous — but it puts one string comparison between a user's entry and
+/// a delete, and an entry they happened to title "RavensPort ..." themselves would be on the wrong
+/// side of it. Refusing here keeps their things out of the blast radius entirely, which is far
+/// cheaper than explaining a deleted password afterwards.
 /// </summary>
 public static class VaultAdoption
 {
@@ -56,8 +58,8 @@ public static class VaultAdoption
 
             throw new VaultAdoptionException(
                 $"'{vaultName}' already has {itemCount} item(s) in it and no RavensPort configuration: "
-                + $"{examples}{andMore}. Use an empty vault, or one RavensPort has written to before — anything "
-                + "else would put your own entries in reach of this app's housekeeping.");
+                + $"{examples}{andMore}. Use an empty vault, or one RavensPort has written to before — it keeps to "
+                + "a vault of its own rather than sharing one with entries you put there yourself.");
         }
 
         return VaultAdoptionOutcome.Empty;
