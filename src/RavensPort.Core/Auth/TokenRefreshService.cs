@@ -7,8 +7,8 @@ using RavensPort.Core.Storage;
 namespace RavensPort.Core.Auth;
 
 /// <summary>
-/// Scans all stored credentials every minute and refreshes any token expiring within
-/// 10 minutes. Runs for the lifetime of the host (tied to App.OnStartup/OnExit).
+/// Scans all stored credentials on startup and every minute after, refreshing any token expiring
+/// within 10 minutes. Runs for the lifetime of the host (tied to App.OnStartup/OnExit).
 /// </summary>
 public sealed class TokenRefreshService(
     ConfigStoreCache configStoreCache,
@@ -36,7 +36,13 @@ public sealed class TokenRefreshService(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         using var timer = new PeriodicTimer(TickInterval);
-        while (await timer.WaitForNextTickAsync(stoppingToken))
+
+        // Scan first, wait second. WaitForNextTickAsync sleeps a full interval before its first
+        // tick, and this service does not start until a vault has been unlocked — so the tokens
+        // that expired while the app was closed, which is most of the ones that ever expire, spent
+        // that first minute on screen in red. The user is looking at the window right then, and a
+        // failure the app is about to repair by itself reads as one it cannot.
+        do
         {
             try
             {
@@ -57,6 +63,7 @@ public sealed class TokenRefreshService(
                 activityLog.LogError("REFRESH tick failed — will retry next minute", ex);
             }
         }
+        while (await timer.WaitForNextTickAsync(stoppingToken));
     }
 
     /// <summary>One pass of the loop. Internal so its vault gate can be tested without a 60s wait.</summary>
