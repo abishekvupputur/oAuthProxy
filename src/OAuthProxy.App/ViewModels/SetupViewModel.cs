@@ -71,7 +71,7 @@ public sealed partial class SetupViewModel(
             var status = await Task.Run(() => gate.EvaluateAsync());
             Apply(status);
 
-            if (status.IsReady) await RaiseReadyAsync();
+            if (status.IsReady) await StartAsync("Loading your configuration from the vault…");
         }
         catch (Exception ex)
         {
@@ -89,32 +89,65 @@ public sealed partial class SetupViewModel(
     [RelayCommand]
     private async Task ChooseAsync(ManagerCardViewModel card)
     {
-        // Asked on every launch when both managers qualify, by design: the choice is the one piece
-        // of state that cannot live in the vault, and this app deliberately stores nothing locally.
-        Apply(gate.SelectBackend(card.Kind));
-        activityLog.Log($"STARTUP using {card.Name} for this session");
+        if (IsBusy) return;
 
-        await RaiseReadyAsync();
+        IsBusy = true;
+
+        try
+        {
+            // Asked on every launch when both managers qualify, by design: the choice is the one
+            // piece of state that cannot live in the vault, and this app deliberately stores
+            // nothing locally.
+            Apply(gate.SelectBackend(card.Kind));
+            activityLog.Log($"STARTUP using {card.Name} for this session");
+
+            await StartAsync($"Loading the vault from {card.Name}…");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
     }
 
+    /// <summary>Creates a vault with the name the user chose, and starts using it.</summary>
     [RelayCommand]
     private async Task CreateVaultAsync(ManagerCardViewModel card)
     {
         if (IsBusy) return;
 
+        var name = card.NewVaultName;
+
+        // Caught here as well as in the provider so the answer is instant and says what to do
+        // instead: a second vault of the same name is the one thing this page must not produce —
+        // two vaults called threeEyedRaven are indistinguishable in the picker, and the app would
+        // pick between them by list order.
+        if (card.Vaults.Contains(name, StringComparer.OrdinalIgnoreCase))
+        {
+            StatusMessage = card.Profile.Trim().Length == 0
+                ? $"'{name}' already exists in {card.Name}. Choose it above, or name a profile to make a separate one."
+                : $"'{name}' already exists in {card.Name}. Choose it above, or use a different profile name.";
+            return;
+        }
+
         IsBusy = true;
-        StatusMessage = $"Creating the '{VaultConstants.VaultName}' vault in {card.Name}…";
+        StatusMessage = $"Creating the '{name}' vault in {card.Name}…";
 
         try
         {
-            var status = await Task.Run(() => gate.CreateVaultAsync(card.Kind));
+            var status = await Task.Run(() => gate.CreateVaultAsync(card.Kind, name));
             Apply(status);
 
-            if (status.IsReady) await RaiseReadyAsync();
+            if (status.IsReady) await StartAsync($"Loading the '{name}' vault…");
+        }
+        catch (VaultAdoptionException ex)
+        {
+            // A name that is already taken, or blank. The user's answer is wrong rather than
+            // broken, so the name stays in the box to be corrected.
+            StatusMessage = ex.Message;
         }
         catch (Exception ex)
         {
-            activityLog.LogError($"Could not create the {VaultConstants.VaultName} vault", ex);
+            activityLog.LogError($"Could not create the '{name}' vault", ex);
             StatusMessage = ex.Message;
         }
         finally
@@ -133,10 +166,10 @@ public sealed partial class SetupViewModel(
     {
         if (IsBusy) return;
 
-        var name = card.ExistingVaultName.Trim();
+        var name = card.SelectedVaultName?.Trim() ?? "";
         if (name.Length == 0)
         {
-            StatusMessage = "Type the name of the vault OAuthProxy should use.";
+            StatusMessage = "Choose a vault from the list first.";
             return;
         }
 
@@ -148,7 +181,7 @@ public sealed partial class SetupViewModel(
             var status = await Task.Run(() => gate.UseExistingVaultAsync(card.Kind, name));
             Apply(status);
 
-            if (status.IsReady) await RaiseReadyAsync();
+            if (status.IsReady) await StartAsync($"Loading the '{name}' vault…");
         }
         catch (VaultAdoptionException ex)
         {
@@ -167,6 +200,36 @@ public sealed partial class SetupViewModel(
         }
     }
 
+    /// <summary>
+    /// Opens one of the vaults that already holds a configuration. Offered when more than one
+    /// does — separate profiles, where guessing would open one and overwrite the other.
+    /// </summary>
+    [RelayCommand]
+    private async Task UseNamedVaultAsync(VaultChoiceViewModel choice)
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+        StatusMessage = $"Opening the '{choice.Name}' vault…";
+
+        try
+        {
+            var status = await Task.Run(() => gate.UseExistingVaultAsync(choice.Kind, choice.Name));
+            Apply(status);
+
+            if (status.IsReady) await StartAsync($"Loading the '{choice.Name}' vault…");
+        }
+        catch (Exception ex)
+        {
+            activityLog.LogError($"Could not open the '{choice.Name}' vault", ex);
+            StatusMessage = ex.Message;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
     [RelayCommand]
     private async Task RetryPortAsync()
     {
@@ -175,6 +238,11 @@ public sealed partial class SetupViewModel(
             StatusMessage = "Enter a port between 1 and 65535.";
             return;
         }
+
+        if (IsBusy) return;
+
+        IsBusy = true;
+        StatusMessage = $"Saving port {port} to the vault…";
 
         // Written straight to the vault: the proxy is not running, so there is no other way to
         // change it — which is precisely why the old "edit the file in %APPDATA%" advice had to go.
@@ -186,12 +254,16 @@ public sealed partial class SetupViewModel(
             await vault.SaveAsync(store);
 
             HasPortConflict = false;
-            await RaiseReadyAsync();
+            await StartAsync($"Starting the proxy on port {port}…");
         }
         catch (Exception ex)
         {
             activityLog.LogError("Could not save the new listen port", ex);
             StatusMessage = ex.Message;
+        }
+        finally
+        {
+            IsBusy = false;
         }
     }
 
@@ -219,9 +291,18 @@ public sealed partial class SetupViewModel(
         }
     }
 
-    private async Task RaiseReadyAsync()
+    /// <summary>
+    /// Hands off to the host, which reads the whole vault and starts the proxy — a CLI round trip
+    /// per item, so seconds rather than an instant. The message says so: <see cref="Apply"/> has
+    /// just written "Ready.", which would otherwise be the last thing on screen while the window
+    /// sat there looking finished and doing nothing.
+    /// </summary>
+    private async Task StartAsync(string workingMessage)
     {
-        if (ReadyToStart is { } handler) await handler();
+        if (ReadyToStart is not { } handler) return;
+
+        StatusMessage = workingMessage;
+        await handler();
     }
 
     private void Apply(VaultGateStatus status)
@@ -239,6 +320,8 @@ public sealed partial class SetupViewModel(
                 "Disconnected. Choose a password manager to connect to it again.",
             { NeedsAChoice: true } => "Both password managers are set up. Choose which one OAuthProxy should use.",
             { IsReady: true } => "Ready.",
+            _ when status.Statuses.Any(s => s.Availability == VaultAvailability.VaultChoiceNeeded) =>
+                "More than one vault holds a configuration. Choose which one to open.",
             _ when status.Statuses.Any(s => s.CanCreateVault) =>
                 $"Almost there — create the '{VaultConstants.VaultName}' vault to finish.",
             _ when status.Statuses.All(s => s.Availability == VaultAvailability.NotInstalled) =>

@@ -51,6 +51,23 @@
                 </StackPanel>
             </Border>
 
+            <!--
+                Separate from the unsaved-changes banner above: this one reports what a load
+                changed by itself — a credential dropped because its item was deleted in the
+                password manager — which the user has to be told even though nothing is pending.
+            -->
+            <Border DockPanel.Dock="Top" Background="#2A2A3A"
+                    BorderBrush="{StaticResource BorderBrush0}" BorderThickness="0,0,0,1" Padding="12,8"
+                    DataContext="{Binding VaultStatus}"
+                    Visibility="{Binding HasNotice, Converter={StaticResource BoolToVisibilityConverter}}">
+                <DockPanel>
+                    <Button Content="Dismiss" DockPanel.Dock="Right" VerticalAlignment="Top" Margin="8,0,0,0"
+                            Style="{StaticResource GhostButtonStyle}" Command="{Binding DismissNoticeCommand}"/>
+                    <TextBlock Text="{Binding Notice}" TextWrapping="Wrap"
+                               Foreground="{StaticResource TextBrush}"/>
+                </DockPanel>
+            </Border>
+
             <TabControl x:Name="TabsControl" SelectionChanged="TabControl_SelectionChanged">
             <TabItem Header="Credentials">
                 <views:CredentialsView x:Name="CredentialsViewControl"/>

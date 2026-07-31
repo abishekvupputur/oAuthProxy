@@ -129,7 +129,7 @@ public class VaultGateServiceTests : IDisposable
         var before = await gate.EvaluateAsync();
         Assert.True(before.For(VaultBackendKind.OnePassword)!.CanCreateVault);
 
-        var after = await gate.CreateVaultAsync(VaultBackendKind.OnePassword);
+        var after = await gate.CreateVaultAsync(VaultBackendKind.OnePassword, VaultConstants.VaultName);
 
         Assert.True(after.IsReady);
         Assert.Equal(VaultBackendKind.OnePassword, after.Selected);

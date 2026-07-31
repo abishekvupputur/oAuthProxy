@@ -69,15 +69,42 @@ public sealed class FakeProtonPass
         return shareId;
     }
 
-    /// <summary>Puts one of the user's own entries in a vault, so it is not empty.</summary>
-    public void AddItem(string shareId, string title, string password = "hunter2") =>
-        ItemsIn(shareId)[$"-item{_nextId++}_x"] = new JsonObject
+    /// <summary>
+    /// Puts one of the user's own entries in a vault, so it is not empty.
+    /// </summary>
+    /// <param name="state">
+    /// "Trashed" for an item the user has deleted. Proton Pass keeps returning those from
+    /// <c>item list</c>, which is why every reader has to look at this field.
+    /// </param>
+    public string AddItem(string shareId, string title, string password = "hunter2", string state = "Active")
+    {
+        var id = $"-item{_nextId++}_x";
+
+        ItemsIn(shareId)[id] = new JsonObject
         {
             ["title"] = title,
             ["username"] = "",
             ["password"] = password,
             ["__type"] = "login",
+            ["__state"] = state,
         };
+
+        return id;
+    }
+
+    /// <summary>The id of the first item in threeEyedRaven whose title matches.</summary>
+    public string? ItemIdOf(Func<string, bool> titleMatches) =>
+        ItemsIn(ShareId).FirstOrDefault(entry =>
+            titleMatches(entry.Value["title"]?.GetValue<string>() ?? "")).Key;
+
+    /// <summary>Moves an item to the trash, the way deleting it in the Proton Pass UI does.</summary>
+    public void Trash(string itemId)
+    {
+        foreach (var items in _byShare.Values)
+        {
+            if (items.TryGetValue(itemId, out var item)) item["__state"] = "Trashed";
+        }
+    }
 
     public IReadOnlyCollection<JsonObject> ItemsInVault(string shareId) => ItemsIn(shareId).Values;
 
@@ -100,7 +127,7 @@ public sealed class FakeProtonPass
         {
             ["--version"] => Ok(Version),
             ["vault", "list", ..] => Ok(VaultListJson()),
-            ["vault", "create", ..] => CreateVault(),
+            ["vault", "create", ..] => CreateVault(ValueOf(args, "--name")),
             ["item", "list", ..] => Ok(ItemListJson(ShareOf(args), HasFlag(args, "--show-secrets"))),
             ["item", "create", var type, ..] => CreateItem(runner, type, ShareOf(args)),
             ["item", "delete", ..] => DeleteItem(args),
@@ -144,9 +171,20 @@ public sealed class FakeProtonPass
     /// <summary>The vault a call names, defaulting to threeEyedRaven for calls that name none.</summary>
     private string ShareOf(IReadOnlyList<string> args) => ValueOf(args, "--share-id") ?? ShareId;
 
-    private CliResult CreateVault()
+    /// <summary>
+    /// Creates the vault the caller named, which is the whole point of naming it. threeEyedRaven is
+    /// only the default, and modelling it as the only vault that can be created would let a bug
+    /// that ignores the name pass every test.
+    /// </summary>
+    private CliResult CreateVault(string? name)
     {
-        VaultExists = true;
+        if (name is null || name == VaultConstants.VaultName)
+        {
+            VaultExists = true;
+            return Ok("");
+        }
+
+        AddVault(name);
         return Ok("");
     }
 
@@ -195,7 +233,7 @@ public sealed class FakeProtonPass
                 {
                     ["id"] = id,
                     ["share_id"] = shareId,
-                    ["state"] = "Active",
+                    ["state"] = StateOf(template),
                     ["title"] = title,
                     ["item_type"] = template["__type"]?.GetValue<string>(),
                 });
@@ -207,13 +245,18 @@ public sealed class FakeProtonPass
             {
                 ["id"] = id,
                 ["share_id"] = shareId,
-                ["state"] = "Active",
+                // Real pass-cli 2.2.3 reports state at the top level in both modes — checked
+                // against the binary, because filtering the wrong shape would hide every item.
+                ["state"] = StateOf(template),
                 ["content"] = BuildContent(template, title),
             });
         }
 
         return new JsonObject { ["items"] = array }.ToJsonString();
     }
+
+    private static string StateOf(JsonObject template) =>
+        template["__state"]?.GetValue<string>() ?? "Active";
 
     private JsonObject BuildContent(JsonObject template, string title)
     {

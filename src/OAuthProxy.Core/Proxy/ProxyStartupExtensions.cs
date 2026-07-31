@@ -41,6 +41,8 @@ public static class ProxyStartupExtensions
         services.AddSingleton<VaultSyncQueue>();
         services.AddHostedService(sp => sp.GetRequiredService<VaultSyncQueue>());
 
+        services.AddSingleton<VaultIntegrityService>();
+
         services.AddSingleton<GoogleOAuthService>();
         services.AddSingleton<OAuth2Service>();
         services.AddSingleton<AccessTokenProvider>();

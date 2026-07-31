@@ -344,16 +344,28 @@ public class DeferredSyncTests : IDisposable
 
         public string? LastLoadWarning => _inner.LastLoadWarning;
 
+        public IReadOnlyList<string> LastLoadRemovals => _inner.LastLoadRemovals;
+
         public Task<VaultStatus> ProbeAsync(CancellationToken ct = default) =>
             Task.FromResult(new VaultStatus(Kind,
                 IsLocked ? VaultAvailability.NotSignedIn : VaultAvailability.Ready, VaultId: "switchable"));
 
-        public Task EnsureVaultAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public Task CreateVaultAsync(string vaultName, CancellationToken ct = default) =>
+            _inner.CreateVaultAsync(vaultName, ct);
 
         public Task UseExistingVaultAsync(string vaultName, CancellationToken ct = default) =>
             _inner.UseExistingVaultAsync(vaultName, ct);
 
         public void Forget() => _inner.Forget();
+
+        public Task RewriteAllAsync(ConfigStore store, CancellationToken ct = default) =>
+            SaveAsync(store, ct);
+
+        public Task<IReadOnlyList<VaultItemEntry>> ListLiveItemsAsync(CancellationToken ct = default) =>
+            IsLocked ? throw new VaultLockedException(Kind) : _inner.ListLiveItemsAsync(ct);
+
+        public Task DeleteItemAsync(string itemId, CancellationToken ct = default) =>
+            IsLocked ? throw new VaultLockedException(Kind) : _inner.DeleteItemAsync(itemId, ct);
 
         public Task<ConfigStore> LoadAsync(CancellationToken ct = default) =>
             IsLocked ? throw new VaultLockedException(Kind) : _inner.LoadAsync(ct);

@@ -35,11 +35,19 @@ public sealed class OnePasswordVaultProvider(
     private string _vaultName = VaultConstants.VaultName;
     private long _loadedRevision;
 
+    /// <summary>
+    /// Set by <see cref="Forget"/>, cleared when the user names a vault again. Without it a probe
+    /// after disconnecting would rediscover the vault the user has just left and reattach to it.
+    /// </summary>
+    private bool _discoveryDisabled;
+
     public VaultBackendKind Kind => VaultBackendKind.OnePassword;
 
     public string VaultName => _vaultName;
 
     public string? LastLoadWarning { get; private set; }
+
+    public IReadOnlyList<string> LastLoadRemovals { get; private set; } = [];
 
     /// <summary>
     /// Optional service-account token, for a machine that should never show an unlock prompt.
@@ -98,47 +106,90 @@ public sealed class OnePasswordVaultProvider(
         var vaults = ParseVaults(vaultList.StdOut);
         _vaultId = vaults.FirstOrDefault(v => v.Name == _vaultName)?.VaultId;
 
-        if (_vaultId is null && await FindConfiguredVaultAsync(vaults, ct) is { } adopted)
-        {
-            // A vault the user pointed OAuthProxy at is not remembered on this PC — nothing about
-            // this app is — so it is found the same way the backend itself is: whichever vault
-            // actually holds the configuration is the one that was being used. Only reached when
-            // threeEyedRaven is absent, so the ordinary path is still one `vault list`.
-            _vaultName = adopted.Name;
-            _vaultId = adopted.VaultId;
+        List<OnePasswordVault> configured = [];
 
-            activityLog.Log($"VAULT 1Password — using the existing '{_vaultName}' vault, "
-                            + "which holds the OAuthProxy configuration");
+        // Skipped once the user has disconnected. Rediscovery is what makes a vault stick across
+        // restarts, and straight after a disconnect it would silently reattach the very vault they
+        // just stepped away from — leaving them no way to pick a different one.
+        if (_vaultId is null && !_discoveryDisabled)
+        {
+            configured = await FindConfiguredVaultsAsync(vaults, ct);
+
+            if (configured.Count == 1)
+            {
+                // A vault the user pointed OAuthProxy at is not remembered on this PC — nothing
+                // about this app is — so it is found the same way the backend itself is: whichever
+                // vault actually holds the configuration is the one that was being used.
+                _vaultName = configured[0].Name;
+                _vaultId = configured[0].VaultId;
+
+                activityLog.Log($"VAULT 1Password — using the existing '{_vaultName}' vault, "
+                                + "which holds the OAuthProxy configuration");
+            }
         }
 
         return new VaultStatus(
             Kind,
-            _vaultId is null ? VaultAvailability.VaultMissing : VaultAvailability.Ready,
+            Resolve(),
             _exePath,
             version?.ToString(),
             _vaultId,
-            VaultName: _vaultName);
+            VaultName: _vaultName,
+            Vaults: [.. vaults.Select(v => v.Name)],
+            ConfiguredVaults: [.. configured.Select(v => v.Name)],
+            AdoptableVaults: await FindAdoptableVaultsAsync(vaults, configured, ct));
+
+        // More than one configured vault is separate profiles, and opening one would mean
+        // overwriting the other's note on the next save. That is a question for the user.
+        VaultAvailability Resolve() =>
+            _vaultId is not null ? VaultAvailability.Ready
+            : configured.Count > 1 ? VaultAvailability.VaultChoiceNeeded
+            : VaultAvailability.VaultMissing;
     }
 
-    public async Task EnsureVaultAsync(CancellationToken ct = default)
+    public async Task CreateVaultAsync(string vaultName, CancellationToken ct = default)
     {
-        if (_vaultId is not null) return;
+        var name = vaultName.Trim();
+        if (name.Length == 0) throw VaultAdoption.NameRequired();
+
+        RequireExe();
+
+        var listed = await RunAsync(["vault", "list", "--format", "json"], ct: ct);
+        if (!listed.Succeeded) throw new VaultLockedException(Kind, listed.FirstErrorLine());
+
+        // Refused rather than silently reused: "create" and "take over what is already there" are
+        // different intentions, and the second one has rules — see VaultAdoption.
+        if (ParseVaults(listed.StdOut).Any(v => string.Equals(v.Name, name, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new VaultAdoptionException(
+                $"There is already a vault called '{name}'. Choose it under \"use a vault you already have\" "
+                + "instead, or pick a different name.");
+        }
 
         var result = await RunAsync(
-            ["vault", "create", _vaultName, "--description", VaultConstants.VaultDescription,
-             "--format", "json"],
+            ["vault", "create", name, "--description", VaultConstants.VaultDescription, "--format", "json"],
             timeout: CliRunner.WriteTimeout, ct: ct);
 
         if (!result.Succeeded)
         {
             throw new VaultSaveException(
-                $"Could not create the '{_vaultName}' vault: {result.FirstErrorLine()}",
+                $"Could not create the '{name}' vault: {result.FirstErrorLine()}",
                 partiallyApplied: false);
         }
 
         _vaultId = ReadString(JsonNode.Parse(result.StdOut), "id")
                    ?? throw new VaultSaveException(
                        "1Password created the vault but did not report its id.", partiallyApplied: false);
+
+        _vaultName = name;
+        _loadedRevision = 0;
+        _discoveryDisabled = false;
+
+        // Stamped straight away: the config item is what identifies this vault as OAuthProxy's on
+        // the next launch, and the name the user just chose is not written down anywhere on this PC.
+        await SaveAsync(new ConfigStore(), ct);
+
+        activityLog.Log($"VAULT 1Password — created the '{_vaultName}' vault");
     }
 
     /// <summary>
@@ -150,11 +201,7 @@ public sealed class OnePasswordVaultProvider(
         var name = vaultName.Trim();
         if (name.Length == 0) throw VaultAdoption.NameRequired();
 
-        _exePath ??= exePathOverride ?? VaultProbe.FindOnePassword();
-        if (_exePath is null || !File.Exists(_exePath))
-        {
-            throw new VaultCliException("The 1Password CLI is not installed.");
-        }
+        RequireExe();
 
         var listed = await RunAsync(["vault", "list", "--format", "json"], ct: ct);
         if (!listed.Succeeded) throw new VaultLockedException(Kind, listed.FirstErrorLine());
@@ -175,11 +222,12 @@ public sealed class OnePasswordVaultProvider(
             note = (await GetItemAsync(noteSummary.ItemId, match.VaultId, ct))?.Field(VaultFields.NoteContent) ?? "";
         }
 
-        var outcome = VaultAdoption.Judge(match.Name, items.Count, note);
+        var outcome = VaultAdoption.Judge(match.Name, [.. items.Select(item => item.Title)], note);
 
         _vaultName = match.Name;
         _vaultId = match.VaultId;
         _loadedRevision = 0;
+        _discoveryDisabled = false;
         LastLoadWarning = null;
 
         if (outcome == VaultAdoptionOutcome.Empty)
@@ -198,16 +246,22 @@ public sealed class OnePasswordVaultProvider(
         _vaultId = null;
         _vaultName = VaultConstants.VaultName;
         _loadedRevision = 0;
+        LastLoadRemovals = [];
         LastLoadWarning = null;
+
+        // Until the user names a vault again. Otherwise the next probe finds the vault holding the
+        // configuration — the one they just disconnected from — and quietly picks it up again.
+        _discoveryDisabled = true;
     }
 
     public async Task<ConfigStore> LoadAsync(CancellationToken ct = default)
     {
         LastLoadWarning = null;
+        LastLoadRemovals = [];
 
         await RequireVaultAsync(ct);
 
-        var items = await ListOwnedItemsAsync(ct);
+        var items = await ListOwnedSummariesAsync(ct);
 
         var noteSummary = items.FirstOrDefault(i => i.Title == VaultItemNaming.ConfigTitle);
         if (noteSummary is null)
@@ -241,37 +295,72 @@ public sealed class OnePasswordVaultProvider(
         _loadedRevision = document.Revision;
 
         var secrets = await ResolveSecretsAsync(document.Index, items, ct);
-        var warnings = new List<string>();
-        var store = VaultMapper.ComposeStore(document, secrets, warnings);
+        var report = new VaultLoadReport();
+        var store = VaultMapper.ComposeStore(document, secrets, report);
 
-        if (warnings.Count > 0)
+        LastLoadRemovals = report.Removals;
+
+        if (report.HasAnything)
         {
-            LastLoadWarning = string.Join(" ", warnings.Prepend(LastLoadWarning).Where(w => !string.IsNullOrEmpty(w)));
+            LastLoadWarning = string.Join(" ", new[] { LastLoadWarning, report.Message }
+                .Where(w => !string.IsNullOrEmpty(w)));
         }
 
         return store;
+    }
+
+    /// <summary>
+    /// Already a full rewrite: every edit sends the whole template, including empty values for
+    /// fields that should go away, so there is nothing for a forced version to do differently.
+    /// </summary>
+    public Task RewriteAllAsync(ConfigStore store, CancellationToken ct = default) => SaveAsync(store, ct);
+
+    /// <summary>Every live item in the vault, ours and the user's. No item contents are fetched.</summary>
+    public async Task<IReadOnlyList<VaultItemEntry>> ListLiveItemsAsync(CancellationToken ct = default)
+    {
+        await RequireVaultAsync(ct);
+
+        var items = await ListItemsAsync(_vaultId!, _vaultName, ct);
+
+        return [.. items.Select(item => VaultItemEntry.Classify(item.ItemId, item.Title))];
+    }
+
+    public async Task DeleteItemAsync(string itemId, CancellationToken ct = default)
+    {
+        await RequireVaultAsync(ct);
+
+        var result = await RunAsync(
+            ["item", "delete", itemId, "--vault", _vaultId!], timeout: CliRunner.WriteTimeout, ct: ct);
+
+        if (!result.Succeeded)
+        {
+            throw new VaultSaveException(
+                $"1Password would not delete the item: {result.FirstErrorLine()}", partiallyApplied: false);
+        }
     }
 
     public async Task SaveAsync(ConfigStore store, CancellationToken ct = default)
     {
         await RequireVaultAsync(ct);
 
-        var items = await ListOwnedItemsAsync(ct);
+        var items = await ListOwnedSummariesAsync(ct);
         var noteSummary = items.FirstOrDefault(i => i.Title == VaultItemNaming.ConfigTitle);
 
-        var index = await ReadIndexAsync(noteSummary, items, ct);
+        // Two indexes, not one. The previous is what finds the item a record already has; the new
+        // one is what the note gets, and it holds only what this save actually wrote. Carrying the
+        // old entries forward left the note pointing at items that had been deleted — a dangling
+        // reference the design is supposed to make impossible, and a wasted fetch on every load.
+        var previousIndex = await ReadIndexAsync(noteSummary, items, ct);
+        var index = new VaultIndex();
 
         var written = 0;
-        var secretItems = VaultMapper.BuildSecretItems(store, index);
+        var secretItems = VaultMapper.BuildSecretItems(store, previousIndex);
 
         foreach (var item in secretItems)
         {
             ct.ThrowIfCancellationRequested();
 
-            // Resolve against the live listing as well as the index: an item recreated by hand in
-            // 1Password has a new id the note has never heard of, and creating a second one would
-            // leave two entries claiming the same record.
-            var existingId = item.Spec.ItemId ?? FindByRecord(items, item.Role, item.RecordId);
+            var existingId = ResolveExistingItem(items, item);
 
             try
             {
@@ -362,7 +451,7 @@ public sealed class OnePasswordVaultProvider(
     /// Items in the active vault that this app owns. Everything else in the vault is the user's and
     /// is never read, never written, and — crucially — never a candidate for deletion.
     /// </summary>
-    private async Task<List<VaultItemSummary>> ListOwnedItemsAsync(CancellationToken ct)
+    private async Task<List<VaultItemSummary>> ListOwnedSummariesAsync(CancellationToken ct)
     {
         var items = await ListItemsAsync(_vaultId!, _vaultName, ct);
         return items.Where(i => VaultItemNaming.IsOwned(i.Title)).ToList();
@@ -387,6 +476,11 @@ public sealed class OnePasswordVaultProvider(
         {
             var id = ReadString(node, "id");
             var title = ReadString(node, "title");
+
+            // An archived item is one the user has put away. Reading it would make a vault they
+            // had cleared look full and a credential they had removed look present — the same
+            // trap Proton Pass's trash sets. Only items with no state at all are live.
+            if (ReadString(node, "state") is { Length: > 0 }) continue;
 
             if (id is not null && title is not null) items.Add(new VaultItemSummary(id, title));
         }
@@ -514,12 +608,20 @@ public sealed class OnePasswordVaultProvider(
         return field;
     }
 
+    /// <summary>
+    /// The category as <c>op</c> writes it in a template — the enum code, not the display name.
+    ///
+    /// Checked against <c>op item template get</c> on 2.34.1, which emits "SECURE_NOTE", "LOGIN"
+    /// and "PASSWORD". Sending the display names ("Secure Note") makes op read no category at all
+    /// and refuse the item with <c>"" is not a recognized item category</c> — listing the display
+    /// names in the error, which sends you looking in exactly the wrong direction.
+    /// </summary>
     private static string CategoryName(VaultItemCategory category) => category switch
     {
-        VaultItemCategory.SecureNote => "Secure Note",
-        VaultItemCategory.Login => "Login",
-        VaultItemCategory.Password => "Password",
-        _ => "Secure Note",
+        VaultItemCategory.SecureNote => "SECURE_NOTE",
+        VaultItemCategory.Login => "LOGIN",
+        VaultItemCategory.Password => "PASSWORD",
+        _ => "SECURE_NOTE",
     };
 
     private async Task<VaultIndex> ReadIndexAsync(
@@ -574,6 +676,29 @@ public sealed class OnePasswordVaultProvider(
         return resolved;
     }
 
+    /// <summary>
+    /// The item this record should be written over, or null to create a fresh one.
+    ///
+    /// The index is checked <em>against the live listing</em> rather than trusted. An item the note
+    /// points at can be gone — deleted in 1Password's own UI, or by the integrity check — and
+    /// editing an id that no longer exists fails the whole save with "isn't an item". That made
+    /// putting a missing item back impossible: the one operation whose entire job is to recreate
+    /// it was the one that could not.
+    ///
+    /// Falling back to the record id in the title covers the other direction: an item recreated by
+    /// hand has an id the note has never seen, and creating a second one would leave two entries
+    /// claiming the same record.
+    /// </summary>
+    private static string? ResolveExistingItem(List<VaultItemSummary> items, VaultSecretItem item)
+    {
+        if (item.Spec.ItemId is { } indexed && items.Any(summary => summary.ItemId == indexed))
+        {
+            return indexed;
+        }
+
+        return FindByRecord(items, item.Role, item.RecordId);
+    }
+
     private static string? FindByRecord(List<VaultItemSummary> items, VaultItemRole role, Guid recordId) =>
         items.FirstOrDefault(i =>
             VaultItemNaming.TryParse(i.Title, out var itemRole, out var id)
@@ -595,19 +720,24 @@ public sealed class OnePasswordVaultProvider(
     }
 
     /// <summary>
-    /// The vault holding an OAuthProxy configuration, when the expected one is not there. Reads
+    /// Every vault holding an OAuthProxy configuration, when the expected one is not there. Reads
     /// item titles only — no item contents — because all that is being asked is which vault this
     /// app was last pointed at, and the rest of the user's vaults are none of its business.
+    ///
+    /// All of them rather than the first: two configured vaults is a user keeping separate
+    /// profiles, and picking one at random would open one and overwrite the other on the next save.
     /// </summary>
-    private async Task<OnePasswordVault?> FindConfiguredVaultAsync(
+    private async Task<List<OnePasswordVault>> FindConfiguredVaultsAsync(
         List<OnePasswordVault> vaults, CancellationToken ct)
     {
+        var configured = new List<OnePasswordVault>();
+
         foreach (var vault in vaults)
         {
             try
             {
                 var items = await ListItemsAsync(vault.VaultId, vault.Name, ct);
-                if (items.Any(i => i.Title == VaultItemNaming.ConfigTitle)) return vault;
+                if (items.Any(i => i.Title == VaultItemNaming.ConfigTitle)) configured.Add(vault);
             }
             catch (Exception ex) when (ex is VaultCliException or JsonException)
             {
@@ -617,7 +747,46 @@ public sealed class OnePasswordVaultProvider(
             }
         }
 
-        return null;
+        return configured;
+    }
+
+    /// <summary>
+    /// The vaults the setup page may offer: named after threeEyedRaven, and either empty or
+    /// already OAuthProxy's. Only the name-matching ones are looked inside — every other vault in
+    /// the account is none of this app's business, and listing them all is both the slow answer
+    /// and the one that makes a user wonder what else it is reading.
+    /// </summary>
+    /// <param name="configured">
+    /// Vaults the discovery pass has already been through, so their items are not listed twice.
+    /// Holding a configuration is precisely what makes a vault adoptable.
+    /// </param>
+    private async Task<List<string>> FindAdoptableVaultsAsync(
+        List<OnePasswordVault> vaults, List<OnePasswordVault> configured, CancellationToken ct)
+    {
+        var adoptable = new List<string>();
+
+        foreach (var vault in vaults.Where(v => VaultProfile.Matches(v.Name)))
+        {
+            if (configured.Any(c => c.VaultId == vault.VaultId))
+            {
+                adoptable.Add(vault.Name);
+                continue;
+            }
+
+            try
+            {
+                var items = await ListItemsAsync(vault.VaultId, vault.Name, ct);
+                if (VaultAdoption.LooksAdoptable([.. items.Select(i => i.Title)])) adoptable.Add(vault.Name);
+            }
+            catch (Exception ex) when (ex is VaultCliException or JsonException)
+            {
+                // A vault this session cannot list cannot be offered either — it would be refused
+                // for the same reason the moment it was picked. The rest still get an answer.
+                activityLog.Log($"VAULT could not look inside the '{vault.Name}' vault: {ex.Message}");
+            }
+        }
+
+        return adoptable;
     }
 
     /// <summary>One vault from <c>vault list</c>.</summary>
@@ -637,6 +806,20 @@ public sealed class OnePasswordVaultProvider(
         }
     }
 
+    /// <summary>
+    /// Locates the binary for a call that does not go through a probe first — creating or taking
+    /// over a vault, both of which can be the first thing this provider is asked to do.
+    /// </summary>
+    private void RequireExe()
+    {
+        _exePath ??= exePathOverride ?? VaultProbe.FindOnePassword();
+
+        if (_exePath is null || !File.Exists(_exePath))
+        {
+            throw new VaultCliException("The 1Password CLI is not installed.");
+        }
+    }
+
     private async Task RequireVaultAsync(CancellationToken ct)
     {
         if (_vaultId is not null) return;
@@ -649,6 +832,9 @@ public sealed class OnePasswordVaultProvider(
             VaultAvailability.NotInstalled => new VaultCliException("The 1Password CLI is not installed."),
             VaultAvailability.VaultMissing =>
                 new VaultCliException($"The '{_vaultName}' vault does not exist yet."),
+            VaultAvailability.VaultChoiceNeeded =>
+                new VaultCliException("More than one 1Password vault holds an OAuthProxy configuration. "
+                                      + "Choose which one to use on the setup page."),
             _ => (Exception)new VaultCliException(status.Detail ?? "1Password is unavailable."),
         });
     }

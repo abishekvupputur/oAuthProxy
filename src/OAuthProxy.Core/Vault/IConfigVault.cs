@@ -28,8 +28,15 @@ public interface IConfigVault
     /// </summary>
     Task<VaultStatus> ProbeAsync(CancellationToken ct = default);
 
-    /// <summary>Creates the vault if it does not exist. No-op when it already does.</summary>
-    Task EnsureVaultAsync(CancellationToken ct = default);
+    /// <summary>
+    /// Creates a vault with the given name and starts using it.
+    ///
+    /// The name is the user's rather than fixed: threeEyedRaven is only the default this app looks
+    /// for first, and someone keeping separate profiles needs to say which one they are making. The
+    /// new vault is stamped with the config item on the way out, because that item is what
+    /// identifies it on the next launch — nothing about this app is stored on the PC.
+    /// </summary>
+    Task CreateVaultAsync(string vaultName, CancellationToken ct = default);
 
     /// <summary>
     /// Uses a vault the user already has, instead of creating threeEyedRaven. Accepts only a vault
@@ -56,10 +63,47 @@ public interface IConfigVault
     Task SaveAsync(ConfigStore store, CancellationToken ct = default);
 
     /// <summary>
+    /// Writes every item and the config note again, whether or not anything changed.
+    ///
+    /// A normal save skips items whose secret has not moved, which is what keeps a port change to
+    /// one CLI call. That optimisation is also what leaves a vault edited by hand out of step with
+    /// the app, so this is the way back: what is in memory becomes what is in the vault.
+    /// </summary>
+    Task RewriteAllAsync(ConfigStore store, CancellationToken ct = default);
+
+    /// <summary>
+    /// Every live item in the vault, for the integrity check — this app's and the user's alike,
+    /// each flagged with which it is. Titles only: no secrets are fetched, and items the password
+    /// manager considers deleted are not returned.
+    ///
+    /// Deliberately unfiltered. Saving looks only at items titled as this app's, which is what
+    /// keeps the user's entries out of reach of delete reconciliation — but it also means an item
+    /// of ours whose title was edited becomes invisible to every save. Looking has to see more
+    /// than saving does, or that item can never be reported.
+    /// </summary>
+    Task<IReadOnlyList<VaultItemEntry>> ListLiveItemsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Deletes one item the user has asked to be rid of. Unlike the tolerant delete inside a save,
+    /// this throws when it fails: it is the whole point of the action rather than housekeeping.
+    /// </summary>
+    Task DeleteItemAsync(string itemId, CancellationToken ct = default);
+
+    /// <summary>
     /// Set when the last load succeeded but came back incomplete — typically a record whose secret
     /// item is missing, so it loads without its client secret or key. Null when the last load was
     /// clean. Surfaced at startup rather than swallowed, because the alternative is a credential
     /// that silently stops working with nothing anywhere to explain it.
     /// </summary>
     string? LastLoadWarning { get; }
+
+    /// <summary>
+    /// What the last load dropped to match the vault — a credential whose item was deleted in the
+    /// password manager's own UI, say. Empty when the load changed nothing.
+    ///
+    /// Non-empty means the store no longer matches the note it came from, so the caller must write
+    /// it back. Without that, the note keeps its record of a credential that no longer exists and
+    /// every launch resurrects the same ghost.
+    /// </summary>
+    IReadOnlyList<string> LastLoadRemovals { get; }
 }

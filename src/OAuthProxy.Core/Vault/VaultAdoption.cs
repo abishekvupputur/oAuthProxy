@@ -27,8 +27,16 @@ public enum VaultAdoptionOutcome
 /// </summary>
 public static class VaultAdoption
 {
-    public static VaultAdoptionOutcome Judge(string vaultName, int itemCount, string? configNote)
+    /// <param name="titles">
+    /// Every live item in the vault, this app's and the user's alike. Counted in full — a vault is
+    /// only "empty" when nothing at all is in it — and named back in the refusal, because "it has
+    /// items in it" about a vault the user believes they emptied is impossible to argue with
+    /// otherwise.
+    /// </param>
+    public static VaultAdoptionOutcome Judge(string vaultName, IReadOnlyCollection<string> titles, string? configNote)
     {
+        var itemCount = titles.Count;
+
         if (configNote is not null)
         {
             // The note is free text the user can edit in their password manager, so an unreadable
@@ -43,14 +51,30 @@ public static class VaultAdoption
 
         if (itemCount > 0)
         {
+            var examples = string.Join(", ", titles.Take(3).Select(title => $"'{Shorten(title)}'"));
+            var andMore = itemCount > 3 ? $", and {itemCount - 3} more" : "";
+
             throw new VaultAdoptionException(
-                $"'{vaultName}' already has {itemCount} item(s) in it and no OAuthProxy configuration. "
-                + "Use an empty vault, or one OAuthProxy has written to before — anything else would put your "
-                + "own entries in reach of this app's housekeeping.");
+                $"'{vaultName}' already has {itemCount} item(s) in it and no OAuthProxy configuration: "
+                + $"{examples}{andMore}. Use an empty vault, or one OAuthProxy has written to before — anything "
+                + "else would put your own entries in reach of this app's housekeeping.");
         }
 
         return VaultAdoptionOutcome.Empty;
     }
+
+    /// <summary>
+    /// The picker's version of <see cref="Judge"/>: whether a vault is worth offering at all,
+    /// decided from item titles alone.
+    ///
+    /// Offering a vault that <see cref="Judge"/> will refuse is a trap — the user picks the thing
+    /// the app showed them and is told no — so the list is filtered by the same rule that decides
+    /// the answer. Deliberately the optimistic half of it: this does not fetch the config note, so
+    /// a vault whose note has been broken still appears, and is refused on selection with the one
+    /// message that can explain why.
+    /// </summary>
+    public static bool LooksAdoptable(IReadOnlyCollection<string> titles) =>
+        titles.Count == 0 || titles.Contains(VaultItemNaming.ConfigTitle);
 
     /// <summary>The "no such vault" message, listing what does exist so a typo is obvious.</summary>
     public static VaultAdoptionException NoSuchVault(string vaultName, IEnumerable<string> available)
@@ -65,4 +89,8 @@ public static class VaultAdoption
 
     public static VaultAdoptionException NameRequired() =>
         new("Type the name of the vault OAuthProxy should use.");
+
+    /// <summary>Keeps one long title from swallowing the message.</summary>
+    private static string Shorten(string title) =>
+        title.Length <= 40 ? title : string.Concat(title.AsSpan(0, 37), "…");
 }

@@ -22,9 +22,12 @@ public sealed class GatedConfigVault(VaultGateService gate) : IConfigVault
 
     public string? LastLoadWarning => Current.LastLoadWarning;
 
+    public IReadOnlyList<string> LastLoadRemovals => Current.LastLoadRemovals;
+
     public Task<VaultStatus> ProbeAsync(CancellationToken ct = default) => Current.ProbeAsync(ct);
 
-    public Task EnsureVaultAsync(CancellationToken ct = default) => Current.EnsureVaultAsync(ct);
+    public Task CreateVaultAsync(string vaultName, CancellationToken ct = default) =>
+        Current.CreateVaultAsync(vaultName, ct);
 
     public Task UseExistingVaultAsync(string vaultName, CancellationToken ct = default) =>
         Current.UseExistingVaultAsync(vaultName, ct);
@@ -34,4 +37,13 @@ public sealed class GatedConfigVault(VaultGateService gate) : IConfigVault
     public Task<ConfigStore> LoadAsync(CancellationToken ct = default) => Current.LoadAsync(ct);
 
     public Task SaveAsync(ConfigStore store, CancellationToken ct = default) => Current.SaveAsync(store, ct);
+
+    public Task RewriteAllAsync(ConfigStore store, CancellationToken ct = default) =>
+        Current.RewriteAllAsync(store, ct);
+
+    public Task<IReadOnlyList<VaultItemEntry>> ListLiveItemsAsync(CancellationToken ct = default) =>
+        Current.ListLiveItemsAsync(ct);
+
+    public Task DeleteItemAsync(string itemId, CancellationToken ct = default) =>
+        Current.DeleteItemAsync(itemId, ct);
 }

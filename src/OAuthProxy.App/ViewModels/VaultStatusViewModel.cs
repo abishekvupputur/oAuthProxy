@@ -69,6 +69,24 @@ public sealed partial class VaultStatusViewModel : ObservableObject
     [ObservableProperty] private string _guidance = "";
 
     /// <summary>
+    /// What the last load changed on its own — a credential dropped because its vault item was
+    /// deleted. Its own banner, because it is news about the configuration rather than a state the
+    /// user has to act on, and it must not disappear the moment the sync catches up.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasNotice))]
+    private string _notice = "";
+
+    public bool HasNotice => Notice.Length > 0;
+
+    [RelayCommand]
+    private void DismissNotice()
+    {
+        _configStoreCache.DismissLoadNotice();
+        Apply();
+    }
+
+    /// <summary>
     /// Shown only while something is actually unsaved. A banner that appeared for a syncing state
     /// nobody needs to act on would train the user to ignore it.
     /// </summary>
@@ -89,7 +107,7 @@ public sealed partial class VaultStatusViewModel : ObservableObject
     /// password manager's own UI, which nothing here can be notified about.
     /// </summary>
     [RelayCommand]
-    private async Task ReloadFromVaultAsync()
+    public async Task ReloadFromVaultAsync()
     {
         await _configStoreCache.ReloadAsync();
 
@@ -123,6 +141,7 @@ public sealed partial class VaultStatusViewModel : ObservableObject
     {
         HasPendingChanges = _configStoreCache.HasPendingChanges;
         State = _syncQueue.State;
+        Notice = _configStoreCache.LastLoadNotice ?? "";
 
         var manager = VaultLockGuidance.DisplayName(_gate.Status.Selected);
 

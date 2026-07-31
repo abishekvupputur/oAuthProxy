@@ -1,4 +1,5 @@
 using OAuthProxy.Core.Models;
+using OAuthProxy.Core.Storage;
 using OAuthProxy.Core.Vault;
 
 namespace OAuthProxy.Core.Tests.Vault;
@@ -81,11 +82,11 @@ public class IndexRecoveryTests
     }
 
     [Fact]
-    public async Task ACredentialWhoseItemIsDeletedLoadsWithoutItsSecretAndSaysSo()
+    public async Task ACredentialWhoseItemIsDeletedIsRemovedAndSaysSo()
     {
-        // Deliberately not "the credential disappears". Dropping it would take the routes that
-        // reference it with it; loading it empty keeps the configuration intact and makes the fix
-        // a re-entry rather than a rebuild.
+        // The vault is the only copy, so an item deleted in the password manager's own UI is the
+        // user saying that credential is gone. Keeping the record made the app behave as though it
+        // still existed — and because the note was never rewritten, every launch raised it again.
         var (vault, store) = await SavedStoreAsync();
 
         var credentialItem = vault.Items.Single(i =>
@@ -95,13 +96,71 @@ public class IndexRecoveryTests
 
         var reloaded = await vault.LoadAsync();
 
-        Assert.Single(reloaded.Credentials);
-        Assert.Equal("", reloaded.Credentials[0].ClientSecret);
-        Assert.NotNull(vault.LastLoadWarning);
-        Assert.Contains("entered again", vault.LastLoadWarning);
+        Assert.Empty(reloaded.Credentials);
+        Assert.Contains("was removed", Assert.Single(vault.LastLoadRemovals));
 
-        // The rest of the configuration is untouched.
+        // The rest of the configuration survives, and the route that used the credential is still
+        // there — it just forwards unauthenticated now, which the message says.
         Assert.Equal(store.Routes[0].PathPrefix, reloaded.Routes[0].PathPrefix);
+        Assert.DoesNotContain(reloaded.Routes.SelectMany(r => r.Credentials),
+            c => c.CredentialId == store.Credentials[0].Id);
+    }
+
+    [Fact]
+    public async Task ACredentialThatNeverHadASecretItemIsLeftAlone()
+    {
+        // A public OAuth client has a client id and no secret, so no item was ever written for it.
+        // "No item" is not evidence of deletion, and treating it as such would delete a credential
+        // the user still has — the index is what says an item once existed.
+        var vault = InMemoryVault.Empty();
+        var store = new ConfigStore();
+        store.Credentials.Add(new CredentialRecord
+        {
+            Name = "public client",
+            ClientId = "public-id",
+            ClientSecret = "",
+            UsesPkce = true,
+        });
+
+        await vault.SaveAsync(store);
+
+        var reloaded = await vault.LoadAsync();
+
+        Assert.Single(reloaded.Credentials);
+        Assert.Empty(vault.LastLoadRemovals);
+    }
+
+    [Fact]
+    public async Task TheNoteIsRewrittenWithoutTheRemovedCredential()
+    {
+        // Removing it from the loaded store is only half the job: until the note is written back,
+        // the vault still lists a credential that is not there.
+        var (vault, _) = await SavedStoreAsync();
+
+        var credentialItem = vault.Items.Single(i =>
+            VaultItemNaming.TryParse(i.Title, out var role, out _) && role == VaultItemRole.Credential);
+
+        vault.RemoveItem(credentialItem.ItemId);
+
+        var cache = new ConfigStoreCache(vault);
+        await cache.InitializeAsync();
+
+        // The load queued itself for writing back, which is what the sync queue then drains.
+        Assert.True(cache.HasPendingChanges);
+        Assert.NotNull(cache.LastLoadNotice);
+
+        await vault.SaveAsync(cache.Current);
+
+        var note = vault.Items.Single(i => i.Title == VaultItemNaming.ConfigTitle);
+        var rewritten = VaultDocument.TryParse(note.Field(VaultFields.NoteContent)!)!;
+
+        Assert.Empty(rewritten.Store.Credentials);
+        Assert.Empty(rewritten.Index.Credentials);
+
+        // And a second load is clean — the ghost does not come back.
+        var afterRestart = await vault.LoadAsync();
+        Assert.Empty(afterRestart.Credentials);
+        Assert.Empty(vault.LastLoadRemovals);
     }
 
     [Fact]
