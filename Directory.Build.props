@@ -2,6 +2,13 @@
 
   <PropertyGroup>
     <!--
+      Kept in step with the release tag: release.yml names the published exe after the tag, and
+      this is what puts the same number in the exe's file properties. Bump it in the same commit
+      that gets tagged, or the download name and the binary disagree.
+    -->
+    <Version>3.0.0</Version>
+
+    <!--
       Writes packages.lock.json next to each project, recording the exact resolved version and
       content hash of every direct and transitive dependency. CI restores in locked mode, so a
       dependency that silently changes underneath us fails the build instead of shipping.
