@@ -60,11 +60,12 @@ Entries may reuse the same credential in different places, or use different cred
                        Visibility="{Binding HasNoRoutes, Converter={StaticResource BoolToVisibilityConverter}}"/>
 
             <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,6"
-                       Text="Select a route to copy its proxy key or change how its credential is sent."
+                       Text="Select a route to copy its proxy key or change how its credential is sent. Click it again to collapse."
                        Visibility="{Binding HasRoutes, Converter={StaticResource BoolToVisibilityConverter}}"/>
 
             <DataGrid ItemsSource="{Binding Routes}" AutoGenerateColumns="False" IsReadOnly="True" Margin="0,0,0,18"
                       RowDetailsVisibilityMode="VisibleWhenSelected"
+                      helpers:RowSelectionToggle.Enable="True"
                       Visibility="{Binding HasRoutes, Converter={StaticResource BoolToVisibilityConverter}}">
                 <!-- Editing lives in the row details rather than in cells: the grid is
                      IsReadOnly (so nested controls stay clickable), and three labelled fields

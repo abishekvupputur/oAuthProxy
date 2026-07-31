@@ -111,13 +111,14 @@ Use Include to grant a known set, Exclude to revoke a few from an otherwise trus
 
                 <StackPanel Visibility="{Binding HasFunnels, Converter={StaticResource BoolToVisibilityConverter}}">
                     <TextBlock Style="{StaticResource HintTextStyle}"
-                               Text="Select a funnel to choose which sources it pools and which of their tools it exposes."/>
+                               Text="Select a funnel to choose which sources it pools and which of their tools it exposes. Click it again to collapse."/>
                     <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,6"
                                Text="Each funnel has its own proxy key — only that key opens it, and no route's key does. Send it as the X-Proxy-Key header, or as ?proxy_key= for clients that cannot set headers. Without it the endpoint answers 403."/>
                 </StackPanel>
 
                 <DataGrid ItemsSource="{Binding Funnels}" SelectedItem="{Binding SelectedFunnel}"
                           AutoGenerateColumns="False" IsReadOnly="True" Margin="0,0,0,18"
+                          helpers:RowSelectionToggle.Enable="True"
                           Visibility="{Binding HasFunnels, Converter={StaticResource BoolToVisibilityConverter}}">
                     <DataGrid.Columns>
                         <DataGridTemplateColumn Header="LOCAL ENDPOINT" Width="*" MinWidth="260">
