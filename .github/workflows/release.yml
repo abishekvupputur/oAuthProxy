@@ -40,21 +40,21 @@ jobs:
       # so a dependency (or a transitive one) changing content under a version we already
       # shipped is caught here rather than ending up in a release binary.
       - name: Restore
-        run: dotnet restore OAuthProxy.slnx --locked-mode
+        run: dotnet restore RavensPort.slnx --locked-mode
 
       # A failing test step stops the job here (default GitHub Actions behavior) — later
       # steps simply never run, which is the "if tests succeed then build" requirement.
       - name: Test
-        run: dotnet test tests/OAuthProxy.Core.Tests/OAuthProxy.Core.Tests.csproj -c Release --no-restore --verbosity normal
+        run: dotnet test tests/RavensPort.Core.Tests/RavensPort.Core.Tests.csproj -c Release --no-restore --verbosity normal
 
-      # Publishing OAuthProxy.App triggers WPF's markup-compile step, which intermittently
+      # Publishing RavensPort.App triggers WPF's markup-compile step, which intermittently
       # races on a clean obj/ and fails with spurious CS2001/MC1000 errors (see README).
       # clean-build.bat works around this locally with a single retry; do the same here.
       - name: Publish (self-contained win-x64)
         shell: pwsh
         run: |
           $publishArgs = @(
-            'publish', 'src/OAuthProxy.App/OAuthProxy.App.csproj',
+            'publish', 'src/RavensPort.App/RavensPort.App.csproj',
             '-p:PublishProfile=win-x64-selfcontained',
             '-c', 'Release'
           )
@@ -79,9 +79,9 @@ jobs:
         id: package
         shell: pwsh
         run: |
-          $publishDir = "src/OAuthProxy.App/bin/Release/net8.0-windows/publish/win-x64"
-          $exeName = "OAuthProxy-${{ steps.version.outputs.version }}.exe"
-          Copy-Item "$publishDir/OAuthProxy.exe" $exeName
+          $publishDir = "src/RavensPort.App/bin/Release/net8.0-windows/publish/win-x64"
+          $exeName = "RavensPort-${{ steps.version.outputs.version }}.exe"
+          Copy-Item "$publishDir/RavensPort.exe" $exeName
           echo "exePath=$exeName" >> $env:GITHUB_OUTPUT
 
       # Records which workflow, commit, and runner produced this exact exe, signed via the
@@ -89,7 +89,7 @@ jobs:
       # SmartScreen warnings, but it does make the binary tamper-evident, so a downloaded exe
       # can be checked against the build that claims to have produced it:
       #
-      #   gh attestation verify OAuthProxy-<tag>.exe --repo ${{ github.repository }}
+      #   gh attestation verify RavensPort-<tag>.exe --repo ${{ github.repository }}
       #
       # Placed before the release step so an artifact never gets published unattested.
       - name: Attest build provenance
