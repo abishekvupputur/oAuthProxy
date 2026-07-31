@@ -26,7 +26,7 @@ publish/
 packages/
 .nuget/
 
-# Logs — the app writes to %AppData%\OAuthProxy\logs, but keep stray local ones out too
+# Logs — the app writes to %AppData%\RavensPort\logs, but keep stray local ones out too
 *.log
 
 # Local secrets / state.

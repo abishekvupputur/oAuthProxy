@@ -1,14 +1,14 @@
 # Third-Party Notices
 
-OAuthProxy itself is licensed under the MIT License (see [LICENSE](LICENSE)).
+RavensPort itself is licensed under the MIT License (see [LICENSE](LICENSE)).
 
 It depends on the third-party components listed below. The `win-x64` self-contained
 single-file build **bundles these components (and the .NET runtime) into the produced
-`OAuthProxy.exe`**, so any redistribution of that binary is a redistribution of these
+`RavensPort.exe`**, so any redistribution of that binary is a redistribution of these
 components and must carry these notices.
 
 All components are under permissive licenses (MIT or Apache-2.0). None are copyleft;
-none impose source-disclosure obligations on OAuthProxy.
+none impose source-disclosure obligations on RavensPort.
 
 ## Runtime dependencies (bundled in the published executable)
 
@@ -53,7 +53,7 @@ none impose source-disclosure obligations on OAuthProxy.
 existing copyright/patent/attribution notices, and state significant changes if you
 modified the component. Apache-2.0 also grants an explicit patent licence, which MIT
 does not. If an upstream component ships a `NOTICE` file, its contents must be passed
-along; OAuthProxy does not modify any of these components.
+along; RavensPort does not modify any of these components.
 
 Full licence texts:
 

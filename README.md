@@ -1,4 +1,4 @@
-# OAuthProxy
+# RavensPort
 
 **Give each AI agent its own MCP endpoint — pooling the servers you choose, exposing only the
 tools you allow, with OAuth handled for you.**
@@ -18,7 +18,7 @@ into filtered, per-agent MCP endpoints.
 > Credentials, upstreams, routes, MCP sources and funnels all need to be set up again, and every
 > client needs to be handed the new key for the endpoint it calls.
 >
-> The old `%AppData%\OAuthProxy\store.dat` is left where it is — OAuthProxy never reads or
+> The old `%AppData%\RavensPort\store.dat` is left where it is — RavensPort never reads or
 > deletes it, and the setup page offers to delete it once you are done with it.
 >
 > You will need **1Password** or **Proton Pass** installed and unlocked. See
@@ -32,7 +32,7 @@ MCP servers are increasingly behind OAuth2, but most MCP clients expect a bare H
 no auth story. And once you have three servers connected, your agent sees *all* of their tools —
 ninety of them — with no way to say "this agent gets these six."
 
-OAuthProxy solves both halves:
+RavensPort solves both halves:
 
 | | |
 |---|---|
@@ -74,7 +74,7 @@ reach on its own.
 
 ### From a release
 
-Download `OAuthProxy-<version>.exe` from the [Releases page](../../releases) and run it. No .NET
+Download `RavensPort-<version>.exe` from the [Releases page](../../releases) and run it. No .NET
 install, no extraction.
 
 Windows will warn about an unknown publisher — the binary is not Authenticode-signed. Instead
@@ -82,7 +82,7 @@ every release carries a **build provenance attestation** recording the workflow,
 runner that produced it. Verify with the [GitHub CLI](https://cli.github.com/):
 
 ```bash
-gh attestation verify OAuthProxy-v2.2.0.exe --repo abishekvupputur/oAuthProxy
+gh attestation verify RavensPort-v2.2.0.exe --repo abishekvupputur/oAuthProxy
 ```
 
 A pass means the file is byte-for-byte what CI built from this repository.
@@ -457,7 +457,7 @@ authorize and nothing to refresh. Test appears only once a test endpoint is set.
 
 Everything — OAuth client secrets, access and refresh tokens, API keys, per-endpoint proxy keys,
 routes, upstreams, MCP sources and funnels, and settings — is stored in a vault called
-**`threeEyedRaven`** in your password manager. **Nothing is kept on this PC.** There is no local
+**`RavensPort`** in your password manager. **Nothing is kept on this PC.** There is no local
 cache and no fallback file, so the proxy does not start until 1Password or Proton Pass is
 unlocked.
 
@@ -468,17 +468,17 @@ unlocked.
 | 1Password | `op` 2.0 or newer | `winget install AgileBits.1Password.CLI` |
 | Proton Pass | `pass-cli` | `winget install Proton.PassCLI` |
 
-Open OAuthProxy and it walks you through the rest: install, sign in, and set up a vault. It only
+Open RavensPort and it walks you through the rest: install, sign in, and set up a vault. It only
 ever touches items it created, so the vault stays safe to keep other things in.
 
-**Naming the vault.** `threeEyedRaven` is only the name OAuthProxy looks for first — the setup page
+**Naming the vault.** `RavensPort` is only the name RavensPort looks for first — the setup page
 lets you create a vault with any name you like, and one vault per profile is what keeps their
-credentials, routes and funnels apart. A vault created this way is stamped with the `OAuthProxy
+credentials, routes and funnels apart. A vault created this way is stamped with the `RavensPort
 Config` item straight away: that item is how the vault is recognised next launch, since the name you
 chose is deliberately not stored on this PC.
 
 **Using a vault you already have.** Pick it from the list on the setup page instead. Only two kinds
-are accepted: an **empty** vault, or one **OAuthProxy has already written to**. Anything else has
+are accepted: an **empty** vault, or one **RavensPort has already written to**. Anything else has
 your own entries in it, and this app's housekeeping deletes items it no longer needs, so it will not
 take that vault over. Both controls stay available once a vault is connected — that is how you
 switch profiles.
@@ -488,10 +488,10 @@ the desktop app; without it, `op account add` then `op signin`. For Proton Pass,
 (or `pass-cli login --interactive` to stay in the terminal). Either can instead use a token —
 `OP_SERVICE_ACCOUNT_TOKEN` or `PROTON_PASS_PERSONAL_ACCESS_TOKEN` — which is the better option for
 a machine that should never show an unlock prompt. A 1Password service account must be granted
-access to `threeEyedRaven` explicitly; it cannot use your Private vault, and without the grant it
+access to `RavensPort` explicitly; it cannot use your Private vault, and without the grant it
 sees no vaults at all.
 
-**If both are installed** and neither vault clearly holds the configuration, OAuthProxy asks which
+**If both are installed** and neither vault clearly holds the configuration, RavensPort asks which
 to use — **every launch**. The choice is the one thing that cannot live in the vault, and this app
 deliberately stores nothing about itself locally. Once one vault has a configuration in it, that
 one is used and the question stops.
@@ -510,10 +510,10 @@ and what version answered, and whether everything on screen has reached the vaul
 Nothing in the vault is deleted by disconnecting, so connecting the **same** vault brings it all
 back. Connecting a **different** one gives you a separate set of credentials, routes and funnels:
 one install, as many profiles as you have vaults, one at a time. After disconnecting, the setup
-page lists the account's vaults to pick from — OAuthProxy deliberately stops rediscovering the one
+page lists the account's vaults to pick from — RavensPort deliberately stops rediscovering the one
 you just left, or it would reattach to it before you could choose.
 
-**If two vaults both hold a configuration**, OAuthProxy will not guess: opening one would overwrite
+**If two vaults both hold a configuration**, RavensPort will not guess: opening one would overwrite
 the other on its next save. The setup page names them and asks. To switch profiles at any time, pick
 another vault — or create one — on the setup page; both are offered even when a vault is already
 connected.
@@ -521,19 +521,19 @@ connected.
 **Vault integrity** accounts for every live item in the vault and changes nothing until you pick:
 
 - **Items nothing refers to** — left by a delete that failed or a save that died part way, a second
-  item claiming a record that already has one, or an item titled as OAuthProxy's in a shape it can
+  item claiming a record that already has one, or an item titled as RavensPort's in a shape it can
   no longer match (a record id edited away — no save will ever touch that item again). Delete one at
   a time or all at once.
 - **Records whose item is missing** — each says what it costs (a credential's secret is then only in
   memory, and dies with the process). **Write missing items to vault** puts them back from memory
   and touches nothing else; removing the record from the configuration is the other, destructive
-  option. Write them while OAuthProxy is still running — the secret exists nowhere else.
+  option. Write them while RavensPort is still running — the secret exists nowhere else.
 - **Everything else in this vault** — your own items, listed but never read, written, or deleted by
-  OAuthProxy. They are shown so the check covers the whole vault rather than only what this app can
-  recognise, and because a renamed OAuthProxy item shows up nowhere else. Delete is one at a time,
+  RavensPort. They are shown so the check covers the whole vault rather than only what this app can
+  recognise, and because a renamed RavensPort item shows up nowhere else. Delete is one at a time,
   never part of a bulk action.
 
-Saving deliberately sees less than checking does: it only looks at items titled as OAuthProxy's,
+Saving deliberately sees less than checking does: it only looks at items titled as RavensPort's,
 which is what keeps your own entries out of reach of its housekeeping.
 
 > Items your password manager considers deleted are ignored everywhere — Proton Pass keeps
@@ -544,20 +544,20 @@ which is what keeps your own entries out of reach of its housekeeping.
 
 | Item | Holds |
 |---|---|
-| `OAuthProxy Config` | Routes, upstreams, MCP sources and funnels, settings — the topology, with **no secrets in it** |
-| `OAuthProxy credential — <name> [<id>]` | One per credential: client id and secret, API key, access and refresh tokens |
-| `OAuthProxy route key — <prefix> [<id>]` | One per route: its proxy key |
-| `OAuthProxy funnel key — /mcp/<slug> [<id>]` | One per funnel: its proxy key |
+| `RavensPort Config` | Routes, upstreams, MCP sources and funnels, settings — the topology, with **no secrets in it** |
+| `RavensPort credential — <name> [<id>]` | One per credential: client id and secret, API key, access and refresh tokens |
+| `RavensPort route key — <prefix> [<id>]` | One per route: its proxy key |
+| `RavensPort funnel key — /mcp/<slug> [<id>]` | One per funnel: its proxy key |
 
 Secrets get their own items so your password manager can conceal them, show them, and let you copy
 one out without reading JSON. Each field lives on exactly one side — a credential's scopes are in
 the config item and nowhere else, its secret is in its own item and nowhere else — so there is
 never a question of which copy is right.
 
-You can edit these in your password manager. OAuthProxy picks up changes on its next load and
+You can edit these in your password manager. RavensPort picks up changes on its next load and
 overwrites them on its next save, so use **Reload from vault** after editing by hand.
 
-**If you delete a credential's item there**, OAuthProxy takes that as the credential being gone: on
+**If you delete a credential's item there**, RavensPort takes that as the credential being gone: on
 the next load it removes it from the configuration, tells you in a banner (naming any routes that
 now forward unauthenticated), and writes the corrected config item back. Without that it kept a
 credential the vault no longer had, and every launch raised the same ghost. A credential that never
@@ -568,7 +568,7 @@ same check on demand when there is nothing waiting to be saved.
 ### While the vault is locked
 
 **Everything keeps working.** Edits, OAuth token refreshes, and proxy-key rotation all go ahead
-against the in-memory configuration, and OAuthProxy writes them to the vault as soon as your
+against the in-memory configuration, and RavensPort writes them to the vault as soon as your
 password manager is reachable again. A locked manager never takes a route down and never blocks
 the UI.
 
@@ -579,7 +579,7 @@ sync also retries on its own, so unlocking is usually enough.
 in memory and nowhere else, because a spill file would be a copy of your secrets sitting outside
 your password manager, which is the thing this app exists to avoid. So:
 
-> If OAuthProxy exits while changes are still unsaved, those changes are gone. Any credential
+> If RavensPort exits while changes are still unsaved, those changes are gone. Any credential
 > whose token was refreshed in that window has to be reconnected, because the refresh token in the
 > vault is the one the provider has already replaced.
 
@@ -598,11 +598,11 @@ at all. It is under **Running unattended** on the Settings tab, deliberately not
 that banner interrupts you mid-task and should offer the thirty-second fix, not a walkthrough of
 creating a long-lived credential. Failing that, you can raise the auto-lock timeout in your
 manager's security settings, but that is a real trade: the timeout exists to limit how long an
-unattended machine holds your secrets decrypted. OAuthProxy never changes those settings for you.
+unattended machine holds your secrets decrypted. RavensPort never changes those settings for you.
 
 ### Using one vault from two machines
 
-OAuthProxy assumes it is the only thing writing to `threeEyedRaven`. Both managers sync, so two
+RavensPort assumes it is the only thing writing to `RavensPort`. Both managers sync, so two
 installs pointed at one vault will overwrite each other's changes — last writer wins, with no
 warning. Each save stamps the machine name and a revision into the config item, so you can at least
 tell after the fact. Run it on one machine at a time.
@@ -611,7 +611,7 @@ tell after the fact. Run it on one machine at a time.
 
 ## Logs
 
-Logs are the only thing OAuthProxy writes to disk, under `%AppData%\OAuthProxy\`:
+Logs are the only thing RavensPort writes to disk, under `%AppData%\RavensPort\`:
 
 | Path | Contents |
 |---|---|
@@ -635,7 +635,7 @@ directly in your password manager, which bypasses that check.
 ## Building
 
 ```
-dotnet build OAuthProxy.slnx -m:1
+dotnet build RavensPort.slnx -m:1
 ```
 
 `-m:1` (no parallel MSBuild) avoids an intermittent WPF markup-compile race on a freshly cleaned
@@ -645,7 +645,7 @@ same reason.
 ### Tests
 
 ```
-dotnet test tests/OAuthProxy.Core.Tests/OAuthProxy.Core.Tests.csproj
+dotnet test tests/RavensPort.Core.Tests/RavensPort.Core.Tests.csproj
 ```
 
 427 tests, covering the OAuth and storage layers, the full HTTP method × credential placement
@@ -659,24 +659,24 @@ funnels over one upstream stay isolated, run in parallel, and never cross-delive
 ### Publishing a standalone exe
 
 ```
-dotnet publish src/OAuthProxy.App/OAuthProxy.App.csproj -p:PublishProfile=win-x64-selfcontained -c Release
+dotnet publish src/RavensPort.App/RavensPort.App.csproj -p:PublishProfile=win-x64-selfcontained -c Release
 ```
 
-Produces a self-contained `OAuthProxy.exe` (~180 MB, runtime bundled) under
-`src/OAuthProxy.App/bin/Release/net8.0-windows/publish/win-x64/`. See
+Produces a self-contained `RavensPort.exe` (~180 MB, runtime bundled) under
+`src/RavensPort.App/bin/Release/net8.0-windows/publish/win-x64/`. See
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) before redistributing — it bundles components
 whose licenses require their notices travel along.
 
 ### Project layout
 
 ```
-src/OAuthProxy.Core/            OAuth flows, password-manager storage, YARP proxy config, MCP funnel,
+src/RavensPort.Core/            OAuth flows, password-manager storage, YARP proxy config, MCP funnel,
                                 activity log — no WPF dependency, just the engine
-src/OAuthProxy.App/             WPF tray app: hosts Kestrel + YARP in-process, tray icon, UI
-tests/OAuthProxy.Core.Tests/    xunit tests for Core
+src/RavensPort.App/             WPF tray app: hosts Kestrel + YARP in-process, tray icon, UI
+tests/RavensPort.Core.Tests/    xunit tests for Core
 ```
 
-`OAuthProxy.App` owns the process. It starts the Kestrel/YARP host on a thread-pool task rather
+`RavensPort.App` owns the process. It starts the Kestrel/YARP host on a thread-pool task rather
 than the WPF dispatcher thread — avoiding a sync-over-async deadlock — then initializes the tray
 icon. The proxy and the UI share one DI container.
 
