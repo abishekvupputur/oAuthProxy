@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Net;
-using System.Text;
 using IdentityModel.OidcClient.Browser;
 using RavensPort.Core.Models;
 
@@ -93,12 +92,18 @@ public sealed class LoopbackBrowser : IBrowser
                 };
             }
 
-            const string html = "<html><body>Authorization complete — you can close this window.</body></html>";
-            var responseBytes = Encoding.UTF8.GetBytes(html);
-            context.Response.ContentType = "text/html";
-            context.Response.ContentLength64 = responseBytes.Length;
-            await context.Response.OutputStream.WriteAsync(responseBytes, cancellationToken);
-            context.Response.OutputStream.Close();
+            // OidcClient parses the redirect itself and reports the failure, but it never sees the
+            // browser: what the user is left looking at is decided here, so read the error out too.
+            var error = context.Request.QueryString["error"];
+            if (string.IsNullOrWhiteSpace(error))
+            {
+                await CallbackPage.WriteSuccessAsync(context.Response, cancellationToken);
+            }
+            else
+            {
+                await CallbackPage.WriteFailureAsync(
+                    context.Response, error, context.Request.QueryString["error_description"], cancellationToken);
+            }
 
             return new BrowserResult
             {

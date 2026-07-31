@@ -1,7 +1,13 @@
-# RavensPort
+<p align="center">
+  <img src="media/logo.png" alt="RavensPort" width="140">
+</p>
 
-**Give each AI agent its own MCP endpoint — pooling the servers you choose, exposing only the
-tools you allow, with OAuth handled for you.**
+<h1 align="center">RavensPort</h1>
+
+<p align="center">
+  <b>Give each AI agent its own MCP endpoint — pooling the servers you choose, exposing only the
+  tools you allow, with OAuth handled for you.</b>
+</p>
 
 A tray-resident Windows app that runs a local reverse proxy on `127.0.0.1`. It owns the OAuth2
 flow and token lifecycle for upstream APIs and MCP servers, then lets you compose those servers

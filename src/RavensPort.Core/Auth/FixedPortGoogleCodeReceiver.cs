@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Net;
-using System.Text;
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Auth.OAuth2.Requests;
 using Google.Apis.Auth.OAuth2.Responses;
@@ -65,12 +64,23 @@ internal sealed class FixedPortGoogleCodeReceiver(int port) : ICodeReceiver
 
             var context = await listener.GetContextAsync().WaitAsync(linkedCts.Token);
 
-            const string html = "<html><body>Authorization complete — you can close this window.</body></html>";
-            var bytes = Encoding.UTF8.GetBytes(html);
-            context.Response.ContentType = "text/html";
-            context.Response.ContentLength64 = bytes.Length;
-            await context.Response.OutputStream.WriteAsync(bytes);
-            context.Response.OutputStream.Close();
+            // Deliberately unbound to taskCancellationToken: the code below is already in hand, and
+            // failing the flow because the confirmation page was cut short would throw away a
+            // completed sign-in.
+            //
+            // Google reports a declined consent screen as ?error=access_denied, which the caller
+            // turns into an exception well after the browser has already been handed a page —
+            // so the page has to reflect the outcome, not the fact that a redirect arrived.
+            var error = context.Request.QueryString["error"];
+            if (string.IsNullOrWhiteSpace(error))
+            {
+                await CallbackPage.WriteSuccessAsync(context.Response);
+            }
+            else
+            {
+                await CallbackPage.WriteFailureAsync(
+                    context.Response, error, context.Request.QueryString["error_description"]);
+            }
 
             // Must use the already-decoded QueryString collection + dictionary ctor, exactly
             // as Google's own LocalServerCodeReceiver does. Passing the raw percent-encoded

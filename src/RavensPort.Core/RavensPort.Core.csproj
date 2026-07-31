@@ -12,6 +12,15 @@
 
   <ItemGroup>
     <!--
+      Inlined as a data URI on the OAuth callback page, which is served by HttpListener with no
+      static-file root to serve anything from. Scaled down from the App's full-size logo: the
+      whole page is base64'd into one response, so pixels above what it displays are pure weight.
+    -->
+    <EmbeddedResource Include="Assets\logo.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
       System.Security.Cryptography.ProtectedData is gone with SecureStore: DPAPI was the whole of
       the old local store, and secrets now live in the user's password manager instead.
     -->

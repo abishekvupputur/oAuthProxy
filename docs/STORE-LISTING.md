@@ -119,6 +119,13 @@ local reverse proxy
 *Limit 1,500 characters*
 
 ```
+Version 3.0.1
+
+- The page your browser lands on after signing in now says which way it went: a tick when the
+  authorization completed, a cross and the provider's own reason when it did not. It previously
+  reported success even when a sign-in had been declined.
+- That page is also readable again — its text used to arrive garbled on some systems.
+
 Version 3.0.0
 
 - Renamed to RavensPort.
