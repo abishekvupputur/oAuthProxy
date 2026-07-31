@@ -1,0 +1,149 @@
+name: Publish Store download blob
+
+# The Microsoft Store demands a versioned download URL that answers 200 without redirecting, and
+# every GitHub release asset URL 302s to a signed CDN link that expires within the hour.
+# raw.githubusercontent.com is the only free thing that answers directly, which means the exe has
+# to be committed. This does that: take a release's exe, put it in dist/, print the commit-pinned
+# URL to paste into Partner Center.
+#
+# Manual on purpose. An 81 MB binary in the tree is permanent — git keeps every one ever committed,
+# so each run costs that much repository size forever — and a listing only needs a new URL when it
+# is actually being updated, not on every tag.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, e.g. v3.0.2 (default: the latest release)"
+        required: false
+        type: string
+
+# Read-only by default; the one job that pushes opts in below.
+permissions:
+  contents: read
+
+# Two runs racing would have the loser rejected after a five-minute upload of an 81 MB file.
+concurrency:
+  group: store-blob
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # commits the blob back to main
+
+    steps:
+      # Third-party actions pinned to commit SHAs, not tags, for the reason release.yml gives:
+      # a tag is mutable, and this job holds contents:write.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+
+      - name: Resolve the tag and file name
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then
+            tag=$(gh release view --json tagName --jq .tagName)
+            echo "No tag given; using the latest release: $tag"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "exe=RavensPort-$tag.exe" >> "$GITHUB_OUTPUT"
+
+      - name: Download the release exe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ steps.release.outputs.tag }}" \
+            --pattern "${{ steps.release.outputs.exe }}" \
+            --dir .
+
+      # Taking CI's artifact rather than rebuilding here is the whole point: the file the Store
+      # serves is then the exact subject of that release's provenance attestation, so the verify
+      # command printed in README.md and PRIVACY.md passes against the download users actually get.
+      # A rebuild would not be byte-identical, and would quietly make those instructions wrong for
+      # the one binary most people end up with.
+      - name: Verify it is the attested artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify "${{ steps.release.outputs.exe }}" --repo "${{ github.repository }}"
+
+      # Fails in a second with a readable message rather than after a five-minute upload ending in
+      # a remote-side rejection. The publish profile's single-file compression is what keeps the
+      # exe under this; if it ever creeps over, that is the thing to look at.
+      - name: Check it fits under GitHub's 100 MB file limit
+        run: |
+          bytes=$(stat -c%s "${{ steps.release.outputs.exe }}")
+          echo "$(( bytes / 1024 / 1024 )) MB"
+
+          if [ "$bytes" -ge 104857600 ]; then
+            echo "::error::${{ steps.release.outputs.exe }} is $(( bytes / 1024 / 1024 )) MB, over GitHub's 100 MB per-file push limit. It cannot be served this way."
+            exit 1
+          fi
+
+      - name: Commit it as the published blob
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Only ever one exe in dist/. Removing the previous one costs nothing: a
+          # raw.githubusercontent URL pins a commit, so every URL already handed out keeps
+          # resolving from the commit that introduced it.
+          git rm -q --ignore-unmatch 'dist/*.exe'
+
+          mkdir -p dist
+          mv "${{ steps.release.outputs.exe }}" "dist/${{ steps.release.outputs.exe }}"
+          git add "dist/${{ steps.release.outputs.exe }}"
+
+          # Re-running for a tag that is already published is a no-op rather than an empty commit —
+          # the URL below is then simply the one that already exists.
+          if git diff --cached --quiet; then
+            echo "dist/ already holds this exact build; nothing to commit."
+          else
+            git commit -m "build: republish the Store download blob at ${{ steps.release.outputs.tag }}"
+            git push
+          fi
+
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # The URL is the entire deliverable, so it is checked before being handed over: 200, and no
+      # redirect, which is the specific thing Partner Center rejects.
+      - name: Confirm the URL answers directly, then report it
+        env:
+          URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ steps.commit.outputs.sha }}/dist/${{ steps.release.outputs.exe }}
+        run: |
+          # A push takes a moment to become visible to raw.githubusercontent, so this gets a few
+          # tries before being called a failure.
+          for attempt in 1 2 3 4 5; do
+            read -r status redirects < <(curl -sS -o /dev/null -w '%{http_code} %{num_redirects}' "$URL")
+            echo "attempt $attempt: HTTP $status, $redirects redirect(s)"
+            [ "$status" = "200" ] && break
+            sleep 10
+          done
+
+          if [ "$status" != "200" ]; then
+            echo "::error::$URL answered HTTP $status."
+            exit 1
+          fi
+
+          if [ "$redirects" != "0" ]; then
+            echo "::error::$URL redirected $redirects time(s); the Store requires a direct answer."
+            exit 1
+          fi
+
+          {
+            echo "### Store package URL"
+            echo
+            echo "Paste into Partner Center → Package details → Package URL:"
+            echo
+            echo '```'
+            echo "$URL"
+            echo '```'
+            echo
+            echo "Tag \`${{ steps.release.outputs.tag }}\`, attested, HTTP 200 with no redirect."
+          } >> "$GITHUB_STEP_SUMMARY"
