@@ -260,6 +260,37 @@ public partial class App : Application
 
         mainWindowViewModel.EnterNormalMode();
         _trayIconManager?.SetState(TrayState.Running);
+
+        // Discover what the MCP sources offer without being asked. Every source otherwise opens as
+        // "not checked yet — press Refresh", so the first thing anyone does on this tab is press a
+        // button and wait — for information the app could have had ready before they arrived.
+        //
+        // After Start(), not before: a source of kind ProxyRoute is reached over this very proxy,
+        // so nothing is discoverable until Kestrel is listening. Fire and forget, because the
+        // window is already usable and this is one network round trip per source.
+        if (configStoreCache.Current.McpSources.Any(source => source.Enabled))
+        {
+            _ = DiscoverMcpSourcesAsync();
+        }
+    }
+
+    /// <summary>
+    /// The startup discovery pass, in its own method so the failure has somewhere to go. Discovery
+    /// reports an unreachable source by returning a failed catalog rather than throwing, so this
+    /// should stay quiet — but a bare "_ =" on the call would drop a real fault silently, and a
+    /// startup step that disappears without trace is the kind of thing that gets diagnosed twice.
+    /// </summary>
+    private async Task DiscoverMcpSourcesAsync()
+    {
+        try
+        {
+            await _webApp!.Services.GetRequiredService<McpFunnelViewModel>()
+                .RefreshAllSourcesCommand.ExecuteAsync(null);
+        }
+        catch (Exception ex)
+        {
+            _webApp!.Services.GetService<ActivityLog>()?.LogError("Startup MCP source discovery failed", ex);
+        }
     }
 
     /// <summary>
