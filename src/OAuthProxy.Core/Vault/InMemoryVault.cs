@@ -51,6 +51,8 @@ public sealed class InMemoryVault : IConfigVault
 
     public string? LastLoadWarning { get; private set; }
 
+    public IReadOnlyList<string> LastLoadRemovals { get; private set; } = [];
+
     /// <summary>Every item currently stored, for tests that assert on the vault's shape.</summary>
     public IReadOnlyCollection<VaultItemContents> Items => _items.Values;
 
@@ -122,7 +124,12 @@ public sealed class InMemoryVault : IConfigVault
     public Task<VaultStatus> ProbeAsync(CancellationToken ct = default) =>
         Task.FromResult(new VaultStatus(Kind, _availability, VaultId: "in-memory"));
 
-    public Task EnsureVaultAsync(CancellationToken ct = default) => Task.CompletedTask;
+    /// <summary>Records the name. There is only ever one vault here, and it always exists.</summary>
+    public Task CreateVaultAsync(string vaultName, CancellationToken ct = default)
+    {
+        VaultName = vaultName;
+        return Task.CompletedTask;
+    }
 
     /// <summary>Records the name. There is only ever one vault here, and it is always usable.</summary>
     public Task UseExistingVaultAsync(string vaultName, CancellationToken ct = default)
@@ -145,6 +152,7 @@ public sealed class InMemoryVault : IConfigVault
         try
         {
             LastLoadWarning = _loadWarning;
+            LastLoadRemovals = [];
 
             if (FindConfigNote() is not { } note) return new ConfigStore();
 
@@ -153,10 +161,16 @@ public sealed class InMemoryVault : IConfigVault
 
             _revision = document.Revision;
 
-            var warnings = new List<string>();
-            var store = VaultMapper.ComposeStore(document, ResolveSecrets(document.Index), warnings);
+            var report = new VaultLoadReport();
+            var store = VaultMapper.ComposeStore(document, ResolveSecrets(document.Index), report);
 
-            if (warnings.Count > 0) LastLoadWarning = string.Join(" ", warnings);
+            LastLoadRemovals = report.Removals;
+
+            if (report.HasAnything)
+            {
+                LastLoadWarning = string.Join(" ", new[] { _loadWarning, report.Message }
+                    .Where(w => !string.IsNullOrEmpty(w)));
+            }
 
             return store;
         }
@@ -193,14 +207,39 @@ public sealed class InMemoryVault : IConfigVault
         }
     }
 
+    /// <summary>Every write here already replaces the item outright, so this is just a save.</summary>
+    public Task RewriteAllAsync(ConfigStore store, CancellationToken ct = default) => SaveAsync(store, ct);
+
+    public Task<IReadOnlyList<VaultItemEntry>> ListLiveItemsAsync(CancellationToken ct = default)
+    {
+        IReadOnlyList<VaultItemEntry> live =
+            [.. _items.Values.Select(item => VaultItemEntry.Classify(item.ItemId, item.Title))];
+
+        return Task.FromResult(live);
+    }
+
+    public Task DeleteItemAsync(string itemId, CancellationToken ct = default)
+    {
+        if (!_items.Remove(itemId))
+        {
+            throw new VaultSaveException($"There is no item '{itemId}' to delete.", partiallyApplied: false);
+        }
+
+        return Task.CompletedTask;
+    }
+
     /// <summary>
     /// The same order a real provider uses: secret items first, note last, then reconcile
     /// deletions — so the note can never point at an item that does not exist.
     /// </summary>
     private void WriteItems(ConfigStore store, bool stopBeforeTheNote = false)
     {
-        var index = ReadIndex();
-        var secretItems = VaultMapper.BuildSecretItems(store, index);
+        // The previous index finds the item a record already has; the new one is what the note
+        // gets, holding only what this save wrote — the same split the real providers use, so a
+        // record that is gone does not leave a dangling entry behind.
+        var previousIndex = ReadIndex();
+        var index = new VaultIndex();
+        var secretItems = VaultMapper.BuildSecretItems(store, previousIndex);
 
         foreach (var item in secretItems)
         {

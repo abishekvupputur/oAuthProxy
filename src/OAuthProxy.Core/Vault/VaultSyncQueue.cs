@@ -174,6 +174,81 @@ public sealed class VaultSyncQueue : BackgroundService
     }
 
     /// <summary>
+    /// Writes every item and the note again, whatever the vault currently holds.
+    ///
+    /// Here rather than on the integrity service because this class owns the write lock: a full
+    /// rewrite running beside the background pump would be two writers on one vault, which is the
+    /// thing the lock exists to prevent.
+    /// </summary>
+    public Task<bool> RewriteAllAsync(TimeSpan timeout) => WriteAsync(rewriteEverything: true, timeout);
+
+    /// <summary>
+    /// An ordinary save, run now whether or not anything is pending.
+    ///
+    /// For putting back an item that has gone missing from the vault: a save creates whatever is
+    /// not there and leaves the rest alone, so it costs one item rather than churning every entry
+    /// the way a full rewrite does. Nothing is pending in that situation — memory and the note
+    /// agree, it is the vault that does not — so the normal pump would never run.
+    /// </summary>
+    public Task<bool> WriteMissingAsync(TimeSpan timeout) => WriteAsync(rewriteEverything: false, timeout);
+
+    private async Task<bool> WriteAsync(bool rewriteEverything, TimeSpan timeout)
+    {
+        if (_gate.Status.Selected == VaultBackendKind.None) return false;
+
+        using var cts = new CancellationTokenSource(timeout);
+
+        try
+        {
+            await _writeLock.WaitAsync(cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+
+        try
+        {
+            var (snapshot, version) = await _configStoreCache.SnapshotForSyncAsync(cts.Token).ConfigureAwait(false);
+
+            SetState(VaultSyncState.Syncing);
+
+            if (rewriteEverything)
+            {
+                await _vault.RewriteAllAsync(snapshot, cts.Token).ConfigureAwait(false);
+            }
+            else
+            {
+                await _vault.SaveAsync(snapshot, cts.Token).ConfigureAwait(false);
+            }
+
+            _configStoreCache.MarkSynced(version);
+            _retryDelay = MinRetry;
+            _reportedWaiting = false;
+            LastError = null;
+
+            _activityLog.Log(rewriteEverything
+                ? "VAULT rewrote every item and the configuration from memory"
+                : "VAULT wrote memory to the vault, restoring anything missing from it");
+
+            SetState(_configStoreCache.HasPendingChanges ? VaultSyncState.Syncing : VaultSyncState.Synced);
+            return true;
+        }
+        catch (Exception ex) when (ex is VaultLockedException or VaultCliException or VaultSaveException
+                                       or OperationCanceledException)
+        {
+            LastError = ex.Message;
+            _activityLog.LogError("Could not write to the vault", ex);
+            SetState(ex is VaultSaveException ? VaultSyncState.Failed : VaultSyncState.WaitingForUnlock);
+            return false;
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    /// <summary>
     /// Pushes now and waits, for shutdown and for the banner's "sync now". Returns false when
     /// changes are still pending afterwards — which on exit means they are about to be lost.
     /// </summary>

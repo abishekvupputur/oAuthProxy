@@ -16,6 +16,12 @@ public enum VaultAvailability
     /// <summary>Signed in, but the threeEyedRaven vault does not exist yet.</summary>
     VaultMissing,
 
+    /// <summary>
+    /// Signed in, and more than one vault here holds an OAuthProxy configuration. Guessing would
+    /// mean silently reading one profile and silently overwriting another, so the user picks.
+    /// </summary>
+    VaultChoiceNeeded,
+
     /// <summary>Signed in and the vault exists. The gate opens on this and nothing else.</summary>
     Ready,
 
@@ -40,6 +46,14 @@ public enum VaultAvailability
 /// <param name="VaultName">Name of the vault in use — threeEyedRaven unless the user pointed
 /// OAuthProxy at one they already had. Reported so the Settings tab can say which vault the
 /// configuration is actually in, which is not guessable once it is not the default.</param>
+/// <param name="Vaults">Every vault name this account can see, so the setup page can offer them
+/// rather than making the user type one exactly.</param>
+/// <param name="ConfiguredVaults">Vault names that hold an OAuthProxy configuration. More than one
+/// means separate profiles, and which to open is a question only the user can answer.</param>
+/// <param name="AdoptableVaults">The vaults the setup page may offer: named after threeEyedRaven,
+/// and either empty or already holding an OAuthProxy configuration. Filtered here rather than in
+/// the view so the list obeys the same rule that decides whether a chosen vault is accepted — see
+/// <see cref="VaultAdoption.LooksAdoptable"/>.</param>
 public sealed record VaultStatus(
     VaultBackendKind Kind,
     VaultAvailability Availability,
@@ -47,7 +61,10 @@ public sealed record VaultStatus(
     string? Version = null,
     string? VaultId = null,
     string? Detail = null,
-    string? VaultName = null)
+    string? VaultName = null,
+    IReadOnlyList<string>? Vaults = null,
+    IReadOnlyList<string>? ConfiguredVaults = null,
+    IReadOnlyList<string>? AdoptableVaults = null)
 {
     public bool IsReady => Availability == VaultAvailability.Ready;
 

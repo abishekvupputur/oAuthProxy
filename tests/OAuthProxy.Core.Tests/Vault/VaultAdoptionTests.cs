@@ -46,6 +46,58 @@ public class VaultAdoptionTests : IDisposable
     }
 
     [Fact]
+    public async Task ProtonPass_AVaultHoldingOnlyTrashedItemsCountsAsEmpty()
+    {
+        // Deleting an item in Proton Pass moves it to the trash, and `item list` keeps returning
+        // it. Counting those made a vault the user had cleared out for OAuthProxy look full, and
+        // the offer to use it was refused with no way to tell why.
+        var protonPass = new FakeProtonPass { VaultExists = false };
+        var shareId = protonPass.AddVault("Agents");
+        protonPass.AddItem(shareId, "an old login", state: "Trashed");
+
+        var provider = NewProtonPass(protonPass);
+        await provider.UseExistingVaultAsync("Agents");
+
+        Assert.Equal("Agents", provider.VaultName);
+    }
+
+    [Fact]
+    public async Task ProtonPass_ATrashedItemIsInvisibleToEveryReader()
+    {
+        // Not just adoption: a trashed credential item that still read as present made a deleted
+        // credential look alive, and would have had a save compare against an item the user cannot
+        // see in their own password manager.
+        var protonPass = new FakeProtonPass();
+        var provider = NewProtonPass(protonPass);
+
+        await provider.SaveAsync(StoreWithSomethingInIt());
+
+        var credentialItemId = protonPass.ItemIdOf(title => title.Contains("credential —", StringComparison.Ordinal));
+        Assert.NotNull(credentialItemId);
+
+        protonPass.Trash(credentialItemId);
+
+        var reloaded = await provider.LoadAsync();
+
+        // Gone from the vault as far as this app is concerned, so the ghost-credential rule fires.
+        Assert.Empty(reloaded.Credentials);
+        Assert.NotEmpty(provider.LastLoadRemovals);
+    }
+
+    [Fact]
+    public async Task OnePassword_AnArchivedItemIsInvisibleToEveryReader()
+    {
+        var onePassword = new FakeOnePassword { VaultExists = false };
+        var vaultId = onePassword.AddVault("Agents");
+        onePassword.AddItem(vaultId, "an archived login", state: "ARCHIVED");
+
+        var provider = NewOnePassword(onePassword);
+        await provider.UseExistingVaultAsync("Agents");
+
+        Assert.Equal("Agents", provider.VaultName);
+    }
+
+    [Fact]
     public async Task ProtonPass_AVaultWithTheUsersOwnItemsIsRefused()
     {
         var protonPass = new FakeProtonPass { VaultExists = false };
@@ -58,6 +110,10 @@ public class VaultAdoptionTests : IDisposable
             () => provider.UseExistingVaultAsync("Personal2"));
 
         Assert.Contains("Personal2", refusal.Message);
+
+        // Names what it counted. "It has items in it" about a vault the user believes they emptied
+        // is impossible to argue with; naming one of them ends the argument.
+        Assert.Contains("Bank", refusal.Message);
 
         // Nothing was written to it, and the provider did not quietly adopt it anyway.
         Assert.Single(protonPass.ItemsInVault(shareId));
@@ -208,6 +264,64 @@ public class VaultAdoptionTests : IDisposable
         var reconnected = gate.SelectBackend(VaultBackendKind.ProtonPass);
         Assert.True(reconnected.IsReady);
         Assert.False(gate.IsDisconnected);
+    }
+
+    [Fact]
+    public async Task AfterDisconnectingTheVaultIsNotRediscoveredBehindTheUsersBack()
+    {
+        // The whole point of disconnecting is to choose a different vault. Rediscovery — the thing
+        // that makes an adopted vault stick across restarts — would reattach the one just left, and
+        // the setup page would come back Ready with no way to pick another.
+        var protonPass = new FakeProtonPass { VaultExists = false };
+        protonPass.AddVault("Agents");
+
+        var provider = NewProtonPass(protonPass);
+        await provider.UseExistingVaultAsync("Agents");
+        await provider.SaveAsync(StoreWithSomethingInIt());
+
+        Assert.True((await provider.ProbeAsync()).IsReady);
+
+        provider.Forget();
+
+        var afterDisconnect = await provider.ProbeAsync();
+
+        Assert.False(afterDisconnect.IsReady);
+        Assert.Equal(VaultConstants.VaultName, afterDisconnect.VaultName);
+
+        // ...and the vaults are offered so another can be chosen without typing it exactly.
+        Assert.Contains("Agents", afterDisconnect.Vaults!);
+
+        // Naming one again puts discovery back on, so the next restart still finds it.
+        await provider.UseExistingVaultAsync("Agents");
+
+        var afterRestart = await NewProtonPass(protonPass).ProbeAsync();
+        Assert.Equal("Agents", afterRestart.VaultName);
+    }
+
+    [Fact]
+    public async Task TwoVaultsHoldingAConfigurationAreOfferedRatherThanGuessedBetween()
+    {
+        // Two configured vaults is a user keeping separate profiles. Picking one would open it and
+        // overwrite the other's note on the next save.
+        var protonPass = new FakeProtonPass { VaultExists = false };
+        protonPass.AddVault("Work");
+        protonPass.AddVault("Home");
+
+        var work = NewProtonPass(protonPass);
+        await work.UseExistingVaultAsync("Work");
+        await work.SaveAsync(StoreWithSomethingInIt());
+
+        var home = NewProtonPass(protonPass);
+        await home.UseExistingVaultAsync("Home");
+        await home.SaveAsync(StoreWithSomethingInIt());
+
+        var status = await NewProtonPass(protonPass).ProbeAsync();
+
+        Assert.Equal(VaultAvailability.VaultChoiceNeeded, status.Availability);
+        Assert.False(status.IsReady);
+        Assert.Equal(2, status.ConfiguredVaults!.Count);
+        Assert.Contains("Work", status.ConfiguredVaults);
+        Assert.Contains("Home", status.ConfiguredVaults);
     }
 
     [Fact]

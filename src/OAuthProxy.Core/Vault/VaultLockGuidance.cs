@@ -94,7 +94,7 @@ public static class VaultLockGuidance
         VaultBackendKind.ProtonPass =>
             "Create a Proton Pass personal access token scoped to this vault and put it in the "
             + "PROTON_PASS_PERSONAL_ACCESS_TOKEN environment variable. Nothing then has to stay "
-            + "signed in interactively.",
+            + "signed in interactively. However, PERSONAL ACCESS TOKENS are read only.",
 
         _ => "",
     };

@@ -97,17 +97,49 @@ public class OnePasswordProviderTests : IDisposable
     }
 
     [Fact]
-    public async Task EnsureVault_CreatesItExactlyOnce()
+    public async Task CreateVault_UsesTheNameTheUserChoseAndRefusesToRepeatIt()
     {
         var fake = new FakeOnePassword { VaultExists = false };
         var runner = fake.AsRunner();
         var provider = NewProvider(runner);
 
         await provider.ProbeAsync();
-        await provider.EnsureVaultAsync();
-        await provider.EnsureVaultAsync();
+        await provider.CreateVaultAsync("Agents");
 
+        Assert.Contains(runner.CallsMatching("vault", "create"), call => call.Args.Contains("Agents"));
+        Assert.Equal("Agents", provider.VaultName);
+
+        // A second attempt at the same name is a different intention — using what is already
+        // there — and that has rules of its own.
+        await Assert.ThrowsAsync<VaultAdoptionException>(() => provider.CreateVaultAsync("Agents"));
         Assert.Single(runner.CallsMatching("vault", "create"));
+    }
+
+    [Fact]
+    public async Task ASaveRecreatesAnItemTheNoteStillPointsAtButTheVaultNoLongerHas()
+    {
+        // The note's index outlives the item it names — deleted in 1Password's own UI, or by the
+        // integrity check. Editing that id fails the whole save with "isn't an item", which made
+        // putting a missing item back impossible: the one operation whose job is to recreate it
+        // was the one that could not.
+        var fake = new FakeOnePassword();
+        var provider = NewProvider(fake.AsRunner());
+        var store = StoreWithSecrets();
+
+        await provider.SaveAsync(store);
+
+        var credential = store.Credentials[0];
+        var itemId = (await provider.ListLiveItemsAsync())
+            .Single(item => item.Role == VaultItemRole.Credential && item.RecordId == credential.Id).ItemId;
+
+        // Deleted behind the provider's back, exactly as the password manager's own UI would.
+        await provider.DeleteItemAsync(itemId);
+
+        // The same store, so the same record ids: the note still points at the item that is gone.
+        await provider.SaveAsync(store);
+
+        var reloaded = await provider.LoadAsync();
+        Assert.Equal(ClientSecret, reloaded.Credentials.Single(c => c.Id == credential.Id).ClientSecret);
     }
 
     // ---- Round trip -----------------------------------------------------------------------------

@@ -48,13 +48,30 @@ public sealed class FakeOnePassword
     }
 
     /// <summary>Puts one of the user's own entries in a vault, so it is not empty.</summary>
-    public void AddItem(string vaultId, string title) =>
-        ItemsIn(vaultId)[$"item-{_nextId++}"] = new JsonObject
+    /// <param name="state">"ARCHIVED" for one the user has put away — 1Password still reports it.</param>
+    public string AddItem(string vaultId, string title, string? state = null)
+    {
+        var id = $"item-{_nextId++}";
+
+        ItemsIn(vaultId)[id] = new JsonObject
         {
             ["title"] = title,
-            ["category"] = "Login",
+            ["category"] = "LOGIN",
             ["fields"] = new JsonArray(),
+            ["state"] = state,
         };
+
+        return id;
+    }
+
+    /// <summary>Archives an item, the way doing it in the 1Password UI does.</summary>
+    public void Archive(string itemId)
+    {
+        foreach (var items in _byVault.Values)
+        {
+            if (items.TryGetValue(itemId, out var item)) item["state"] = "ARCHIVED";
+        }
+    }
 
     public IReadOnlyCollection<JsonObject> ItemsInVault(string vaultId) => ItemsIn(vaultId).Values;
 
@@ -77,7 +94,7 @@ public sealed class FakeOnePassword
         {
             ["--version"] => Ok(Version),
             ["vault", "list", ..] => Ok(VaultListJson()),
-            ["vault", "create", ..] => CreateVault(),
+            ["vault", "create", var name, ..] => CreateVault(name),
             ["item", "list", ..] => Ok(ItemListJson(VaultOf(args))),
             ["item", "get", var id, ..] => GetItem(id, VaultOf(args)),
             ["item", "create", ..] => CreateItem(runner, VaultOf(args)),
@@ -101,10 +118,21 @@ public sealed class FakeOnePassword
 
     private static CliResult Fail(string stderr) => new(1, "", stderr);
 
-    private CliResult CreateVault()
+    /// <summary>
+    /// Creates the vault the caller named, which is the whole point of naming it. threeEyedRaven is
+    /// only the default, and modelling it as the only vault that can be created would let a bug
+    /// that ignores the name pass every test.
+    /// </summary>
+    private CliResult CreateVault(string name)
     {
-        VaultExists = true;
-        return Ok(new JsonObject { ["id"] = VaultId, ["name"] = VaultConstants.VaultName }.ToJsonString());
+        if (name == VaultConstants.VaultName)
+        {
+            VaultExists = true;
+            return Ok(new JsonObject { ["id"] = VaultId, ["name"] = name }.ToJsonString());
+        }
+
+        var vaultId = AddVault(name);
+        return Ok(new JsonObject { ["id"] = vaultId, ["name"] = name }.ToJsonString());
     }
 
     private string VaultListJson()
@@ -130,7 +158,12 @@ public sealed class FakeOnePassword
 
         foreach (var (id, item) in ItemsIn(vaultId))
         {
-            array.Add(new JsonObject { ["id"] = id, ["title"] = item["title"]?.GetValue<string>() });
+            array.Add(new JsonObject
+            {
+                ["id"] = id,
+                ["title"] = item["title"]?.GetValue<string>(),
+                ["state"] = item["state"]?.GetValue<string>(),
+            });
         }
 
         return array.ToJsonString();
@@ -146,12 +179,24 @@ public sealed class FakeOnePassword
             }.ToJsonString())
             : Fail($"\"{id}\" isn't an item.");
 
+    /// <summary>
+    /// The categories op actually accepts in a template, as `op item template get` emits them.
+    ///
+    /// Enforced because a fake that takes anything is worse than no fake at all: this one used to
+    /// accept the display names ("Secure Note"), so every test passed while real op refused every
+    /// single item with `"" is not a recognized item category` — the whole 1Password write path
+    /// was broken and green.
+    /// </summary>
+    private static readonly string[] Categories = ["SECURE_NOTE", "LOGIN", "PASSWORD"];
+
     private CliResult CreateItem(FakeCliRunner runner, string vaultId)
     {
         if (WriteFailure is { } failure) return Fail(failure);
 
         var template = ParseStdin(runner);
         if (template is null) return Fail("expected an item template on stdin");
+
+        if (RejectBadCategory(template) is { } categoryError) return categoryError;
 
         var id = $"item-{_nextId++}";
         ItemsIn(vaultId)[id] = template;
@@ -166,6 +211,8 @@ public sealed class FakeOnePassword
 
         var template = ParseStdin(runner);
         if (template is null) return Fail("expected an item template on stdin");
+
+        if (RejectBadCategory(template) is { } categoryError) return categoryError;
 
         // 1Password merges an edit rather than replacing the item, which is exactly why the
         // provider has to send empty values for fields that should go away.
@@ -187,6 +234,22 @@ public sealed class FakeOnePassword
 
     private CliResult DeleteItem(string id, string vaultId) =>
         ItemsIn(vaultId).Remove(id) ? Ok("") : Fail($"\"{id}\" isn't an item.");
+
+    /// <summary>
+    /// op's own words when a template names a category it does not know. It reports the value it
+    /// parsed — empty for an unrecognised one — and then lists the display names, which is why
+    /// this was so easy to get wrong.
+    /// </summary>
+    private static CliResult? RejectBadCategory(JsonObject template)
+    {
+        var category = template["category"]?.GetValue<string>() ?? "";
+
+        return Categories.Contains(category, StringComparer.Ordinal)
+            ? null
+            : Fail($"[ERROR] \"{(Categories.Contains(category, StringComparer.OrdinalIgnoreCase) ? category : "")}\" "
+                   + "is not a recognized item category, must be one of: Login, Credit Card, Secure Note, Identity, "
+                   + "Password, Document, Software License, Bank Account, Database, Driver License");
+    }
 
     /// <summary>The template the provider piped in for the call being handled.</summary>
     private static JsonObject? ParseStdin(FakeCliRunner runner) =>

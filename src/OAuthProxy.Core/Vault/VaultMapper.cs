@@ -171,16 +171,22 @@ public static class VaultMapper
     /// Rebuilds the store: the note's redacted graph with each record's secret merged back from
     /// its item.
     ///
-    /// A record whose item is missing loads without its secret rather than being dropped. For a
-    /// proxy key that is the state ConfigStoreCache's backfill already handles — it issues a fresh
-    /// one. For a credential it means the user has to re-enter it, which <paramref name="warnings"/>
-    /// says out loud, because a credential that looks fine and fails at the upstream hours later is
-    /// the worse outcome.
+    /// A credential whose item the note points at, but which is no longer in the vault, is
+    /// <em>removed</em> rather than loaded empty. The vault is the only copy, so an item deleted in
+    /// the password manager's own UI is the user saying that credential is gone — keeping a record
+    /// of it made the app behave as though the credential still existed, and every launch raised
+    /// the same ghost because the note was never rewritten. <paramref name="report"/> carries what
+    /// went, so the caller can say so and write the note back without it.
+    ///
+    /// The rule is deliberately "the note claims an item that is missing", not "this record has no
+    /// secret". A public OAuth client with a client id and no secret has no item and never did, and
+    /// a manager that returns masked values still returns the item — neither is a ghost, and
+    /// dropping either would delete a credential the user still has.
     /// </summary>
     public static ConfigStore ComposeStore(
         VaultDocument document,
         IReadOnlyDictionary<(VaultItemRole Role, Guid Id), VaultItemContents> secrets,
-        List<string> warnings)
+        VaultLoadReport report)
     {
         // Round-trip through the full contract so the caller gets a store detached from the
         // document — mutating one must not silently edit the other.
@@ -188,25 +194,41 @@ public static class VaultMapper
             JsonSerializer.Serialize(document.Store, VaultRedaction.FullOptions),
             VaultRedaction.FullOptions) ?? new ConfigStore();
 
-        var missingCredentials = 0;
+        var abandoned = new List<CredentialRecord>();
 
         foreach (var credential in store.Credentials)
         {
-            if (!secrets.TryGetValue((VaultItemRole.Credential, credential.Id), out var item))
+            if (secrets.TryGetValue((VaultItemRole.Credential, credential.Id), out var item))
             {
-                // Never connected and never given a key is normal and silent; having had one and
-                // losing it is not.
-                if (ExpectsASecretItem(credential)) missingCredentials++;
+                ApplyCredentialSecrets(credential, item);
                 continue;
             }
 
-            ApplyCredentialSecrets(credential, item);
+            // The index is the evidence: it is written only after an item has actually been
+            // created, so an entry pointing at nothing means that item was deleted.
+            if (document.Index.Find(VaultItemRole.Credential, credential.Id) is not null)
+            {
+                abandoned.Add(credential);
+            }
         }
 
-        if (missingCredentials > 0)
+        foreach (var credential in abandoned)
         {
-            warnings.Add($"{missingCredentials} credential(s) loaded without their stored secret — "
-                         + "their vault item is missing, so they need to be entered again.");
+            store.Credentials.Remove(credential);
+
+            // A route left pointing at it would look configured and forward nothing, which is the
+            // same silent failure one layer down.
+            var strandedRoutes = store.Routes
+                .Where(route => route.Credentials.RemoveAll(c => c.CredentialId == credential.Id) > 0)
+                .Select(route => route.PathPrefix)
+                .ToList();
+
+            var affected = strandedRoutes.Count == 0
+                ? ""
+                : $" {strandedRoutes.Count} route(s) now forward unauthenticated: {string.Join(", ", strandedRoutes)}.";
+
+            report.Removals.Add(
+                $"Credential '{credential.Name}' was removed: the vault item holding its secret is gone.{affected}");
         }
 
         foreach (var route in store.Routes)
@@ -251,14 +273,6 @@ public static class VaultMapper
             item.Field(VaultFields.TokenType) ?? "Bearer",
             VaultItemNaming.ParseTimestamp(item.Field(VaultFields.ObtainedUtc)) ?? DateTimeOffset.UtcNow);
     }
-
-    /// <summary>
-    /// Whether this record was stored expecting a secret item to exist, so that a missing one is
-    /// worth warning about. An API-key credential always has a key; an OAuth one that got as far
-    /// as having a client id was entered with a secret alongside it.
-    /// </summary>
-    private static bool ExpectsASecretItem(CredentialRecord credential) =>
-        credential.Kind == CredentialKind.ApiKey || !string.IsNullOrEmpty(credential.ClientId);
 
     /// <summary>
     /// The machine name is written into the note so a concurrent-write conflict can name the other

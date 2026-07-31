@@ -57,6 +57,21 @@ public sealed class ConfigStoreCache
     public DateTimeOffset? PendingSince { get; private set; }
 
     /// <summary>
+    /// What the last load had to say — a credential dropped because its vault item was deleted, a
+    /// note written by a newer version. Null when the load was clean. Shown in the UI rather than
+    /// only logged: a configuration that quietly changed under the user is exactly the thing they
+    /// need told.
+    /// </summary>
+    public string? LastLoadNotice { get; private set; }
+
+    /// <summary>Clears the notice once the user has read it.</summary>
+    public void DismissLoadNotice()
+    {
+        LastLoadNotice = null;
+        PendingChanged?.Invoke();
+    }
+
+    /// <summary>
     /// Raised whenever the pending state changes. The queue and the UI both listen; Core stays
     /// MVVM-free, so this is a plain event and the UI marshals it.
     /// </summary>
@@ -75,10 +90,16 @@ public sealed class ConfigStoreCache
         _current = await _vault.LoadAsync(ct);
         _initialized = true;
 
+        LastLoadNotice = _vault.LastLoadWarning;
+
         // A route or funnel can reach the vault without a key — created by hand in the password
         // manager, or restored from an item whose key item is gone. Without this the access guard
         // has nothing to compare against and every request to that endpoint is refused.
         if (BackfillKeys(_current) > 0) MarkChanged();
+
+        // The load dropped something the note still lists, so the note is now wrong. Queueing it
+        // is what stops the same ghost coming back on every launch.
+        if (_vault.LastLoadRemovals.Count > 0) MarkChanged();
     }
 
     /// <summary>
@@ -212,7 +233,12 @@ public sealed class ConfigStoreCache
         // thrown away rather than saved.
         Interlocked.Exchange(ref _syncedVersion, Interlocked.Read(ref _version));
         PendingSince = null;
+        LastLoadNotice = _vault.LastLoadWarning;
         PendingChanged?.Invoke();
+
+        // Ordered after the reset above on purpose: what the load dropped is not "memory the vault
+        // has not got", it is the note being out of date, and it has to stay queued.
+        if (_vault.LastLoadRemovals.Count > 0) MarkChanged();
     }
 
     /// <summary>

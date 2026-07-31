@@ -74,17 +74,48 @@ public class ProtonPassProviderTests : IDisposable
     }
 
     [Fact]
-    public async Task EnsureVault_CreatesItAndResolvesItsShareId()
+    public async Task CreateVault_UsesTheNameTheUserChoseAndResolvesItsShareId()
     {
+        // The name is the user's: threeEyedRaven is only the default this app looks for first, and
+        // a separate vault per profile is the whole point of being able to name it.
         var fake = new FakeProtonPass { VaultExists = false };
         var runner = fake.AsRunner();
         var provider = NewProvider(runner);
 
         await provider.ProbeAsync();
-        await provider.EnsureVaultAsync();
+        await provider.CreateVaultAsync("Agents");
 
-        Assert.Single(runner.CallsMatching("vault", "create"));
+        Assert.Contains(runner.CallsMatching("vault", "create"), call => call.Args.Contains("Agents"));
+        Assert.Equal("Agents", provider.VaultName);
         Assert.Equal(VaultAvailability.Ready, (await provider.ProbeAsync()).Availability);
+    }
+
+    [Fact]
+    public async Task CreateVault_StampsTheConfigItemSoTheVaultIsFoundAgain()
+    {
+        // Nothing on this PC remembers the name that was just typed, so the new vault has to carry
+        // the evidence itself — otherwise the next launch would not know where its configuration is.
+        var fake = new FakeProtonPass { VaultExists = false };
+        var provider = NewProvider(fake.AsRunner());
+
+        await provider.CreateVaultAsync("Agents");
+
+        Assert.Contains(fake.ItemsInVault("share-agents"),
+            item => item["title"]?.GetValue<string>() == VaultItemNaming.ConfigTitle);
+    }
+
+    [Fact]
+    public async Task CreateVault_RefusesANameThatIsAlreadyTaken()
+    {
+        // "Create" and "take over what is already there" are different intentions, and the second
+        // one has rules about what may be adopted.
+        var fake = new FakeProtonPass();
+        var provider = NewProvider(fake.AsRunner());
+
+        var refusal = await Assert.ThrowsAsync<VaultAdoptionException>(
+            () => provider.CreateVaultAsync(VaultConstants.VaultName));
+
+        Assert.Contains("already a vault", refusal.Message);
     }
 
     [Fact]

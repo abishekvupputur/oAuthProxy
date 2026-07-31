@@ -32,7 +32,9 @@
                                    Text="Close whatever else is listening on it, or pick another. The port is stored in your vault, so changing it here writes it there."/>
                         <StackPanel Orientation="Horizontal">
                             <TextBox Width="100" Text="{Binding ListenPort, UpdateSourceTrigger=PropertyChanged}"/>
-                            <Button Content="Use this port" Margin="8,0,0,0" Command="{Binding RetryPortCommand}"/>
+                            <Button Content="Use this port" Margin="8,0,0,0"
+                                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBoolConverter}}"
+                                    Command="{Binding RetryPortCommand}"/>
                         </StackPanel>
                     </StackPanel>
                 </Border>
@@ -43,26 +45,59 @@
                 <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14"
                         Visibility="{Binding NeedsAChoice, Converter={StaticResource BoolToVisibilityConverter}}">
                     <StackPanel>
-                        <TextBlock Text="Which one should OAuthProxy use?" Style="{StaticResource SectionHeaderStyle}"/>
+                        <TextBlock Text="Which vault should OAuthProxy open?" Style="{StaticResource SectionHeaderStyle}"/>
                         <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
                                    Visibility="{Binding IsDisconnected, Converter={StaticResource InverseBoolToVisibilityConverter}}"
-                                   Text="Both are ready. OAuthProxy uses one at a time — writing to both would leave two vaults that quietly disagree. You will be asked again next time you start it."/>
+                                   Text="These are the threeEyedRaven vaults found in your password managers. Each is a separate profile — its own credentials, routes and funnels — and OAuthProxy opens one at a time, because writing to two would leave them quietly disagreeing. You will be asked again next time you start it."/>
                         <!-- After a disconnect the same buttons mean "connect again", and nothing
                              is loaded until one is pressed. -->
                         <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
                                    Visibility="{Binding IsDisconnected, Converter={StaticResource BoolToVisibilityConverter}}"
-                                   Text="You disconnected from your password manager, so OAuthProxy is holding no configuration and is proxying nothing. Choose one to load its vault and start again."/>
+                                   Text="You disconnected from your password manager, so OAuthProxy is holding no configuration and is proxying nothing. Choose a vault below to load it and start again."/>
                         <ItemsControl ItemsSource="{Binding Managers}">
-                            <ItemsControl.ItemsPanel>
-                                <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
-                                    <Button Content="{Binding Name}" Margin="0,0,8,0" MinWidth="130"
-                                            Visibility="{Binding IsReady, Converter={StaticResource BoolToVisibilityConverter}}"
-                                            Command="{Binding DataContext.ChooseCommand,
-                                                      RelativeSource={RelativeSource AncestorType=ItemsControl}}"
-                                            CommandParameter="{Binding}"/>
+                                    <!-- Listed per manager rather than in one pile: the same vault
+                                         name can exist in both, and "threeEyedRaven" on its own
+                                         does not say which password manager it is in. -->
+                                    <StackPanel Margin="0,0,0,10"
+                                                Visibility="{Binding IsReady, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <TextBlock Text="{Binding Name}" Style="{StaticResource HintTextStyle}"
+                                                   FontWeight="SemiBold" Margin="0,0,0,4"/>
+                                        <ItemsControl ItemsSource="{Binding VaultButtons}">
+                                            <ItemsControl.ItemsPanel>
+                                                <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+                                            </ItemsControl.ItemsPanel>
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <!-- Disabled while a vault is being read: that
+                                                         takes seconds, and a page whose buttons
+                                                         still look pressable reads as one where
+                                                         the press did nothing. -->
+                                                    <Button Content="{Binding Name}" Margin="0,0,8,6" MinWidth="130"
+                                                            IsEnabled="{Binding DataContext.IsBusy,
+                                                                        RelativeSource={RelativeSource AncestorType=UserControl},
+                                                                        Converter={StaticResource InverseBoolConverter}}"
+                                                            Command="{Binding DataContext.UseNamedVaultCommand,
+                                                                      RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                            CommandParameter="{Binding}"/>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                        <!-- Ready, but with nothing named threeEyedRaven to offer —
+                                             a vault adopted under another name. Choosing the
+                                             manager opens whichever vault it resolved, so this
+                                             state is never a dead end. -->
+                                        <Button Content="{Binding Name}" ContentStringFormat="Use {0}"
+                                                HorizontalAlignment="Left" MinWidth="130"
+                                                Visibility="{Binding HasVaults, Converter={StaticResource InverseBoolToVisibilityConverter}}"
+                                                IsEnabled="{Binding DataContext.IsBusy,
+                                                            RelativeSource={RelativeSource AncestorType=UserControl},
+                                                            Converter={StaticResource InverseBoolConverter}}"
+                                                Command="{Binding DataContext.ChooseCommand,
+                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                CommandParameter="{Binding}"/>
+                                    </StackPanel>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
@@ -112,27 +147,79 @@
                                                    Visibility="{Binding HasTokenCaveat, Converter={StaticResource BoolToVisibilityConverter}}"/>
                                     </StackPanel>
 
-                                    <StackPanel Visibility="{Binding ShowCreateVault, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <!-- More than one vault here holds a configuration: separate
+                                         profiles, and opening one would overwrite the other on the
+                                         next save. Only the user knows which they meant. -->
+                                    <StackPanel Visibility="{Binding ShowVaultChoice, Converter={StaticResource BoolToVisibilityConverter}}">
                                         <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
                                                    Margin="0,0,0,8"
-                                                   Text="Signed in, but there is no 'threeEyedRaven' vault yet. OAuthProxy can create it — it only ever touches items it created, so the vault stays safe to keep other things in."/>
-                                        <Button Content="Create the threeEyedRaven vault" HorizontalAlignment="Left"
-                                                Command="{Binding DataContext.CreateVaultCommand,
-                                                          RelativeSource={RelativeSource AncestorType=ItemsControl}}"
-                                                CommandParameter="{Binding}"/>
+                                                   Text="More than one vault here holds an OAuthProxy configuration. Each is a separate set of credentials, routes and funnels — choose the one to open."/>
+                                        <ItemsControl ItemsSource="{Binding VaultChoices}">
+                                            <ItemsControl.ItemsPanel>
+                                                <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+                                            </ItemsControl.ItemsPanel>
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <!-- Up to the view rather than counting
+                                                         ItemsControl levels: this button lives in
+                                                         an ItemsControl inside another one. -->
+                                                    <Button Content="{Binding Name}" Margin="0,0,8,6" MinWidth="120"
+                                                            IsEnabled="{Binding DataContext.IsBusy,
+                                                                        RelativeSource={RelativeSource AncestorType=UserControl},
+                                                                        Converter={StaticResource InverseBoolConverter}}"
+                                                            Command="{Binding DataContext.UseNamedVaultCommand,
+                                                                      RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                            CommandParameter="{Binding}"/>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
 
-                                        <!-- Creating one is not compulsory. A vault the user already
-                                             made is accepted, but only while it is theirs to give:
-                                             empty, or already holding an OAuthProxy configuration. -->
+                                    <!-- Both offered in every state a vault could be used in, Ready
+                                         included: switching vaults is how one install keeps
+                                         several separate sets of credentials and routes. -->
+                                    <StackPanel Visibility="{Binding ShowVaultActions, Converter={StaticResource BoolToVisibilityConverter}}">
                                         <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
                                                    Margin="0,12,0,6"
-                                                   Text="Or use a vault you already have — type its name. It has to be empty, or a vault OAuthProxy has written to before: anything else has your own entries in it, and this app's housekeeping deletes items it no longer needs."/>
-                                        <StackPanel Orientation="Horizontal">
-                                            <TextBox Width="190" VerticalAlignment="Center"
-                                                     Text="{Binding ExistingVaultName, UpdateSourceTrigger=PropertyChanged}"/>
+                                                   Visibility="{Binding HasVaults, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                   Text="Open a threeEyedRaven vault you already have. Only vaults named after threeEyedRaven and either empty or already OAuthProxy's are listed — your other vaults are none of this app's business, and its housekeeping deletes items it does not recognise."/>
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10"
+                                                    Visibility="{Binding HasVaults, Converter={StaticResource BoolToVisibilityConverter}}">
+                                            <!-- Not IsEditable: the dark theme's ComboBox template
+                                                 has no PART_EditableTextBox, so an editable one
+                                                 shows nothing whatever is selected. Typing a name
+                                                 belongs to "create" below in any case. -->
+                                            <ComboBox Width="190" VerticalAlignment="Center"
+                                                      ItemsSource="{Binding Vaults}"
+                                                      SelectedItem="{Binding SelectedVaultName, Mode=TwoWay}"/>
                                             <Button Content="Use this vault" Margin="8,0,0,0"
                                                     Style="{StaticResource GhostButtonStyle}"
+                                                    IsEnabled="{Binding DataContext.IsBusy,
+                                                                RelativeSource={RelativeSource AncestorType=UserControl},
+                                                                Converter={StaticResource InverseBoolConverter}}"
                                                     Command="{Binding DataContext.UseExistingVaultCommand,
+                                                              RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                    CommandParameter="{Binding}"/>
+                                        </StackPanel>
+
+                                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
+                                                   Margin="0,0,0,6"
+                                                   Text="Or create one. The profile is optional and only names the vault: leave it blank for 'threeEyedRaven', or type Work or Personal to keep a second set of credentials, routes and funnels apart from the first."/>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBox Width="190" VerticalAlignment="Center"
+                                                     Text="{Binding Profile, UpdateSourceTrigger=PropertyChanged}"/>
+                                            <!-- The name the profile assembles into. Shown because
+                                                 it is what the user will see in their password
+                                                 manager, and a name built out of sight is one they
+                                                 cannot check before it exists. -->
+                                            <TextBlock Text="{Binding NewVaultName}" Margin="8,0,0,0"
+                                                       VerticalAlignment="Center"
+                                                       Style="{StaticResource HintTextStyle}"/>
+                                            <Button Content="Create this vault" Margin="8,0,0,0"
+                                                    IsEnabled="{Binding DataContext.IsBusy,
+                                                                RelativeSource={RelativeSource AncestorType=UserControl},
+                                                                Converter={StaticResource InverseBoolConverter}}"
+                                                    Command="{Binding DataContext.CreateVaultCommand,
                                                               RelativeSource={RelativeSource AncestorType=ItemsControl}}"
                                                     CommandParameter="{Binding}"/>
                                         </StackPanel>

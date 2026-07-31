@@ -468,15 +468,20 @@ unlocked.
 | 1Password | `op` 2.0 or newer | `winget install AgileBits.1Password.CLI` |
 | Proton Pass | `pass-cli` | `winget install Proton.PassCLI` |
 
-Open OAuthProxy and it walks you through the rest: install, sign in, and create the vault. It only
-ever touches items it created, so `threeEyedRaven` stays safe to keep other things in.
+Open OAuthProxy and it walks you through the rest: install, sign in, and set up a vault. It only
+ever touches items it created, so the vault stays safe to keep other things in.
 
-**Using a vault you already have.** Creating `threeEyedRaven` is not compulsory — type the name of
-an existing vault on the setup page instead. Only two kinds are accepted: an **empty** vault, or one
-**OAuthProxy has already written to**. Anything else has your own entries in it, and this app's
-housekeeping deletes items it no longer needs, so it will not take that vault over. An empty one is
-stamped with the `OAuthProxy Config` item straight away — that item is how the vault is recognised
-next launch, since the name you typed is deliberately not stored on this PC.
+**Naming the vault.** `threeEyedRaven` is only the name OAuthProxy looks for first — the setup page
+lets you create a vault with any name you like, and one vault per profile is what keeps their
+credentials, routes and funnels apart. A vault created this way is stamped with the `OAuthProxy
+Config` item straight away: that item is how the vault is recognised next launch, since the name you
+chose is deliberately not stored on this PC.
+
+**Using a vault you already have.** Pick it from the list on the setup page instead. Only two kinds
+are accepted: an **empty** vault, or one **OAuthProxy has already written to**. Anything else has
+your own entries in it, and this app's housekeeping deletes items it no longer needs, so it will not
+take that vault over. Both controls stay available once a vault is connected — that is how you
+switch profiles.
 
 **Signing in.** For 1Password, turn on **Settings → Developer → Integrate with 1Password CLI** in
 the desktop app; without it, `op account add` then `op signin`. For Proton Pass, `pass-cli login`
@@ -492,11 +497,48 @@ deliberately stores nothing about itself locally. Once one vault has a configura
 one is used and the question stops.
 
 **Settings → Password manager** shows which manager and which vault are in use, where its CLI is
-and what version answered, and whether everything on screen has reached the vault. **Sync now**
-pushes pending changes; **Disconnect** stops using the manager, empties the in-memory configuration
-and returns to the setup page — the proxy serves nothing until you connect one again. Nothing in
-the vault is deleted. If changes are still unsaved, disconnecting tries to save them first and then
-asks before discarding.
+and what version answered, and whether everything on screen has reached the vault:
+
+| Button | Does |
+|---|---|
+| **Sync now** | Pushes pending changes. With nothing pending it re-reads the vault instead, which is what catches an item you deleted in the password manager |
+| **Rewrite all items to vault** | Writes every item and the config item again from memory — the way back from a vault edited by hand. It replaces every item, so prefer the integrity check when only one is missing |
+| **Re-initialise from vault** | Throws away everything in memory and loads it again. Asks first: every route and funnel is rebuilt, so requests in flight fail, and anything unsaved is lost |
+| **Disconnect** | Stops using the manager and empties the configuration. Asks first, for the same reason |
+| **Vault integrity** | Compares vault against configuration — see below |
+
+Nothing in the vault is deleted by disconnecting, so connecting the **same** vault brings it all
+back. Connecting a **different** one gives you a separate set of credentials, routes and funnels:
+one install, as many profiles as you have vaults, one at a time. After disconnecting, the setup
+page lists the account's vaults to pick from — OAuthProxy deliberately stops rediscovering the one
+you just left, or it would reattach to it before you could choose.
+
+**If two vaults both hold a configuration**, OAuthProxy will not guess: opening one would overwrite
+the other on its next save. The setup page names them and asks. To switch profiles at any time, pick
+another vault — or create one — on the setup page; both are offered even when a vault is already
+connected.
+
+**Vault integrity** accounts for every live item in the vault and changes nothing until you pick:
+
+- **Items nothing refers to** — left by a delete that failed or a save that died part way, a second
+  item claiming a record that already has one, or an item titled as OAuthProxy's in a shape it can
+  no longer match (a record id edited away — no save will ever touch that item again). Delete one at
+  a time or all at once.
+- **Records whose item is missing** — each says what it costs (a credential's secret is then only in
+  memory, and dies with the process). **Write missing items to vault** puts them back from memory
+  and touches nothing else; removing the record from the configuration is the other, destructive
+  option. Write them while OAuthProxy is still running — the secret exists nowhere else.
+- **Everything else in this vault** — your own items, listed but never read, written, or deleted by
+  OAuthProxy. They are shown so the check covers the whole vault rather than only what this app can
+  recognise, and because a renamed OAuthProxy item shows up nowhere else. Delete is one at a time,
+  never part of a bulk action.
+
+Saving deliberately sees less than checking does: it only looks at items titled as OAuthProxy's,
+which is what keeps your own entries out of reach of its housekeeping.
+
+> Items your password manager considers deleted are ignored everywhere — Proton Pass keeps
+> returning trashed items from `item list`, and 1Password returns archived ones. Reading those made
+> an emptied vault look full and a deleted credential look present.
 
 ### What the vault looks like
 
@@ -514,6 +556,14 @@ never a question of which copy is right.
 
 You can edit these in your password manager. OAuthProxy picks up changes on its next load and
 overwrites them on its next save, so use **Reload from vault** after editing by hand.
+
+**If you delete a credential's item there**, OAuthProxy takes that as the credential being gone: on
+the next load it removes it from the configuration, tells you in a banner (naming any routes that
+now forward unauthenticated), and writes the corrected config item back. Without that it kept a
+credential the vault no longer had, and every launch raised the same ghost. A credential that never
+had an item — a public OAuth client with no secret — is left alone; the removal only happens when
+the config item points at an item that has been deleted. **Sync now** on the Settings tab does the
+same check on demand when there is nothing waiting to be saved.
 
 ### While the vault is locked
 

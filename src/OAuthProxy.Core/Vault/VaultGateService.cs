@@ -130,12 +130,13 @@ public sealed class VaultGateService
         return Publish(status, kind);
     }
 
-    /// <summary>Creates threeEyedRaven in the given manager, then re-evaluates.</summary>
-    public async Task<VaultGateStatus> CreateVaultAsync(VaultBackendKind kind, CancellationToken ct = default)
+    /// <summary>Creates a vault with the user's chosen name in the given manager, then re-evaluates.</summary>
+    public async Task<VaultGateStatus> CreateVaultAsync(
+        VaultBackendKind kind, string vaultName, CancellationToken ct = default)
     {
         _disconnected = false;
 
-        await ProviderFor(kind).EnsureVaultAsync(ct);
+        await ProviderFor(kind).CreateVaultAsync(vaultName, ct);
         _activityLog.Log($"STARTUP created the '{ProviderFor(kind).VaultName}' vault in {VaultLockGuidance.DisplayName(kind)}");
 
         return await ResolveAfterUserChoiceAsync(kind, ct);

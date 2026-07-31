@@ -144,6 +144,34 @@ public partial class App : Application
         var setupViewModel = _webApp.Services.GetRequiredService<SetupViewModel>();
         setupViewModel.ReadyToStart += StartProxyAsync;
 
+        // "Sync now" with nothing pending checks the vault instead of doing nothing. The reload
+        // itself lives on the vault-status view model, which depends on this one, so it arrives as
+        // a hook rather than a reference.
+        settingsViewModel.ReloadFromVaultRequested = () =>
+            _webApp.Services.GetRequiredService<VaultStatusViewModel>().ReloadFromVaultAsync();
+
+        // "Re-initialise from vault": empty everything held in memory and load it again, which is
+        // the same work a reconnect does — the only difference is that the password manager was
+        // never disconnected.
+        settingsViewModel.ReinitialiseRequested = async () =>
+        {
+            var configStoreCache = _webApp.Services.GetRequiredService<ConfigStoreCache>();
+
+            await configStoreCache.ResetAsync();
+            await _webApp.Services.GetRequiredService<VaultStatusViewModel>().ReconnectAsync();
+
+            _webApp.Services.GetRequiredService<ProxyConfigChangeNotifier>().Rebuild();
+        };
+
+        // Dropping a record can take a route or funnel with it, so the tabs showing them have to
+        // be rebuilt — their rows hold references to records that are no longer in the store.
+        settingsViewModel.RecordsDropped += () =>
+        {
+            _webApp.Services.GetRequiredService<CredentialsViewModel>().Reload();
+            _webApp.Services.GetRequiredService<RoutesViewModel>().Reload();
+            _webApp.Services.GetRequiredService<McpFunnelViewModel>().Reload();
+        };
+
         // Disconnecting from the Settings tab puts the whole window back to the setup page: with no
         // password manager there is no configuration, so the tabs would be four empty grids whose
         // every control fails — the same reason the app starts there.
