@@ -250,6 +250,14 @@ public partial class App : Application
 
         _proxyStarted = true;
         _boundPort = port;
+
+        // The tabs were built before this — they have to be, the window exists while the vault is
+        // still locked — so every one of them was rendered from an empty store. Without this the
+        // Credentials tab opens saying there are none, and stays that way until something else
+        // reloads it. The other tabs hid the same bug: switching to them reloads them on the way in,
+        // and Credentials is the tab already on screen.
+        _webApp.Services.GetRequiredService<VaultStatusViewModel>().ReloadTabs();
+
         mainWindowViewModel.EnterNormalMode();
         _trayIconManager?.SetState(TrayState.Running);
     }

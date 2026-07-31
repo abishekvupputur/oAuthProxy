@@ -129,7 +129,12 @@ public sealed partial class VaultStatusViewModel : ObservableObject
         Apply();
     }
 
-    private void ReloadTabs()
+    /// <summary>
+    /// Rebuilds all four tabs from the store. Public because the first load is not driven from
+    /// here: the tabs are constructed while the vault is still locked, so their rows are built
+    /// from an empty store and only the load that follows can fill them in.
+    /// </summary>
+    public void ReloadTabs()
     {
         _credentials.Reload();
         _routes.Reload();
