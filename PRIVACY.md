@@ -185,6 +185,14 @@ trust.
 **Building it yourself** produces the same application from the same source; see
 [README.md](README.md#building).
 
+**Most of this code was written by AI.** RavensPort was built with Claude (Anthropic) as the
+principal author of the code, directed and reviewed by a human developer  — the majority of commits in this repository record that explicitly. This is disclosed because it bears on how much weight to put on the paragraphs above:
+it is a reason to check the source rather than to trust a stated intent. The test suite, the
+provenance attestation, and the public history exist for exactly that purpose, and none of them
+care who wrote the code. It also means ordinary software risk applies — bugs in a program that
+handles OAuth tokens and API keys are the failure mode worth worrying about here, not data
+collection, which the source shows does not happen.
+
 ---
 
 ## 8. Legal position
