@@ -281,9 +281,23 @@ Use Include to grant a known set, Exclude to revoke a few from an otherwise trus
                 <!-- Sources. -->
                 <Grid Margin="0,4,0,6">
                     <TextBlock Text="Sources" Style="{StaticResource SectionHeaderStyle}" VerticalAlignment="Center"/>
-                    <Button Content="Refresh all" HorizontalAlignment="Right" Width="100"
-                            Style="{StaticResource GhostButtonStyle}" Command="{Binding RefreshAllSourcesCommand}"
-                            ToolTip="Connect to every enabled source and re-read the tools it offers"/>
+                    <!-- The footer carries which source is being contacted, but the footer is at the
+                         bottom of a long page and this button is in the middle of it. Saying so on
+                         the button itself is what tells someone who just clicked that it took. -->
+                    <Button HorizontalAlignment="Right" Width="100"
+                            Command="{Binding RefreshAllSourcesCommand}"
+                            ToolTip="Connect to every enabled source and re-read the tools it offers">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource GhostButtonStyle}">
+                                <Setter Property="Content" Value="Refresh all"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding RefreshAllSourcesCommand.IsRunning}" Value="True">
+                                        <Setter Property="Content" Value="Checking…"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
                 </Grid>
 
                 <TextBlock Style="{StaticResource EmptyStateStyle}"

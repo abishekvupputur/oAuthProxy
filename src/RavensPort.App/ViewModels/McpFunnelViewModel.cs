@@ -289,14 +289,47 @@ public sealed partial class McpFunnelViewModel : ObservableObject
     [RelayCommand]
     private async Task RefreshAllSourcesAsync()
     {
-        foreach (var item in Sources.ToList())
-        {
-            if (!item.Enabled) continue;
+        var due = Sources.Where(item => item.Enabled).ToList();
 
-            _catalogCache.Set(item.Source.Id, await _connectionPool.DiscoverAsync(item.Source));
+        if (due.Count == 0)
+        {
+            StatusMessage = "No enabled sources to refresh.";
+            return;
         }
 
-        StatusMessage = "All sources refreshed.";
+        var done = 0;
+        var unreachable = 0;
+
+        // Said before anything is awaited: these can each sit on a cold upstream for a minute, and
+        // with no line here the button looked like it had done nothing until every source had
+        // finished.
+        StatusMessage = $"Checking {due.Count} source(s)…";
+
+        // All at once rather than one after another. Sequentially this cost the sum of every
+        // upstream's handshake and let a single slow source hold up the rest, which made
+        // refreshing three sources by hand reliably faster than the button meant to do it for
+        // you. The pool is keyed per source and caches the connect task, so concurrent callers
+        // are the case it was built for.
+        await Task.WhenAll(due.Select(async item =>
+        {
+            var catalog = await _connectionPool.DiscoverAsync(item.Source);
+
+            // Still on the dispatcher: these lambdas start on it and nothing below configures the
+            // await away from it, so the counters and the status line stay single-threaded.
+            _catalogCache.Set(item.Source.Id, catalog);
+
+            done++;
+            if (catalog.Error is not null) unreachable++;
+
+            StatusMessage = $"Checked {done} of {due.Count} — '{item.Name}'…";
+        }));
+
+        // "All sources refreshed" was said even when every one of them had failed. The count of
+        // what could not be reached is the part worth reading.
+        StatusMessage = unreachable == 0
+            ? $"Refreshed {due.Count} source(s)."
+            : $"Refreshed {due.Count} source(s) — {unreachable} could not be reached; see their rows.";
+
         Reload();
     }
 
