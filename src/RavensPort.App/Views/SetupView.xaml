@@ -28,7 +28,7 @@
                 <!-- Experimental warning requested by user -->
                 <Border Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush0}"
                         BorderThickness="1" Padding="11,9" CornerRadius="6" Margin="0,0,0,14">
-                    <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Foreground="{StaticResource ErrorBrush}"><Run
+                    <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Foreground="{StaticResource TextBrush}" FontWeight="Bold"><Run
                         Style="{StaticResource EmphasisRunStyle}">Experimental feature:</Run><Run
                         xml:space="preserve"> Having a second vault per password manager and using two password managers at the same time, although possible, is still experimental and is under testing.</Run></TextBlock>
                 </Border>
