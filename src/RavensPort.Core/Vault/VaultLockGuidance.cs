@@ -20,7 +20,7 @@ public static class VaultLockGuidance
 
     public static string InstallCommand(VaultBackendKind kind) => kind switch
     {
-        VaultBackendKind.OnePassword => "winget install AgileBits.1Password.CLI",
+        VaultBackendKind.OnePassword => "",
         VaultBackendKind.ProtonPass => "winget install Proton.PassCLI",
         _ => "",
     };
@@ -37,8 +37,7 @@ public static class VaultLockGuidance
     {
         VaultBackendKind.OnePassword =>
             "In the 1Password desktop app, open Settings → Developer and turn on "
-            + "\"Integrate with 1Password CLI\". Then unlock 1Password.\n\n"
-            + "Without the desktop app, run \"op account add\" once and then \"op signin\".",
+            + "\"Integrate with 1Password CLI\". Then unlock 1Password.",
 
         // No terminal instructions here, deliberately. RavensPort keeps a pass-cli session of its
         // own — its own session directory, encrypted with a key only it holds — so a `pass-cli

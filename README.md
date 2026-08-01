@@ -473,9 +473,9 @@ its own encrypted session for that sign-in. Neither contains any of the above. S
 
 ### Supported managers
 
-| Manager | CLI | Install |
-|---|---|---|
-| 1Password | `op` 2.0 or newer | `winget install AgileBits.1Password.CLI` |
+| Manager | Client | Install |
+| --- | --- | --- |
+| 1Password | Native SDK (embedded) | `winget install AgileBits.1Password` (Desktop App required) |
 | Proton Pass | `pass-cli` | `winget install Proton.PassCLI`, or let RavensPort fetch it — the setup page offers **Download it for me** |
 
 Open RavensPort and it walks you through the rest: install, sign in, and set up a vault. It only
@@ -505,9 +505,7 @@ generated — it is shown once. Losing it costs the session only; everything Rav
 Proton Pass and survives.
 
 **Signing in — 1Password.** Turn on **Settings → Developer → Integrate with 1Password CLI** in the
-desktop app; without it, `op account add` then `op signin`. There is no in-app equivalent for
-1Password: `op` authenticates with a Secret Key and account password at a terminal rather than
-through a browser link, and its licence does not allow RavensPort to distribute it.
+desktop app. Alternatively, use a Service Account token (see below).
 
 **Either manager** can instead use a token — `OP_SERVICE_ACCOUNT_TOKEN` or
 `PROTON_PASS_PERSONAL_ACCESS_TOKEN` — which is the better option for a machine that should never
