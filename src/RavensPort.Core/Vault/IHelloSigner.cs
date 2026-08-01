@@ -33,11 +33,18 @@ internal enum HelloFailure
 /// caller — <see cref="HelloKeyProtector"/> — owns every user-facing message, and a transport that
 /// invented its own wording would put half the explanations somewhere nobody looks for them.
 /// </summary>
-internal readonly record struct HelloResult(HelloFailure Failure, byte[]? Signature)
+internal readonly record struct HelloResult(HelloFailure Failure, byte[]? Signature, bool Created = false)
 {
     public bool Succeeded => Failure is HelloFailure.None;
 
     public static HelloResult Ok(byte[]? signature = null) => new(HelloFailure.None, signature);
+
+    /// <summary>
+    /// A credential that did not exist a moment ago and now does. Distinguished from a reused one
+    /// so that a failure later in the same operation cleans up only what it made — deleting a
+    /// credential that predated the attempt would cost the user an extra gesture on every retry.
+    /// </summary>
+    public static HelloResult CreatedNew() => new(HelloFailure.None, null, Created: true);
 
     public static HelloResult Failed(HelloFailure failure) => new(failure, null);
 }
@@ -62,8 +69,15 @@ internal interface IHelloSigner
     /// <summary>Whether this machine can hold a key behind a gesture at all.</summary>
     Task<bool> IsAvailableAsync();
 
-    /// <summary>Creates the credential, replacing any credential of the same name.</summary>
-    Task<HelloResult> CreateAsync(string name);
+    /// <summary>
+    /// Makes sure a credential of this name exists, creating one only when there is none.
+    ///
+    /// **Must not create over an existing credential.** Creating prompts, and the
+    /// <see cref="SignAsync"/> that always follows it prompts again — so replacing unconditionally
+    /// charged the user two Hello gestures for one sign-in. Reusing costs nothing: the challenge is
+    /// fresh per seal, so the same RSA key still yields a different encryption key every time.
+    /// </summary>
+    Task<HelloResult> EnsureAsync(string name);
 
     /// <summary>
     /// Opens the named credential and signs <paramref name="challenge"/> with it, prompting.
@@ -110,17 +124,25 @@ internal sealed class KeyCredentialHelloSigner : IHelloSigner
     }
 
     [SupportedOSPlatform("windows10.0.19041.0")]
-    public async Task<HelloResult> CreateAsync(string name)
+    public async Task<HelloResult> EnsureAsync(string name)
     {
         if (!IsSupportedWindows) return HelloResult.Failed(HelloFailure.NotEnrolled);
 
-        // ReplaceExisting: the alternative is failing because a credential from a previous install
-        // is still there, which the user can neither see nor clear.
+        // Opening does not prompt, so this costs nothing when the credential is already there —
+        // and it is the difference between one Hello gesture per sign-in and two. Replacing
+        // unconditionally, which is what this used to do, meant the create prompted and then the
+        // signature prompted again for the same operation.
+        var existing = await KeyCredentialManager.OpenAsync(name);
+        if (existing.Status == KeyCredentialStatus.Success) return HelloResult.Ok();
+
+        // ReplaceExisting rather than FailIfExists: Open said there is nothing usable here, but a
+        // credential can exist in a state Open rejects, and failing on it would leave the user with
+        // something they can neither see nor clear.
         var creation = await KeyCredentialManager.RequestCreateAsync(
             name, KeyCredentialCreationOption.ReplaceExisting);
 
         return creation.Status == KeyCredentialStatus.Success
-            ? HelloResult.Ok()
+            ? HelloResult.CreatedNew()
             : HelloResult.Failed(Translate(creation.Status));
     }
 

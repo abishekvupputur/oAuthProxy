@@ -7,7 +7,7 @@
         mc:Ignorable="d"
         Title="RavensPort access request" SizeToContent="Height" Width="480"
         WindowStyle="None" ResizeMode="NoResize" ShowInTaskbar="True" Topmost="True"
-        WindowStartupLocation="CenterScreen"
+        WindowStartupLocation="Manual"
         Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}"
         TextElement.FontFamily="Segoe UI">
     <shell:WindowChrome.WindowChrome>

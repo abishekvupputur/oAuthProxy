@@ -97,6 +97,61 @@ public class HelloCredentialBindingTests : IDisposable
         Assert.True(_hello.SignCalls > before, "the key came back without a gesture being requested");
     }
 
+    // ---- How many times the user is asked -----------------------------------------------------
+
+    [Fact]
+    public async Task Protect_WhenTheCredentialExists_CostsOneGesture()
+    {
+        // The reported bug: signing in raised two Windows Hello prompts. RequestCreateAsync
+        // prompts and the RequestSignAsync after it prompts again, so recreating the credential on
+        // every sign-in charged two gestures to complete one operation. Opening an existing one
+        // does not prompt, so reusing it costs exactly the signature.
+        await ProtectAsync();
+
+        var before = _hello.GesturePrompts;
+        await ProtectAsync("a-second-key");
+
+        Assert.Equal(before + 1, _hello.GesturePrompts);
+        Assert.Equal("a-second-key", await Protector.UnprotectAsync(SessionDir));
+    }
+
+    [Fact]
+    public async Task Protect_OnAMachineWithNoCredentialYet_CostsTwoGestures()
+    {
+        // Stated rather than hidden: a credential that does not exist has to be created, and
+        // creating prompts before the signature can be taken. One gesture is not reachable here
+        // -- KeyCredentialManager offers no create-and-sign -- so the first sign-in on a PC asks
+        // twice and every one after it asks once.
+        await ProtectAsync();
+
+        Assert.Equal(2, _hello.GesturePrompts);
+    }
+
+    [Fact]
+    public async Task Unprotect_CostsExactlyOneGesture()
+    {
+        await ProtectAsync();
+
+        var before = _hello.GesturePrompts;
+        await Protector.UnprotectAsync(SessionDir);
+
+        Assert.Equal(before + 1, _hello.GesturePrompts);
+    }
+
+    [Fact]
+    public async Task Protect_ReusesTheCredentialRatherThanReplacingIt()
+    {
+        // Reuse is only safe because the challenge is fresh per seal -- the same RSA key still
+        // yields a different encryption key, which is why the two blobs below differ.
+        await ProtectAsync("first");
+        var first = _store.Peek(Name)!;
+
+        await ProtectAsync("second");
+
+        Assert.NotEqual(first, _store.Peek(Name)!);
+        Assert.Equal("second", await Protector.UnprotectAsync(SessionDir));
+    }
+
     [Fact]
     public async Task BothHalvesAreFiledUnderTheSameName()
     {
@@ -128,7 +183,7 @@ public class HelloCredentialBindingTests : IDisposable
         // They even have a Hello credential of the same name — a different TPM is still a different
         // signature, so the name buys them nothing.
         var theirSigner = new FakeHelloSigner();
-        await theirSigner.CreateAsync(Name);
+        await theirSigner.EnsureAsync(Name);
 
         await Assert.ThrowsAsync<VaultCliException>(
             () => new HelloKeyProtector(_log, theirSigner, theirStore).UnprotectAsync(SessionDir));
@@ -261,7 +316,7 @@ public class HelloCredentialBindingTests : IDisposable
     }
 
     [Fact]
-    public async Task Protect_WhenTheGestureIsCancelled_StoresNothing_AndLeavesNoCredential()
+    public async Task Protect_WhenTheGestureIsCancelled_StoresNothing_AndUndoesTheCredentialItMade()
     {
         _hello.SignFailure = HelloFailure.Cancelled;
 
@@ -269,9 +324,29 @@ public class HelloCredentialBindingTests : IDisposable
 
         Assert.False(_store.Exists(Name));
 
-        // The credential was created a moment earlier and now keys nothing. Leaving it would be a
-        // Hello prompt the user could accept to no effect.
+        // This call created the credential and then failed, so it cleans up after itself.
         Assert.False(_hello.HasCredential(Name));
+    }
+
+    [Fact]
+    public async Task Protect_WhenTheGestureIsCancelled_KeepsACredentialItDidNotCreate()
+    {
+        // The other half of the same rule. A credential from an earlier sign-in is not this call's
+        // to destroy -- deleting it would put the user back to two prompts on the retry, which is
+        // precisely what DeleteIfWeCreatedItAsync exists to prevent.
+        await ProtectAsync();
+        await Protector.ForgetAsync(SessionDir);
+
+        _hello.SignFailure = HelloFailure.Cancelled;
+        await Assert.ThrowsAsync<VaultCliException>(() => ProtectAsync());
+
+        Assert.True(_hello.HasCredential(Name));
+
+        _hello.SignFailure = null;
+        var before = _hello.GesturePrompts;
+        await ProtectAsync();
+
+        Assert.Equal(before + 1, _hello.GesturePrompts);
     }
 
     [Fact]
@@ -327,15 +402,51 @@ public class HelloCredentialBindingTests : IDisposable
     // ---- Sign-out ----------------------------------------------------------------------------
 
     [Fact]
-    public async Task Forget_RemovesBothHalves()
+    public async Task Forget_RemovesTheStoredKey_AndKeepsTheNowInertCredential()
     {
         await ProtectAsync();
 
         await Protector.ForgetAsync(SessionDir);
 
+        // The blob goes, so there is nothing a later "sign in" could resume.
         Assert.False(_store.Exists(Name));
-        Assert.False(_hello.HasCredential(Name));
         Assert.Null(await Protector.UnprotectAsync(SessionDir));
+
+        // The credential stays. It keys nothing now -- see TheHelloCredentialAlone_HasNothingToOpen
+        // -- and keeping it is what makes the next sign-in one gesture instead of two.
+        Assert.True(_hello.HasCredential(Name));
+    }
+
+    [Fact]
+    public async Task ForgetThenProtectAgain_CostsOneGesture()
+    {
+        // The reported bug, in the shape it actually reached the user. ForgetAsync runs on every
+        // path back to the sign-in button -- sign-out, discard, and a login that was cancelled or
+        // failed -- so deleting the credential there meant every attempt was a first attempt, and
+        // no amount of reuse logic in ProtectAsync could ever fire.
+        await ProtectAsync();
+        await Protector.ForgetAsync(SessionDir);
+
+        var before = _hello.GesturePrompts;
+        await ProtectAsync("after-a-sign-out");
+
+        Assert.Equal(before + 1, _hello.GesturePrompts);
+        Assert.Equal("after-a-sign-out", await Protector.UnprotectAsync(SessionDir));
+    }
+
+    [Fact]
+    public async Task ACancelledSignIn_DoesNotMakeTheNextAttemptCostTwoGestures()
+    {
+        // A user who cancels the browser login and immediately retries. AbandonAsync calls
+        // ForgetAsync, so this is the same trap by a different route.
+        await ProtectAsync();
+        await Protector.ForgetAsync(SessionDir);
+        await Protector.ForgetAsync(SessionDir);
+
+        var before = _hello.GesturePrompts;
+        await ProtectAsync();
+
+        Assert.Equal(before + 1, _hello.GesturePrompts);
     }
 
     [Fact]

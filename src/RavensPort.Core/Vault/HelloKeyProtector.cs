@@ -140,8 +140,10 @@ public sealed class HelloKeyProtector
     {
         var name = NameFor(sessionDirectory);
 
-        var created = await _signer.CreateAsync(name);
-        if (!created.Succeeded) throw new VaultCliException(Explain(created.Failure, "set up"));
+        // Reused when it is already there. Creating prompts and signing prompts, so a credential
+        // made fresh on every sign-in cost two gestures where one is needed.
+        var ensured = await _signer.EnsureAsync(name);
+        if (!ensured.Succeeded) throw new VaultCliException(Explain(ensured.Failure, "set up"));
 
         // The challenge is generated before the signature is taken over it, and stored with the
         // ciphertext. It is not a secret — its job is to be the fixed input only the TPM can sign.
@@ -151,9 +153,11 @@ public sealed class HelloKeyProtector
 
         if (!signed.Succeeded)
         {
-            // The credential exists and keys nothing. Take it back out rather than leaving a prompt
-            // the user could accept to no effect.
-            await _signer.DeleteAsync(name);
+            // Only if this call made it. A credential that was already here belongs to an earlier
+            // sign-in, and removing it would charge the user a create prompt on every retry — which
+            // is exactly the two-gesture bug this method used to have.
+            await DeleteIfWeCreatedItAsync(ensured, name);
+
             throw new VaultCliException(Explain(signed.Failure, "set up"));
         }
 
@@ -175,7 +179,7 @@ public sealed class HelloKeyProtector
         }
         catch (Exception ex)
         {
-            await _signer.DeleteAsync(name);
+            await DeleteIfWeCreatedItAsync(ensured, name);
 
             throw new VaultCliException(
                 $"RavensPort could not store the session key in Windows Credential Manager: {ex.Message}");
@@ -246,25 +250,53 @@ public sealed class HelloKeyProtector
     }
 
     /// <summary>
-    /// Removes both halves — the Credential Manager entry and the Hello credential itself. Called
-    /// on sign-out, so that "signed out" does not leave either behind.
+    /// Removes the stored key. Called on sign-out, on discard, and on a sign-in that did not
+    /// finish, so that nothing is left that a later "sign in" could resume.
+    ///
+    /// **The Hello credential is deliberately kept.** It used to go too, on the reasoning that
+    /// "signed out" should not leave a credential in the user's Hello store — tidiness, not
+    /// security. The cost turned out to be severe: this runs on every path back to the sign-in
+    /// button, including a cancelled login, so every attempt found no credential, had to create one,
+    /// and charged the user a create prompt on top of the signature. Two Hello prompts to sign in
+    /// once, every single time.
+    ///
+    /// Keeping it gives up nothing. The credential is an RSA key with no data attached — the blob
+    /// it once keyed is gone, and <c>TheHelloCredentialAlone_HasNothingToOpen</c> pins exactly that.
+    /// It cannot be used to reach the vault, the session, or anything else; it can only make the
+    /// next sign-in a single gesture.
     /// </summary>
-    public async Task ForgetAsync(string sessionDirectory)
+    public Task ForgetAsync(string sessionDirectory)
     {
         try
         {
-            var name = NameFor(sessionDirectory);
-
-            SafeDeleteStored(name);
+            SafeDeleteStored(NameFor(sessionDirectory));
             TryDeleteLegacyBlob(sessionDirectory);
-
-            await _signer.DeleteAsync(name);
         }
         catch (Exception ex)
         {
-            // Never allowed to fail a sign-out. Without the blob the credential opens nothing, and
-            // without the credential the blob decrypts to nothing.
-            _activityLog.Log($"VAULT could not fully remove the Windows Hello key: {ex.Message}");
+            // Never allowed to fail a sign-out. Without the blob there is nothing to open, whatever
+            // is left in the Hello store.
+            _activityLog.Log($"VAULT could not fully remove the stored session key: {ex.Message}");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Undoes a credential this call created, and leaves alone one it merely borrowed. The
+    /// difference is the whole reason <see cref="HelloResult.Created"/> exists.
+    /// </summary>
+    private async Task DeleteIfWeCreatedItAsync(HelloResult ensured, string name)
+    {
+        if (!ensured.Created) return;
+
+        try
+        {
+            await _signer.DeleteAsync(name);
+        }
+        catch
+        {
+            // Best-effort cleanup of a credential that is already useless.
         }
     }
 
