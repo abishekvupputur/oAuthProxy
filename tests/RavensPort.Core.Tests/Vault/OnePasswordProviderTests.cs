@@ -88,7 +88,7 @@ public class OnePasswordProviderTests : IDisposable
     {
         // 1.x has neither the item/vault nouns nor JSON output. Saying so is far better than the
         // parse errors it would otherwise produce three calls later.
-        var fake = new FakeOnePassword { Version = "1.12.4" };
+        var fake = new FakeOnePassword { Version = "0.3.0" };
 
         var status = await NewProvider(fake.AsRunner()).ProbeAsync();
 
