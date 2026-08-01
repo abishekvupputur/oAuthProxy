@@ -80,7 +80,7 @@ public sealed partial class SetupViewModel(
             // on the path that already blocks on two CLI probes.
             if (!_helloChecked)
             {
-                _isHelloAvailable = await ProtonPassAuthenticator.IsHelloAvailableAsync();
+                _isHelloAvailable = await protonAuthenticator.IsHelloAvailableAsync();
                 _helloChecked = true;
             }
 
@@ -294,19 +294,6 @@ public sealed partial class SetupViewModel(
     // that could only ever open a text box asking for someone's 1Password master credentials would
     // be worse than the honest instructions the card already shows.
 
-    /// <summary>The key the user pasted, pushed in from the PasswordBox — see SetupView.xaml.cs.</summary>
-    [ObservableProperty] private string _sessionKeyInput = "";
-
-    /// <summary>
-    /// A freshly generated key, shown once so the user can save it. Held only until they dismiss
-    /// it: this is the single moment it is on screen, and it is not recoverable afterwards.
-    /// </summary>
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(HasGeneratedKey))]
-    private string? _generatedKey;
-
-    public bool HasGeneratedKey => GeneratedKey is { Length: > 0 };
-
     /// <summary>The URL pass-cli printed. Shown, never launched — see <see cref="SignInProtonAsync"/>.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasSignInUrl))]
@@ -322,6 +309,27 @@ public sealed partial class SetupViewModel(
     private CancellationTokenSource? _signInCts;
 
     public bool HasSessionKey => protonSession.HasKey;
+
+    /// <summary>
+    /// Whether to show the Sign in button.
+    ///
+    /// Gated on Hello for a first sign-in, because signing in is what creates the session key and
+    /// Hello is the only thing that can store it — the key is never shown, so there is no other way
+    /// back into the session after a restart. A button that could only produce an unopenable
+    /// session is worse than the explanation shown in its place.
+    /// </summary>
+    public bool CanShowSignInButton => HasSessionKey || (IsFirstSignIn && _isHelloAvailable);
+
+    /// <summary>Whether to explain that Hello has to be set up before Proton Pass can be used here.</summary>
+    public bool NeedsHelloSetup => IsFirstSignIn && !_isHelloAvailable;
+
+    /// <summary>
+    /// The one place that message is written — see <see cref="ProtonPassAuthenticator.HelloRequired"/>.
+    /// An instance property despite being constant: WPF resolves binding paths through
+    /// <c>TypeDescriptor</c>, which does not enumerate static members, so a static one would bind
+    /// to nothing and show an empty block where the explanation should be.
+    /// </summary>
+    public string HelloRequiredMessage => ProtonPassAuthenticator.HelloRequired;
 
     /// <summary>
     /// Returning: a session is sitting on disk and only needs the key that opens it.
@@ -344,9 +352,6 @@ public sealed partial class SetupViewModel(
     /// </summary>
     public bool CanUnlockWithHello => _isHelloAvailable && protonAuthenticator.HasHelloKey;
 
-    /// <summary>True when pasting is the only way in — no Hello, or nothing stored behind it.</summary>
-    public bool MustPasteSessionKey => NeedsSessionKey && !CanUnlockWithHello;
-
     /// <summary>Whether this PC can do Hello at all, for the first-run explanation.</summary>
     public bool IsHelloAvailable => _isHelloAvailable;
 
@@ -357,10 +362,11 @@ public sealed partial class SetupViewModel(
     private void NotifySessionStateChanged()
     {
         OnPropertyChanged(nameof(HasSessionKey));
+        OnPropertyChanged(nameof(CanShowSignInButton));
         OnPropertyChanged(nameof(NeedsSessionKey));
         OnPropertyChanged(nameof(IsFirstSignIn));
         OnPropertyChanged(nameof(CanUnlockWithHello));
-        OnPropertyChanged(nameof(MustPasteSessionKey));
+        OnPropertyChanged(nameof(NeedsHelloSetup));
         OnPropertyChanged(nameof(IsHelloAvailable));
     }
 
@@ -379,7 +385,7 @@ public sealed partial class SetupViewModel(
             // HelloConsentWindow.
             if (!HelloConsentWindow.RequestUnlock(protonAuthenticator.UnlockWithHelloAsync))
             {
-                StatusMessage = "Not unlocked. Paste your session key, or try Windows Hello again.";
+                StatusMessage = "Not unlocked. Discard this session and sign in again, or try Windows Hello again.";
                 return;
             }
 
@@ -390,9 +396,8 @@ public sealed partial class SetupViewModel(
         }
         catch (VaultCliException ex)
         {
-            // Cancelled, locked out, or a blob that no longer opens. Every one of those has a
-            // pasted key as the way through, and the message says so.
             StatusMessage = ex.Message;
+            NotifySessionStateChanged();
         }
         catch (Exception ex)
         {
@@ -431,39 +436,6 @@ public sealed partial class SetupViewModel(
         }
     }
 
-    /// <summary>
-    /// Makes a new session key and shows it.
-    ///
-    /// Destructive when a session already exists — the old session is encrypted with the old key,
-    /// so replacing it makes that session unopenable. Refused outright in that case rather than
-    /// warned about: the recovery is to sign out and sign in again, which the user can do
-    /// deliberately, and a confirmation dialog here would be one careless click away from the
-    /// same damage.
-    /// </summary>
-    [RelayCommand]
-    private void GenerateSessionKey()
-    {
-        if (NeedsSessionKey)
-        {
-            StatusMessage =
-                "There is already a Proton Pass session here, encrypted with your existing key. "
-                + "Paste that key to unlock it, or choose Sign out to discard the session and start again.";
-            return;
-        }
-
-        GeneratedKey = ProtonPassSession.GenerateKey();
-        protonSession.Unlock(GeneratedKey);
-
-        NotifySessionStateChanged();
-
-        StatusMessage = "Save this key somewhere safe — in Proton Pass itself is a good place. "
-                        + "RavensPort keeps it only while it is running and cannot show it to you again.";
-    }
-
-    /// <summary>Dismisses the generated key from the screen. It stays in memory for this run.</summary>
-    [RelayCommand]
-    private void DismissGeneratedKey() => GeneratedKey = null;
-
     /// <summary>Set once the user has asked to throw away a session they can no longer open.</summary>
     [ObservableProperty] private bool _isConfirmingDiscard;
 
@@ -493,7 +465,7 @@ public sealed partial class SetupViewModel(
             NotifySessionStateChanged();
             await CheckAsync();
 
-            StatusMessage = "Session discarded. Generate a new key, then sign in again.";
+            StatusMessage = "Session discarded. Choose Sign in to start again.";
         }
         catch (Exception ex)
         {
@@ -509,55 +481,40 @@ public sealed partial class SetupViewModel(
         StatusMessage = "Left as it is.";
     }
 
-    /// <summary>Takes the key the user pasted, so this run can open the session.</summary>
-    [RelayCommand]
-    private async Task UnlockSessionAsync()
-    {
-        if (IsBusy) return;
-
-        try
-        {
-            protonSession.Unlock(SessionKeyInput);
-        }
-        catch (VaultCliException ex)
-        {
-            StatusMessage = ex.Message;
-            return;
-        }
-        finally
-        {
-            // Cleared whether or not it was accepted: the box is on the setup page, which stays
-            // open behind the app for as long as the vault is unreachable.
-            SessionKeyInput = "";
-        }
-
-        NotifySessionStateChanged();
-
-        // A pasted key counts as much as a fresh sign-in. Without this, anyone who already had a
-        // session before Hello existed would keep pasting forever — the offer only ever reaching
-        // people who happened to sign in again.
-        OfferToRememberWithHello();
-
-        await CheckAsync();
-    }
-
     /// <summary>
-    /// Asks whether to keep the key behind Hello, and does it if the user says yes.
+    /// Asks consent, then creates the session key and protects it — before any sign-in runs.
     ///
-    /// Asked, not assumed. It is the moment RavensPort would begin keeping something on disk that
-    /// was not there before, and doing that on the user's behalf because it happens to be
-    /// convenient is not the app's call. Declining leaves the current arrangement exactly as it is.
+    /// Asked, not assumed: it is the moment RavensPort begins keeping something on this PC that was
+    /// not there before. Cancelling leaves nothing behind, which is only true because this happens
+    /// first. Offering it *after* a sign-in, as this used to, meant declining produced a live
+    /// session whose key was in memory only and displayed nowhere — gone at the next restart, with
+    /// nothing in the UI admitting it.
     ///
     /// Synchronous on the UI thread throughout: the consent window is modal, and the Hello prompt
     /// it raises needs a foreground window to attach to.
     /// </summary>
-    private void OfferToRememberWithHello()
+    private bool ProtectSessionKeyWithHello()
     {
-        if (!_isHelloAvailable || protonAuthenticator.HasHelloKey) return;
+        if (protonSession.HasKey && protonAuthenticator.HasHelloKey) return true;
 
-        HelloConsentWindow.RequestSave(protonAuthenticator.TryRememberWithHelloAsync);
+        if (!_isHelloAvailable)
+        {
+            StatusMessage = HelloRequiredMessage;
+            return false;
+        }
+
+        var consented = HelloConsentWindow.RequestSetup(protonAuthenticator.PrepareSessionKeyAsync);
 
         NotifySessionStateChanged();
+
+        if (!consented)
+        {
+            StatusMessage =
+                "Sign-in cancelled. Nothing was created — RavensPort needs Windows Hello to hold its "
+                + "Proton Pass session key, because the key is never shown to you.";
+        }
+
+        return consented;
     }
 
     /// <summary>
@@ -571,6 +528,10 @@ public sealed partial class SetupViewModel(
     private async Task SignInProtonAsync()
     {
         if (IsBusy || IsSigningIn) return;
+
+        // Before IsSigningIn, so the consent window is not shown over a page already claiming a
+        // sign-in is under way — cancelling here means none ever started.
+        if (!ProtectSessionKeyWithHello()) return;
 
         IsSigningIn = true;
         SignInUrl = null;
@@ -587,11 +548,6 @@ public sealed partial class SetupViewModel(
                 _signInCts.Token);
 
             SignInUrl = null;
-
-            // Here, not inside SignInAsync: this is the UI thread, and the Hello prompt needs a
-            // foreground window to attach to. Called from a background thread the credential
-            // service returns "cancelled" without ever showing a prompt.
-            OfferToRememberWithHello();
 
             var status = gate.Status;
             Apply(status);
@@ -614,6 +570,10 @@ public sealed partial class SetupViewModel(
             _signInCts?.Dispose();
             _signInCts = null;
             IsSigningIn = false;
+
+            // A failed sign-in takes the key and the protected copy with it — see
+            // ProtonPassAuthenticator.AbandonAsync — so the buttons this page shows have changed.
+            NotifySessionStateChanged();
         }
     }
 

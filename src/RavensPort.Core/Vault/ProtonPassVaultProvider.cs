@@ -829,24 +829,40 @@ public sealed class ProtonPassVaultProvider(
     private async Task<List<ProtonVault>> FindConfiguredVaultsAsync(
         List<ProtonVault> vaults, CancellationToken ct)
     {
-        var configured = new List<ProtonVault>();
-
-        foreach (var vault in vaults)
+        var matchingVaults = vaults.Where(v => VaultProfile.Matches(v.Name)).ToList();
+        var matchingChecks = matchingVaults.Select(async vault =>
         {
             try
             {
                 var (items, _) = await ListAllAsync(vault.ShareId, vault.Name, withSecrets: false, ct);
-                if (items.Any(i => i.Title == VaultItemNaming.ConfigTitle)) configured.Add(vault);
+                return items.Any(i => i.Title == VaultItemNaming.ConfigTitle) ? vault : null;
             }
             catch (Exception ex) when (ex is VaultCliException or JsonException)
             {
-                // A vault this session cannot list is simply not a candidate — a shared vault whose
-                // access was revoked, say. Probing must still reach an answer for the others.
                 activityLog.Log($"VAULT could not look inside the '{vault.Name}' vault: {ex.Message}");
+                return null;
             }
-        }
+        });
 
-        return configured;
+        var matchingResults = (await Task.WhenAll(matchingChecks)).Where(v => v is not null).Select(v => v!).ToList();
+        if (matchingResults.Count > 0) return matchingResults;
+
+        var remainingVaults = vaults.Except(matchingVaults).ToList();
+        var remainingChecks = remainingVaults.Select(async vault =>
+        {
+            try
+            {
+                var (items, _) = await ListAllAsync(vault.ShareId, vault.Name, withSecrets: false, ct);
+                return items.Any(i => i.Title == VaultItemNaming.ConfigTitle) ? vault : null;
+            }
+            catch (Exception ex) when (ex is VaultCliException or JsonException)
+            {
+                activityLog.Log($"VAULT could not look inside the '{vault.Name}' vault: {ex.Message}");
+                return null;
+            }
+        });
+
+        return (await Task.WhenAll(remainingChecks)).Where(v => v is not null).Select(v => v!).ToList();
     }
 
     /// <summary>

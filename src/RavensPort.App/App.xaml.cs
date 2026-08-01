@@ -207,8 +207,8 @@ public partial class App : Application
     ///
     /// This is what lets a machine that has done this once come up without anyone visiting the
     /// setup page: consent, gesture, vault open, proxy started. Declining is not a failure — the
-    /// check below then finds a locked session and the setup page offers the pasted key, exactly
-    /// as it does on a machine with no Hello at all.
+    /// check below then finds a locked session, and the setup page offers the same gesture again on
+    /// a button the user presses when they are ready.
     /// </summary>
     private async Task OfferHelloThenCheckAsync(SetupViewModel setupViewModel)
     {
@@ -216,7 +216,7 @@ public partial class App : Application
         {
             var authenticator = _webApp!.Services.GetRequiredService<ProtonPassAuthenticator>();
 
-            if (authenticator.HasHelloKey && await ProtonPassAuthenticator.IsHelloAvailableAsync())
+            if (authenticator.HasHelloKey && await authenticator.IsHelloAvailableAsync())
             {
                 // Shown, and kept open, for the whole prompt: Hello attaches to the foreground
                 // window, and this tray app has no other one at startup.
@@ -226,7 +226,7 @@ public partial class App : Application
         catch (Exception ex)
         {
             // Never allowed to stop the app reaching its setup page — that page is the only thing
-            // that can explain what went wrong, and pasting the key still works.
+            // that can explain what went wrong, and offer the retry or the discard.
             _webApp?.Services.GetService<ActivityLog>()?.LogError("Windows Hello unlock at startup failed", ex);
         }
 
