@@ -51,10 +51,53 @@ public sealed class ProtonPassVaultProvider(
     private long _loadedRevision;
 
     /// <summary>
+    /// Whether this provider has a trustworthy picture of what is in this vault — set by a
+    /// complete read, and equally by a save, which establishes the same thing by writing it.
+    ///
+    /// Gates the delete sweep, and nothing else. The sweep decides which items are no longer wanted
+    /// by subtraction: anything in the vault the store does not account for. That inference is only
+    /// sound once this instance knows the vault, so without it nothing is deleted — an empty store
+    /// might mean "the user removed everything" or might mean "nothing was ever read", and the two
+    /// are indistinguishable from here.
+    ///
+    /// A save counts because it is not a guess: it has just written the note and every item the
+    /// store calls for. Requiring a *load* specifically would break the first run, where a fresh
+    /// vault has no configuration item to read and every later save would then refuse to tidy up
+    /// after itself.
+    ///
+    /// Reset by <see cref="Forget"/>, so a disconnect or a switch to another vault starts from "I
+    /// know nothing" rather than carrying one vault's baseline into another.
+    /// </summary>
+    private bool _hasCompletedLoad;
+
+    /// <summary>
     /// Set by <see cref="Forget"/>, cleared when the user names a vault again. Without it a probe
     /// after disconnecting would rediscover the vault the user has just left and reattach to it.
     /// </summary>
     private bool _discoveryDisabled;
+
+    /// <summary>
+    /// Set by <see cref="Forget"/>, cleared the moment the user chooses a vault again. While set,
+    /// every write refuses rather than re-resolving a vault to write into.
+    ///
+    /// Reads stay allowed: probing is how the setup page finds out what is available, and a read
+    /// cannot destroy anything.
+    /// </summary>
+    private bool _writesDisabled;
+
+    /// <summary>
+    /// Refuses a write issued while this provider has no vault the user has chosen. Called by every
+    /// mutating entry point, ahead of the vault lookup that would otherwise adopt one.
+    /// </summary>
+    private void RequireWritesAllowed()
+    {
+        if (!_writesDisabled) return;
+
+        throw new VaultSaveException(
+            "RavensPort is not connected to a Proton Pass vault, so nothing was written. "
+            + "Choose a vault on the setup page first.",
+            partiallyApplied: false);
+    }
 
     public VaultBackendKind Kind => VaultBackendKind.ProtonPass;
 
@@ -210,6 +253,9 @@ public sealed class ProtonPassVaultProvider(
         _loadedRevision = 0;
         _discoveryDisabled = false;
 
+        // The user has named a vault, which is the only thing that re-opens writing.
+        _writesDisabled = false;
+
         // Stamped straight away: the config item is what identifies this vault as RavensPort's on
         // the next launch, and the name the user just chose is not written down anywhere on this PC.
         await SaveAsync(new ConfigStore(), ct);
@@ -250,6 +296,9 @@ public sealed class ProtonPassVaultProvider(
         _shareId = match.ShareId;
         _loadedRevision = 0;
         _discoveryDisabled = false;
+
+        // The user has named a vault, which is the only thing that re-opens writing.
+        _writesDisabled = false;
         LastLoadWarning = null;
 
         if (outcome == VaultAdoptionOutcome.Empty)
@@ -271,6 +320,19 @@ public sealed class ProtonPassVaultProvider(
         LastLoadRemovals = [];
         LastLoadWarning = null;
 
+        // The baseline the delete sweep relies on belonged to the vault being left. Carrying it
+        // into the next one would let a save decide that vault's items are unwanted.
+        _hasCompletedLoad = false;
+
+        // No writing until the user names a vault again.
+        //
+        // This is the mechanism that lost a user's items. Disconnect clears the vault id, but a save
+        // already queued — or one racing the disconnect — reaches RequireVaultAsync, finds no vault,
+        // probes, silently adopts whatever it discovers, and writes a configuration belonging to
+        // somewhere else into it. Refusing outright means a stale save dies with an error instead of
+        // finding a new home for itself.
+        _writesDisabled = true;
+
         // Until the user names a vault again. Otherwise the next probe finds the vault holding the
         // configuration — the one they just disconnected from — and quietly picks it up again.
         _discoveryDisabled = true;
@@ -280,6 +342,10 @@ public sealed class ProtonPassVaultProvider(
     {
         LastLoadWarning = null;
         LastLoadRemovals = [];
+
+        // Cleared on the way in, set only on the way out. A load that throws half-way must not
+        // leave the delete sweep believing it has a complete picture of the vault.
+        _hasCompletedLoad = false;
 
         await RequireVaultAsync(ct);
 
@@ -327,6 +393,13 @@ public sealed class ProtonPassVaultProvider(
                 .Where(w => !string.IsNullOrEmpty(w)));
         }
 
+        // Only here. The earlier returns above — no config item, or one that could not be parsed —
+        // are answers rather than reads: they produce an empty store, and letting the delete sweep
+        // act on that would wipe every item in the vault on the next save. Reaching this line means
+        // the note was read and every secret it indexes either resolved or was positively reported
+        // gone, which is the only state where "not in the store" reliably means "not wanted".
+        _hasCompletedLoad = true;
+
         return store;
     }
 
@@ -353,6 +426,7 @@ public sealed class ProtonPassVaultProvider(
 
     public async Task DeleteItemAsync(string itemId, CancellationToken ct = default)
     {
+        RequireWritesAllowed();
         await RequireVaultAsync(ct);
 
         var result = await RunAsync(
@@ -367,6 +441,7 @@ public sealed class ProtonPassVaultProvider(
 
     private async Task SaveAsync(ConfigStore store, bool rewriteEverything, CancellationToken ct)
     {
+        RequireWritesAllowed();
         await RequireVaultAsync(ct);
 
         var existing = await ListAsync(withSecrets: true, ct);
@@ -427,7 +502,14 @@ public sealed class ProtonPassVaultProvider(
                 ex);
         }
 
-        await ReconcileAsync(existing, index, ct);
+await ReconcileAsync(existing, index, previousIndex, ct);
+
+        // After the sweep, deliberately. Setting it first would let a save authorise its own
+        // deletions, which is no guard at all: the very first save by a provider that has never
+        // read this vault would sweep it on the strength of a baseline that save had just invented.
+        // A save earns the baseline for the *next* one — on a first run, where there was no note to
+        // read, that is what eventually allows tidying up at all.
+        _hasCompletedLoad = true;
     }
 
     // ---- CLI calls ------------------------------------------------------------------------------
@@ -628,22 +710,109 @@ public sealed class ProtonPassVaultProvider(
     /// Deletes every owned item the note no longer points at: records that are gone, and the
     /// superseded predecessors of records that were rewritten.
     /// </summary>
-    private async Task ReconcileAsync(List<ProtonItem> before, VaultIndex index, CancellationToken ct)
+    private async Task ReconcileAsync(
+        List<ProtonItem> before, VaultIndex index, VaultIndex previousIndex, CancellationToken ct)
     {
+        // Same rule as the 1Password sweep, for the same reason: this is the only irreversible
+        // thing done to a user's vault, and "not in the store" only means "not wanted" if the store
+        // came from a complete read of *this* vault. Without one — after a disconnect, a failed
+        // load, or a switch to another vault — an empty store would take the whole vault with it.
+        if (!_hasCompletedLoad)
+        {
+            activityLog.Log(
+                "VAULT skipped deleting unused Proton Pass items — this session has not completed a full "
+                + "read of the vault, so it cannot tell an item you removed from one it never saw");
+            return;
+        }
+
+        var previousRecordIds = previousIndex.Credentials.Keys
+            .Concat(previousIndex.RouteKeys.Keys)
+            .Concat(previousIndex.FunnelKeys.Keys)
+            .ToHashSet();
+
+        var newRecordIds = index.Credentials.Keys
+            .Concat(index.RouteKeys.Keys)
+            .Concat(index.FunnelKeys.Keys)
+            .ToHashSet();
+
+        if (previousRecordIds.Count > 0 && newRecordIds.Count > 0 && !newRecordIds.Overlaps(previousRecordIds))
+        {
+            activityLog.Log(
+                "VAULT skipped deleting unused Proton Pass items — the incoming configuration carries records "
+                + "that share no identity with this vault's index, so it cannot authorize deletions here");
+            return;
+        }
+
         var keep = index.Credentials.Values
             .Concat(index.RouteKeys.Values)
             .Concat(index.FunnelKeys.Values)
             .ToHashSet(StringComparer.Ordinal);
 
-        foreach (var item in before)
+        // Only items the note being replaced actually pointed at, and this is the property that
+        // makes the accident impossible rather than unlikely.
+        //
+        // The sweep used to consider every owned item in the vault, which is sound only while the
+        // store and the vault describe the same thing. They came apart: a save carrying one vault's
+        // configuration reached another vault, every item its note had never heard of looked
+        // unwanted, and nine of a user's items were deleted. A note from elsewhere indexes ids that
+        // do not exist here, so restricting deletion to those ids means nothing matches and nothing
+        // goes. A record the user really removed was in this note a moment ago, so it still does.
+        var deletable = previousIndex.Credentials.Values
+            .Concat(previousIndex.RouteKeys.Values)
+            .Concat(previousIndex.FunnelKeys.Values)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var doomed = before
+            .Where(item => !keep.Contains(item.ItemId))
+            .Where(item => VaultItemNaming.TryParse(item.Title, out var role, out var id)
+                           && role != VaultItemRole.Config
+                           && (deletable.Contains(item.ItemId) || DuplicatesALiveRecord(role, id, index)))
+            .ToList();
+
+        if (!WithinDeletionBudget(doomed.Count, keep.Count)) return;
+
+        foreach (var item in doomed)
         {
-            if (!VaultItemNaming.TryParse(item.Title, out var role, out _)) continue;
-
-            // The previous config note is deleted by SaveAsync itself, once its replacement exists.
-            if (role == VaultItemRole.Config || keep.Contains(item.ItemId)) continue;
-
             await DeleteItemAsync(item.ItemId, item.Title, ct);
         }
+    }
+
+    /// <summary>
+    /// A second item claiming a record this save has just written authoritatively.
+    ///
+    /// The only thing outside the previous index that may be deleted, and it is safe for a reason
+    /// that does not generalise: the record is in the store, the item holding its current value has
+    /// just been written, and this is a different item claiming the same record. Nothing is lost by
+    /// removing it, while leaving it is actively harmful — the proxy honours only the indexed one,
+    /// and the other looks equally real in the password manager.
+    ///
+    /// An item belonging to some other vault's configuration can never match: its record id is not
+    /// in this store, so there is nothing for it to duplicate.
+    /// </summary>
+    private static bool DuplicatesALiveRecord(VaultItemRole role, Guid recordId, VaultIndex index) =>
+        index.Find(role, recordId) is { Length: > 0 };
+
+    /// <summary>
+    /// The last line of defence: a routine save is never allowed to be a mass deletion.
+    ///
+    /// Everything above is meant to make an unwanted sweep impossible, and something like it was
+    /// meant to be impossible before. This does not reason about *why* the numbers look wrong — it
+    /// refuses to let a background write remove a large number of a user's items at once, and says
+    /// so loudly. Removing several credentials at a stroke is a deliberate act, and the Settings
+    /// tab's integrity tools exist to do it with the user watching.
+    /// </summary>
+    private bool WithinDeletionBudget(int doomed, int kept)
+    {
+        const int alwaysAllowed = 2;
+
+        if (doomed <= alwaysAllowed || doomed <= kept) return true;
+
+        activityLog.Log(
+            $"VAULT REFUSED to delete {doomed} Proton Pass item(s) during a save that kept only {kept} — "
+            + "a routine save does not remove that much at once. Nothing was deleted. Use the vault "
+            + "integrity check on the Settings tab if these items really should go.");
+
+        return false;
     }
 
     // ---- Templates and lookups --------------------------------------------------------------------

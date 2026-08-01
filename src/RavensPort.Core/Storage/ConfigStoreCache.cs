@@ -75,6 +75,25 @@ public sealed class ConfigStoreCache
     /// </summary>
     private int _loading;
 
+    /// <summary>
+    /// Which backend and which vault the store in memory was read from, so a change of either is
+    /// noticed. Null until the first successful load.
+    /// </summary>
+    private string? _loadedFrom;
+
+    /// <summary>
+    /// Backend and vault as one comparable value. Both halves matter: the user can move between
+    /// 1Password and Proton Pass, and between two vaults inside either — and a configuration from
+    /// one has no business being served, shown, or written back under the other.
+    /// </summary>
+    private string CurrentSource() => $"{_vault.Kind}:{_vault.VaultName}";
+
+    /// <summary>
+    /// True when the store in memory came from somewhere other than the vault now selected — so
+    /// callers know a reload is owed rather than assuming the tabs are showing the right thing.
+    /// </summary>
+    public bool IsFromAnotherVault => _initialized && _loadedFrom != CurrentSource();
+
     /// <summary>True when changes have been made that the vault does not have yet.</summary>
     public bool HasPendingChanges => Interlocked.Read(ref _version) > Interlocked.Read(ref _syncedVersion);
 
@@ -121,7 +140,15 @@ public sealed class ConfigStoreCache
     /// </summary>
     public async Task InitializeAsync(CancellationToken ct = default)
     {
-        if (_initialized) return;
+        // Identity, not a bare flag. The old check was "have I loaded anything", which is the wrong
+        // question the moment the backend can change underneath this object — and it can, because
+        // the vault here is GatedConfigVault, forwarding to whatever the gate has settled on.
+        //
+        // Picking a different password manager, or a different vault in the same one, left
+        // _initialized true, so this returned immediately and the app kept serving the previous
+        // vault's configuration. Worse, the next save then wrote that configuration into the newly
+        // chosen vault. Comparing where the store actually came from makes a switch a reload.
+        if (_initialized && _loadedFrom == CurrentSource()) return;
 
         SetLoading(true);
 
@@ -129,6 +156,7 @@ public sealed class ConfigStoreCache
         {
             _current = await _vault.LoadAsync(ct);
             _initialized = true;
+            _loadedFrom = CurrentSource();
         }
         finally
         {
@@ -288,6 +316,11 @@ public sealed class ConfigStoreCache
             SetLoading(false);
         }
 
+        // Whatever was just read defines where the store came from. A reload is also how a
+        // deliberate switch to another vault lands, so this has to move with it.
+        _loadedFrom = CurrentSource();
+        _initialized = true;
+
         // Memory now matches the vault exactly, so anything that was pending has been deliberately
         // thrown away rather than saved.
         Interlocked.Exchange(ref _syncedVersion, Interlocked.Read(ref _version));
@@ -318,6 +351,12 @@ public sealed class ConfigStoreCache
         {
             RestoreInto(_current, Snapshot(new ConfigStore()) with { ListenPort = _current.Settings.ListenPort });
             _initialized = false;
+
+            // Both of these belonged to the vault being left. _loadedFrom especially: leaving it
+            // set would let a later load against the same vault be skipped as already done, when
+            // the store has in fact been emptied.
+            _loadedFrom = null;
+            LastLoadNotice = null;
         }
         finally
         {

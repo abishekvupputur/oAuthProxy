@@ -25,6 +25,14 @@
                     Style="{StaticResource EmphasisRunStyle}">Nothing is stored on this PC</Run><Run
                     >, so the proxy does not start until one of them is unlocked.</Run></TextBlock>
 
+                <!-- Experimental warning requested by user -->
+                <Border Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush0}"
+                        BorderThickness="1" Padding="11,9" CornerRadius="6" Margin="0,0,0,14">
+                    <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Foreground="{StaticResource ErrorBrush}"><Run
+                        Style="{StaticResource EmphasisRunStyle}">Experimental feature:</Run><Run
+                        xml:space="preserve"> Having a second vault per password manager and using two password managers at the same time, although possible, is still experimental and is under testing.</Run></TextBlock>
+                </Border>
+
                 <!-- Port conflict: shown instead of the manager cards, since the vault is fine and
                      the only thing wrong is the port. -->
                 <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14"
