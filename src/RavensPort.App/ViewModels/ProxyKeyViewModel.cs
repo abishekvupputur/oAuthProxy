@@ -83,9 +83,17 @@ public sealed partial class ProxyKeyViewModel : ObservableObject
         Key.SetLifetime(value.Duration);
         NotifyKeyChanged();
 
-        _onChanged(value.Duration is null
-            ? $"The proxy key for {_owner} now never expires."
-            : $"The proxy key for {_owner} {ExpirySummary}.");
+        // Measured from when the key was issued, so a short window on an old key can land in the
+        // past. Say what to do about it rather than reporting an expiry date and leaving the
+        // endpoint answering 403 with no obvious way back.
+        _onChanged(value.Duration switch
+        {
+            null => $"The proxy key for {_owner} now never expires.",
+            _ when IsExpired => $"The proxy key for {_owner} is now past its {value.Label} lifetime, "
+                                + "counted from when it was issued — that endpoint answers 403 until "
+                                + "you press Regenerate for a fresh key.",
+            _ => $"The proxy key for {_owner} {ExpirySummary}.",
+        });
     }
 
     [RelayCommand]

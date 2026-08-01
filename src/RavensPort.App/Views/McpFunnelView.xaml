@@ -146,8 +146,18 @@ Use Include to grant a known set, Exclude to revoke a few from an otherwise trus
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                     <StackPanel VerticalAlignment="Center" ToolTip="{StaticResource ProxyKeyHelpText}">
-                                        <TextBlock Text="{Binding Key.ExpirySummary}" TextWrapping="Wrap" FontSize="10"
-                                                   Foreground="{StaticResource MutedTextBrush}"/>
+                                        <TextBlock Text="{Binding Key.ExpirySummary}" TextWrapping="Wrap" FontSize="10">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding Key.IsExpired}" Value="True">
+                                                            <Setter Property="Foreground" Value="{StaticResource ErrorBrush}"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
                                         <TextBlock Text="⚠ expired — this funnel answers 403" FontSize="10" TextWrapping="Wrap"
                                                    Foreground="{StaticResource ErrorBrush}"
                                                    Visibility="{Binding Key.IsExpired, Converter={StaticResource BoolToVisibilityConverter}}"/>

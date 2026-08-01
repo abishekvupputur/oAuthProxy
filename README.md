@@ -404,13 +404,15 @@ which endpoints exist.
 ### Key validity
 
 Each key is generated when its route or funnel is created and is valid **until you replace it**
-unless you say otherwise. **Valid for** on the row sets a lifetime — 7, 30, 90, or 180 days, or a
-year — measured from the moment the key was last generated. Once it lapses the endpoint answers
-`403` until the key is regenerated or the period extended; the row says so, and so does the log.
+unless you say otherwise. **Valid for** on the row sets a lifetime — 1 or 4 hours, or 1, 7, 30, 90,
+or 360 days — always measured from the moment the key was last generated, never from when you
+picked it. Changing the setting therefore re-describes how long this secret was ever meant to live
+rather than granting it more time: dropping a month-old key to "1 hour" ends it now. Once it lapses
+the endpoint answers `403`; the row says so in red, and so does the log.
 
-**Regenerate** issues a new key for that one endpoint, immediately. Clients still holding the old
-one get `403`; every other endpoint is untouched. Regenerating keeps the lifetime you chose and
-restarts it from now.
+**Regenerate** issues a new key for that one endpoint, immediately, and is the only thing that
+restarts the clock — at whatever lifetime is currently selected. Clients still holding the old key
+get `403`; every other endpoint is untouched. It is also the way back from an expired key.
 
 > **Upgrading from a build with a single proxy-wide key:** that key is no longer read. Every
 > existing route and funnel is issued its own on first launch, so each client has to be given the

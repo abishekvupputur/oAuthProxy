@@ -61,16 +61,39 @@ public class ProxyKeyTests
     }
 
     [Fact]
-    public void SetLifetime_MeasuresFromNowAndAcceptsNever()
+    public void SetLifetime_MeasuresFromIssueNotFromNow()
     {
+        // Changing the picker re-describes how long this secret was ever meant to live; it does
+        // not restart the countdown. Otherwise re-picking the same option would quietly extend a
+        // key that has already been sitting in client configs for weeks.
         var key = ProxyKey.Generate(TimeSpan.FromDays(1));
+        key.CreatedUtc = DateTimeOffset.UtcNow.AddDays(-10);
 
         key.SetLifetime(TimeSpan.FromDays(90));
-        Assert.Equal(90, Math.Round((key.ExpiresUtc!.Value - DateTimeOffset.UtcNow).TotalDays));
+        Assert.Equal(90, Math.Round((key.ExpiresUtc!.Value - key.CreatedUtc).TotalDays));
+        Assert.Equal(80, Math.Round((key.ExpiresUtc!.Value - DateTimeOffset.UtcNow).TotalDays));
 
         key.SetLifetime(null);
         Assert.Null(key.ExpiresUtc);
         Assert.False(key.IsExpired(DateTimeOffset.UtcNow.AddYears(10)));
+    }
+
+    [Fact]
+    public void SetLifetime_ShorterThanTheKeysAge_ExpiresItImmediately()
+    {
+        // The flip side of anchoring on issue time, and the reason Regenerate exists: dropping a
+        // month-old key to "1 hour" ends it now rather than granting it another hour.
+        var key = ProxyKey.Generate();
+        key.CreatedUtc = DateTimeOffset.UtcNow.AddDays(-30);
+
+        key.SetLifetime(TimeSpan.FromHours(1));
+
+        Assert.True(key.IsExpired(DateTimeOffset.UtcNow));
+
+        key.Regenerate();
+
+        Assert.False(key.IsExpired(DateTimeOffset.UtcNow));
+        Assert.Equal(1, Math.Round((key.ExpiresUtc!.Value - DateTimeOffset.UtcNow).TotalHours));
     }
 
     [Fact]

@@ -56,7 +56,12 @@ public sealed class ProxyKey
         Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))
             .Replace('+', '-').Replace('/', '_').TrimEnd('=');
 
-    /// <summary>Replaces the secret in place, keeping the current expiry policy's *length*.</summary>
+    /// <summary>
+    /// Replaces the secret in place, keeping the current expiry policy's *length* and restarting
+    /// the clock from now. Regenerating is the one action that resets the countdown: the key it
+    /// hands back is new, so every client has to be reconfigured anyway, and a fresh key that
+    /// inherited the old expiry could be dead on arrival.
+    /// </summary>
     public void Regenerate()
     {
         var lifetime = ExpiresUtc is { } expiry ? expiry - CreatedUtc : (TimeSpan?)null;
@@ -66,9 +71,17 @@ public sealed class ProxyKey
         ExpiresUtc = lifetime is { } span ? CreatedUtc + span : null;
     }
 
-    /// <summary>Sets a new lifetime measured from now; null makes the key never expire.</summary>
+    /// <summary>
+    /// Sets a new lifetime measured from when the key was issued; null makes it never expire.
+    ///
+    /// Deliberately anchored on <see cref="CreatedUtc"/> rather than on now, so re-picking in the
+    /// drop-down cannot silently extend the life of a secret that has already been in circulation
+    /// for a while — "1 hour" means one hour of this key existing, whenever it was chosen. The
+    /// consequence is that shortening the window on an older key can expire it immediately, and
+    /// that a lapsed key is revived only by <see cref="Regenerate"/>, which issues a new secret.
+    /// </summary>
     public void SetLifetime(TimeSpan? lifetime) =>
-        ExpiresUtc = lifetime is { } span ? DateTimeOffset.UtcNow + span : null;
+        ExpiresUtc = lifetime is { } span ? CreatedUtc + span : null;
 
     [JsonIgnore]
     public bool IsConfigured => !string.IsNullOrEmpty(Value);
@@ -99,11 +112,13 @@ public sealed record ProxyKeyLifetime(string Label, TimeSpan? Duration)
     public static IReadOnlyList<ProxyKeyLifetime> All { get; } =
     [
         new("Never expires", null),
+        new("1 hour", TimeSpan.FromHours(1)),
+        new("4 hours", TimeSpan.FromHours(4)),
+        new("1 day", TimeSpan.FromDays(1)),
         new("7 days", TimeSpan.FromDays(7)),
         new("30 days", TimeSpan.FromDays(30)),
         new("90 days", TimeSpan.FromDays(90)),
-        new("180 days", TimeSpan.FromDays(180)),
-        new("1 year", TimeSpan.FromDays(365)),
+        new("360 days", TimeSpan.FromDays(360)),
     ];
 
     public static ProxyKeyLifetime Never => All[0];
