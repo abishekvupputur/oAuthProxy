@@ -177,6 +177,10 @@ public sealed partial class McpFunnelViewModel : ObservableObject
 
     partial void OnIsEnabledChanged(bool value)
     {
+        // Reload() also assigns this property; skip the write when the store already agrees,
+        // so refreshing the tab doesn't queue a write to the vault (especially during a disconnect).
+        if (_configStoreCache.Current.Settings.McpFunnelEnabled == value) return;
+
         // Synchronous setter, so the save is started and not awaited. App.OnExit drains any
         // in-flight write before the process ends, so a toggle immediately followed by Exit is
         // not lost.

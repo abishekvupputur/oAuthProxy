@@ -9,6 +9,7 @@ using RavensPort.Core.Platform;
 using RavensPort.Core.Proxy;
 using RavensPort.Core.Storage;
 using RavensPort.Core.Vault;
+using RavensPort.Core.Mcp;
 
 namespace RavensPort.App.ViewModels;
 
@@ -24,6 +25,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly VaultIntegrityService _integrity;
     private readonly ProtonPassAuthenticator _protonAuthenticator;
     private readonly ProxyConfigChangeNotifier _proxyConfigChangeNotifier;
+    private readonly McpSourceConnectionPool _mcpSourceConnectionPool;
     private readonly DispatcherTimer _logTimer;
 
     [ObservableProperty] private int _listenPort;
@@ -115,7 +117,8 @@ public sealed partial class SettingsViewModel : ObservableObject
         VaultSyncQueue syncQueue,
         VaultIntegrityService integrity,
         ProtonPassAuthenticator protonAuthenticator,
-        ProxyConfigChangeNotifier proxyConfigChangeNotifier)
+        ProxyConfigChangeNotifier proxyConfigChangeNotifier,
+        McpSourceConnectionPool mcpSourceConnectionPool)
     {
         _protonAuthenticator = protonAuthenticator;
         _configStoreCache = configStoreCache;
@@ -125,6 +128,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _syncQueue = syncQueue;
         _integrity = integrity;
         _proxyConfigChangeNotifier = proxyConfigChangeNotifier;
+        _mcpSourceConnectionPool = mcpSourceConnectionPool;
 
         var settings = _configStoreCache.Current.Settings;
         _listenPort = settings.ListenPort;
@@ -708,6 +712,10 @@ public sealed partial class SettingsViewModel : ObservableObject
     private async Task TearDownAsync(string logMessage, string statusMessage)
     {
         await _configStoreCache.ResetAsync();
+
+        // Drop active MCP sessions before rebuilding the proxy, so they don't hit 403s on their
+        // background transports when the proxy routes disappear and throw unobserved exceptions.
+        await _mcpSourceConnectionPool.InvalidateAllAsync();
 
         // Routes come from the store, so the proxy has to be rebuilt from the now-empty one —
         // otherwise it would keep forwarding with the credentials of a vault this app has just
