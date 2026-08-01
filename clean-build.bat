@@ -34,6 +34,14 @@ if errorlevel 1 (
 )
 popd
 
+echo Running tests...
+dotnet test tests\RavensPort.Core.Tests\RavensPort.Core.Tests.csproj -c Release
+if errorlevel 1 (
+    echo Tests FAILED.
+    pause
+    exit /b 1
+)
+
 echo Building Release Single Exe...
 dotnet publish src\RavensPort.App\RavensPort.App.csproj -c Release -r win-x64 -o "%~dp0publish" -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true --self-contained false
 if errorlevel 1 (
@@ -59,4 +67,5 @@ if not exist "%APP_EXE%" (
 start "" "%APP_EXE%"
 
 echo Done - app running in tray.
+pause
 endlocal
