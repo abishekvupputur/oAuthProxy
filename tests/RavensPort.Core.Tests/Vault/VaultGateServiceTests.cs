@@ -122,6 +122,25 @@ public class VaultGateServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task OpeningAnExplicitlyChosenVaultDoesNotProbeTheOtherManagerAgain()
+    {
+        var onePassword = new FakeOnePassword();
+        var protonPass = new FakeProtonPass();
+        var onePasswordRunner = onePassword.AsRunner();
+        var protonPassRunner = protonPass.AsRunner();
+        var gate = NewGate(onePasswordRunner, protonPassRunner);
+
+        await gate.EvaluateAsync();
+        var onePasswordCallsBeforeOpening = onePasswordRunner.Invocations.Count;
+
+        var status = await gate.UseExistingVaultAsync(VaultBackendKind.ProtonPass, VaultConstants.VaultName);
+
+        Assert.True(status.IsReady);
+        Assert.Equal(VaultBackendKind.ProtonPass, status.Selected);
+        Assert.Equal(onePasswordCallsBeforeOpening, onePasswordRunner.Invocations.Count);
+    }
+
+    [Fact]
     public async Task CreateVault_MakesAMissingVaultReady()
     {
         var gate = NewGate(new FakeOnePassword { VaultExists = false }.AsRunner(), SignedOutProtonPass());

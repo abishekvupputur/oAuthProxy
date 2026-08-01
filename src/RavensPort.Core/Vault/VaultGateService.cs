@@ -101,12 +101,18 @@ public sealed class VaultGateService
     private async Task<VaultGateStatus> ResolveTieAsync(
         VaultStatus[] probes, List<VaultStatus> ready, CancellationToken ct)
     {
-        var configured = new List<VaultBackendKind>();
-
-        foreach (var status in ready)
+        // Reading a configuration can mean several CLI round trips. These are independent vaults,
+        // so doing them one after the other made the two-manager setup path take the sum of both
+        // waits. Start both reads together and wait only for the slower one.
+        var configurationChecks = ready.Select(async status => new
         {
-            if (await HasConfigurationAsync(ProviderFor(status.Kind), ct)) configured.Add(status.Kind);
-        }
+            status.Kind,
+            HasConfiguration = await HasConfigurationAsync(ProviderFor(status.Kind), ct),
+        });
+        var configured = (await Task.WhenAll(configurationChecks))
+            .Where(check => check.HasConfiguration)
+            .Select(check => check.Kind)
+            .ToList();
 
         if (configured.Count == 1)
         {
@@ -178,16 +184,12 @@ public sealed class VaultGateService
     }
 
     /// <summary>
-    /// Re-probes after the user has said which manager to use, and keeps that answer. Without the
-    /// explicit select, a tie-break could hand the app to the <em>other</em> manager immediately
-    /// after someone created or named a vault in this one.
+    /// Keeps the backend the user just created or named. The operation above has already proved
+    /// that this provider can open the vault; probing both managers again would repeat the costly
+    /// tie-break reads and can only replace the user's explicit choice with the other manager.
     /// </summary>
-    private async Task<VaultGateStatus> ResolveAfterUserChoiceAsync(VaultBackendKind kind, CancellationToken ct)
-    {
-        var status = await EvaluateAsync(ct);
-
-        return status.For(kind)?.IsReady == true ? SelectBackend(kind) : status;
-    }
+    private Task<VaultGateStatus> ResolveAfterUserChoiceAsync(VaultBackendKind kind, CancellationToken ct) =>
+        Task.FromResult(SelectBackend(kind));
 
     public IConfigVault ProviderFor(VaultBackendKind kind) => kind switch
     {
