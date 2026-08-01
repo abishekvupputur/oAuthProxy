@@ -47,6 +47,17 @@
                                 Command="{Binding SignOutOfProtonPassCommand}"/>
                     </WrapPanel>
 
+                    <!-- Why the greyed buttons are greyed. The commands disable themselves through
+                         CanExecute, so without this the user sees dead controls and no reason —
+                         which reads as a broken tab rather than a deliberate wait. -->
+                    <Border Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush0}"
+                            BorderThickness="1" Padding="11,9" CornerRadius="6" Margin="0,0,0,8"
+                            Visibility="{Binding IsWaitingForVaultLoad, Converter={StaticResource BoolToVisibilityConverter}}">
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"><Run
+                            Style="{StaticResource EmphasisRunStyle}">Still reading your vault.</Run><Run
+                            xml:space="preserve"> Rewriting, re-initialising and the integrity check stay unavailable until it has finished. They compare the vault against the configuration in memory, and until that is fully loaded the comparison would call real items orphaned and real records missing. Everything else on this tab works now.</Run></TextBlock>
+                    </Border>
+
                     <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
                                Text="Rewrite all items to vault makes the vault match what is in memory — the way back from items edited or deleted by hand. It replaces every item, so it is not the cheap option: to restore only what is missing, use the integrity check below."/>
 
@@ -98,6 +109,14 @@
                         <StackPanel Margin="0,6,0,0">
                             <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
                                        Text="Compares the vault against the configuration: items nothing refers to any more, and records whose item is gone. Nothing is changed until you choose it."/>
+                            <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
+                                       Foreground="{StaticResource ErrorBrush}"
+                                       Visibility="{Binding IsWaitingForVaultLoad, Converter={StaticResource BoolToVisibilityConverter}}"
+                                       Text="Unavailable until the vault has finished loading — until then this would compare against a store that is empty or half-replaced, and report live items as orphaned."/>
+
+                            <!-- IsEnabled covers "a check is already running"; CanExecute on the
+                                 command covers "the vault is still loading". Both, because they are
+                                 different waits with different explanations. -->
                             <Button Content="Check the vault" HorizontalAlignment="Left" Margin="0,0,0,8"
                                     IsEnabled="{Binding IsCheckingIntegrity, Converter={StaticResource InverseBoolConverter}}"
                                     Command="{Binding CheckIntegrityCommand}"/>

@@ -152,6 +152,57 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// <summary>Raised after the user disconnects, so the shell can go back to the setup page.</summary>
     public event Action? Disconnected;
 
+    // ---- Vault maintenance, and when it is allowed to run ------------------------------------
+    //
+    // Everything in this section is driven by the integrity check, which compares what is in
+    // memory against what is in the vault and reports the difference two ways: items in the vault
+    // that no record points at (orphans, offered with a Delete button), and records whose vault
+    // item is gone (missing, offered with a Drop button).
+    //
+    // Both readings are only meaningful once the vault has actually been read. While a load is in
+    // flight the store is empty or half-replaced, so the comparison inverts: every real item in
+    // the vault looks orphaned, and every real record looks missing. The buttons beside those
+    // lists delete things, and a user acting on that list would be deleting live credentials on
+    // the strength of a picture that was never true.
+    //
+    // Deliberately scoped to this section rather than the whole tab. Disconnect, Sign out, the
+    // listen port and the logs all stay reachable — none of them reads the integrity view, and
+    // they are the controls someone needs when a vault is slow, locked, or wedged. Disabling the
+    // tab wholesale would take away the recovery surface at exactly the moment it is wanted.
+
+    /// <summary>
+    /// Whether the vault-maintenance actions may run: the store has been loaded, and no load is in
+    /// flight. Bound by the section's <c>IsEnabled</c> and enforced again on every command, so the
+    /// guard does not depend on the UI honouring it.
+    /// </summary>
+    public bool CanMaintainVault => _configStoreCache.IsSettled;
+
+    /// <summary>The inverse, for the explanation shown in the section's place.</summary>
+    public bool IsWaitingForVaultLoad => !CanMaintainVault;
+
+    /// <summary>
+    /// Polled from the same timer as the rest of this tab rather than driven by an event. The load
+    /// flag is written on a thread-pool thread, and this file already avoids marshalling a stream
+    /// of background events into a tab that is usually not even visible.
+    /// </summary>
+    private void RefreshMaintenanceAvailability()
+    {
+        OnPropertyChanged(nameof(CanMaintainVault));
+        OnPropertyChanged(nameof(IsWaitingForVaultLoad));
+
+        // A bound IsEnabled greys the buttons; this is what actually stops them running. Without
+        // it a command is still reachable by keyboard, by automation, and by a click that lands in
+        // the same tick as the state change.
+        CheckIntegrityCommand.NotifyCanExecuteChanged();
+        DeleteOtherItemCommand.NotifyCanExecuteChanged();
+        DeleteOrphanCommand.NotifyCanExecuteChanged();
+        DeleteAllOrphansCommand.NotifyCanExecuteChanged();
+        DropMissingRecordCommand.NotifyCanExecuteChanged();
+        RewriteAllItemsCommand.NotifyCanExecuteChanged();
+        WriteMissingItemsCommand.NotifyCanExecuteChanged();
+        ReinitialiseCommand.NotifyCanExecuteChanged();
+    }
+
     /// <summary>
     /// Re-reads state the tray menu can also change, so the two never disagree. Called when
     /// the Settings tab is shown.
@@ -183,6 +234,8 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         // Computed from two things the timer refreshes rather than stored, so it has to be told.
         OnPropertyChanged(nameof(CanSignOutOfProtonPass));
+
+        RefreshMaintenanceAvailability();
 
         if (!IsConnected)
         {
@@ -280,7 +333,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// Compares the vault against the configuration. Reports only — every repair below is a loss
     /// of something, so it is the user's to choose.
     /// </summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanMaintainVault))]
     private async Task CheckIntegrityAsync()
     {
         if (IsCheckingIntegrity) return;
@@ -323,7 +376,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// Deletes an item that is not RavensPort's. One at a time and never in bulk: the rest of the
     /// vault is the user's, and this app has no business sweeping it.
     /// </summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanMaintainVault))]
     private async Task DeleteOtherItemAsync(VaultItemEntry? item)
     {
         if (item is null) return;
@@ -344,7 +397,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     }
 
     /// <summary>Deletes one item the check found. Per item, because each one is the user's data.</summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanMaintainVault))]
     private async Task DeleteOrphanAsync(VaultOrphanItem? orphan)
     {
         if (orphan is null) return;
@@ -364,7 +417,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanMaintainVault))]
     private async Task DeleteAllOrphansAsync()
     {
         if (Orphans.Count == 0) return;
@@ -394,7 +447,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// Drops a record whose item is gone. The destructive answer to "missing" — rewriting is the
     /// other one, and it is the better one while the secret is still in memory.
     /// </summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanMaintainVault))]
     private async Task DropMissingRecordAsync(VaultMissingItem? missing)
     {
         if (missing is null) return;
@@ -422,7 +475,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// Writes every item and the configuration again from what is in memory — the way back from a
     /// vault that has been edited by hand.
     /// </summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanMaintainVault))]
     private async Task RewriteAllItemsAsync()
     {
         StatusMessage = "Writing every item to your password manager…";
@@ -442,7 +495,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// Puts back what the vault is missing, from memory — the answer to a missing item that keeps
     /// it. Costs one write per absent item rather than rewriting the whole vault.
     /// </summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanMaintainVault))]
     private async Task WriteMissingItemsAsync()
     {
         StatusMessage = "Writing the missing items to your password manager…";
@@ -473,7 +526,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// Asked first, because it is a real interruption: every route and funnel is rebuilt, so a
     /// client mid-request sees an error, and anything not yet saved is gone.
     /// </summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanMaintainVault))]
     private async Task ReinitialiseAsync()
     {
         if (!IsConfirmingReinitialise)
