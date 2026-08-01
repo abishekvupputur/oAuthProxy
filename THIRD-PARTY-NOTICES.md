@@ -7,8 +7,12 @@ single-file build **bundles these components (and the .NET runtime) into the pro
 `RavensPort.exe`**, so any redistribution of that binary is a redistribution of these
 components and must carry these notices.
 
-All components are under permissive licenses (MIT or Apache-2.0). None are copyleft;
-none impose source-disclosure obligations on RavensPort.
+Everything **bundled** in that binary is under a permissive license (MIT or Apache-2.0),
+and none of it imposes source-disclosure obligations on RavensPort.
+
+One component is **not** bundled and **is** copyleft — the Proton Pass CLI, which
+RavensPort can download at your request. See [Optional external
+tools](#optional-external-tools-not-bundled) below.
 
 ## Runtime dependencies (bundled in the published executable)
 
@@ -44,6 +48,36 @@ none impose source-disclosure obligations on RavensPort.
 | xunit (and xunit.core / xunit.assert / xunit.runner.visualstudio) | 2.5.3 | Apache-2.0 |
 | Microsoft.NET.Test.Sdk | 17.8.0 | MIT |
 | coverlet.collector | 6.0.0 | MIT |
+
+## Optional external tools (not bundled)
+
+RavensPort stores its configuration in a password manager and reaches it by running that
+manager's command-line tool as a separate child process. Those tools are **not** part of
+`RavensPort.exe` and are **not** redistributed with it.
+
+| Component | License | How it is obtained |
+|---|---|---|
+| Proton Pass CLI (`pass-cli`) | **GPL-3.0-or-later** | Installed by you, or downloaded from Proton's official release on your explicit request |
+| 1Password CLI (`op`) | Proprietary (1Password) | Installed by you only. RavensPort never downloads or ships it — 1Password's API and SDK Terms of Service do not permit redistribution |
+
+### Proton Pass CLI and the GPL
+
+If you use the "Download it for me" button, RavensPort fetches this exact release:
+
+- Version: **2.2.4**
+- File: `pass-cli-windows-x86_64.zip`
+- SHA-256: `8077bbfed54842305dbdef2744bddaa368fd36b349ce9e2c406a598c82e38d77`
+- From: <https://github.com/protonpass/pass-cli/releases/tag/2.2.4>
+
+Corresponding source for that exact version is the tag above, at
+<https://github.com/protonpass/pass-cli>. RavensPort does **not** modify pass-cli, link
+against it, or incorporate any part of it — it is executed as an independent program over
+a process boundary, which is aggregation rather than a combined work. RavensPort itself
+therefore remains under the MIT License.
+
+The archive contains `pass-cli.exe` and `libcrypto-3-x64.dll`; both are extracted
+unmodified, and the download is rejected outright if its SHA-256 does not match the value
+above.
 
 ## What the licenses require of you
 

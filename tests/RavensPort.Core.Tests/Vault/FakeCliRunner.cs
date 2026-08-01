@@ -79,4 +79,28 @@ public sealed class FakeCliRunner : ICliRunner
         throw new InvalidOperationException(
             $"No scripted response for: {string.Join(' ', args)}");
     }
+
+    /// <summary>
+    /// Replays the scripted stdout a line at a time, so a caller that parses output as it streams
+    /// is exercised the same way the real runner would exercise it.
+    /// </summary>
+    public async Task<CliResult> RunStreamingAsync(
+        string exePath,
+        IReadOnlyList<string> args,
+        Action<string> onOutputLine,
+        IReadOnlyDictionary<string, string>? env = null,
+        TimeSpan? timeout = null,
+        CancellationToken ct = default)
+    {
+        var result = await RunAsync(exePath, args, stdin: null, env, timeout, ct);
+
+        foreach (var line in (result.StdOut + result.StdErr)
+                 .Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            ct.ThrowIfCancellationRequested();
+            onOutputLine(line.TrimEnd('\r'));
+        }
+
+        return result;
+    }
 }

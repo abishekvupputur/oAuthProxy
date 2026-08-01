@@ -21,8 +21,10 @@ the network and where, and how to remove everything it leaves behind.
 - **Your secrets go to your password manager, not to disk.** OAuth client secrets, access and
   refresh tokens, API keys, and per-endpoint proxy keys are stored in a vault in 1Password or
   Proton Pass that you control.
-- **The only files written to this PC are logs**, under `%AppData%\RavensPort\`, and they are
-  redacted so that credential values do not appear in them.
+- **No configuration is written to this PC.** The files RavensPort does write are logs, under
+  `%AppData%\RavensPort\` — redacted so credential values do not appear in them — and, if you
+  sign in to Proton Pass from inside the app, its own encrypted Proton Pass session under
+  `%LocalAppData%\RavensPort\`. The key that opens that session is never written down.
 - **The only network connections are ones you configure** — the OAuth providers and upstream APIs
   you set up — plus a listener bound to `127.0.0.1` that never leaves your machine.
 
@@ -65,18 +67,27 @@ their vault. See [1Password's privacy policy](https://1password.com/legal/privac
 
 ### 3.2 This PC
 
-Only three things touch local storage:
+Only these touch local storage:
 
 | Location | Contents | Written when |
 |---|---|---|
 | `%AppData%\RavensPort\logs\activity-YYYYMMDD.log` | Proxied requests and responses, connects, token refreshes, route reloads, vault operations | Always, while running |
 | `%AppData%\RavensPort\logs\errors.log` | Unhandled exceptions and provider errors, with stack traces | On error |
 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` | A single value pointing at the executable | Only if you enable **Start with Windows** |
+| `%LocalAppData%\RavensPort\pass-session\` | RavensPort's own Proton Pass session, encrypted | Only if you sign in to Proton Pass from inside RavensPort |
+| `%LocalAppData%\RavensPort\cli\pass-cli\` | A copy of the Proton Pass CLI | Only if you use **Download it for me** on the setup page |
 
 Activity logs rotate every 2 days and older files are deleted automatically after roughly 10 days.
 Nothing else about your configuration is persisted locally — a change made while the vault is
 locked is held in memory only, and is lost if the application exits before the vault becomes
 reachable.
+
+**About the Proton Pass session.** When you sign in from inside RavensPort, the resulting session
+is kept in a directory of its own rather than in the shared per-user location `pass-cli` normally
+uses, so it is independent of any `pass-cli` session in your terminal. It is encrypted with a key
+that exists only in RavensPort's memory and is never written to disk: the files left behind cannot
+be read by anything — including RavensPort — without the key you paste in. Signing out deletes
+them. Losing the key costs you the session and nothing else; your data is in Proton Pass.
 
 If you upgraded from a version before 2.0, an old `%AppData%\RavensPort\store.dat` may still exist
 from that version. RavensPort never reads it and never deletes it on its own; the setup page offers
@@ -140,6 +151,8 @@ from your own systems:
 |---|---|
 | All configuration and secrets | Delete the RavensPort items — or the whole vault — in your password manager. **Settings → Disconnect** stops using a vault but deliberately deletes nothing from it |
 | Logs | **Settings** → prune logs, or delete `%AppData%\RavensPort\logs\` |
+| RavensPort's Proton Pass session | **Sign out of Proton Pass** on the setup page, or delete `%LocalAppData%\RavensPort\pass-session\` |
+| The downloaded Proton Pass CLI | Delete `%LocalAppData%\RavensPort\cli\` |
 | Autostart entry | Turn off **Start with Windows**, or delete the `RavensPort` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
 | Legacy pre-2.0 store | Delete `%AppData%\RavensPort\store.dat` |
 | The application | Delete the executable. It is self-contained and has no installer |

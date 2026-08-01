@@ -1,0 +1,173 @@
+using System.Security.AccessControl;
+using System.Security.Cryptography;
+using System.Security.Principal;
+using RavensPort.Core.Diagnostics;
+
+namespace RavensPort.Core.Vault;
+
+/// <summary>
+/// RavensPort's own pass-cli session: a directory it owns and an encryption key it holds only in
+/// memory.
+///
+/// **Why not just use the user's session.** pass-cli defaults to a per-user session that any shell
+/// shares. Riding on that would mean a `pass-cli logout` typed in an unrelated terminal silently
+/// stops the proxy, and that RavensPort's access lives or dies by something it neither created nor
+/// can see. Pointing <c>PROTON_PASS_SESSION_DIR</c> at a directory of its own makes the app's
+/// sign-in its own: the terminal cannot end it, and signing out here does not disturb the terminal.
+///
+/// **Why the key is never written down.** <c>PROTON_PASS_KEY_PROVIDER=fs</c> would be less work,
+/// but it stores the key in plaintext in <c>local.key</c> beside the very data it encrypts, which
+/// is not encryption so much as filing. The <c>env</c> provider takes the key from the child's
+/// environment instead, so the encrypted session on disk is worth nothing without the user. The
+/// cost is real and deliberate: the key exists only while the app runs, so a restart means the
+/// user pastes it again, and losing it means signing in again.
+///
+/// Losing the key loses the *session*, never the data — everything RavensPort stores lives in
+/// Proton Pass, reachable from any Proton client. Any message shown about a lost key must say so,
+/// or it reads like data loss.
+/// </summary>
+/// <param name="directoryOverride">
+/// Somewhere other than the default. For tests, which must not create — or delete — a directory
+/// under the real profile of whoever is running them.
+/// </param>
+public sealed class ProtonPassSession(ActivityLog activityLog, string? directoryOverride = null)
+{
+    /// <summary>
+    /// Local rather than roaming: a session is bound to this machine, and roaming it would copy a
+    /// credential onto every machine the profile touches.
+    /// </summary>
+    public static string DefaultDirectory { get; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "RavensPort",
+        "pass-session");
+
+    public string SessionDirectory { get; } = directoryOverride ?? DefaultDirectory;
+
+    /// <summary>
+    /// The key, for as long as the process lives.
+    ///
+    /// A <c>string</c> rather than a <see cref="System.Security.SecureString"/> on purpose: it has
+    /// to be handed to <c>ProcessStartInfo.Environment</c>, which takes a string, so a SecureString
+    /// would be decrypted into the managed heap at that point anyway and buy nothing but the
+    /// appearance of care. .NET strings cannot be reliably zeroed, so this value is recoverable
+    /// from a memory dump of the app for as long as it is signed in — acceptable, because anything
+    /// that can dump this process can also read the decrypted vault it is holding.
+    /// </summary>
+    private string? _key;
+
+    public bool HasKey => _key is { Length: > 0 };
+
+    /// <summary>
+    /// The key itself, for the one caller that has to hand it to something else:
+    /// <see cref="HelloKeyProtector"/>, which encrypts it so a Hello gesture can bring it back.
+    /// Internal so that stays the only caller — everything else has
+    /// <see cref="BuildEnvironment"/>, which puts it where it belongs without ever returning it.
+    /// </summary>
+    internal string? CurrentKey => _key;
+
+    /// <summary>True when a session has been written here, whether or not it is usable.</summary>
+    public bool HasSessionOnDisk => Directory.Exists(Path.Combine(SessionDirectory, ".session"));
+
+    /// <summary>
+    /// A fresh key: 32 random bytes, base64. pass-cli SHA-256s whatever string it is given, so the
+    /// encoding is only about what a user can select and paste — but the entropy is what matters,
+    /// and it comes from the OS rather than from someone inventing a passphrase.
+    /// </summary>
+    public static string GenerateKey() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+
+    /// <summary>Accepts the key the user pasted. Whitespace-trimmed, because copy buttons add it.</summary>
+    public void Unlock(string key)
+    {
+        var trimmed = (key ?? "").Trim();
+
+        if (trimmed.Length == 0)
+        {
+            throw new VaultCliException(
+                "A session key is required. Paste the key you saved when you first signed in.");
+        }
+
+        _key = trimmed;
+    }
+
+    /// <summary>Forgets the key. The encrypted session stays on disk, unreadable until unlocked.</summary>
+    public void Clear() => _key = null;
+
+    /// <summary>
+    /// What every pass-cli child process needs to see this session. Empty when there is no key —
+    /// the <c>env</c> provider errors on an empty value, so calling the CLI without one produces a
+    /// confusing failure rather than an honest "not signed in".
+    /// </summary>
+    public IReadOnlyDictionary<string, string> BuildEnvironment()
+    {
+        if (_key is not { Length: > 0 } key) return new Dictionary<string, string>();
+
+        EnsureDirectory();
+
+        return new Dictionary<string, string>
+        {
+            ["PROTON_PASS_SESSION_DIR"] = SessionDirectory,
+            ["PROTON_PASS_KEY_PROVIDER"] = "env",
+            ["PROTON_PASS_ENCRYPTION_KEY"] = key,
+        };
+    }
+
+    /// <summary>
+    /// Deletes the session directory outright.
+    ///
+    /// Needed because <c>pass-cli logout</c> cannot always do it: a login that was cancelled
+    /// part-way still writes <c>pass-cli.db</c> and <c>session.json</c>, and <c>logout</c> against
+    /// that half-state fails with "Session is some but is not logged in" and leaves the files
+    /// behind — which then blocks the next sign-in. So the app cleans up after itself rather than
+    /// trusting the CLI to.
+    /// </summary>
+    public void Wipe()
+    {
+        try
+        {
+            if (Directory.Exists(SessionDirectory)) Directory.Delete(SessionDirectory, recursive: true);
+            activityLog.Log("VAULT cleared the RavensPort pass-cli session directory");
+        }
+        catch (Exception ex)
+        {
+            // Worth saying, not worth failing a sign-out over: the key is gone from memory either
+            // way, so what is left on disk is ciphertext nobody can open.
+            activityLog.Log($"VAULT could not delete the pass-cli session directory: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Creates the directory owned by the current user only. LOCALAPPDATA is already user-scoped,
+    /// so this is defence in depth against an inherited ACE from a parent someone widened.
+    /// </summary>
+    private void EnsureDirectory()
+    {
+        if (Directory.Exists(SessionDirectory)) return;
+
+        try
+        {
+            var info = new DirectoryInfo(SessionDirectory);
+
+            if (OperatingSystem.IsWindows() && WindowsIdentity.GetCurrent().User is { } user)
+            {
+                var security = new DirectorySecurity();
+                security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+                security.AddAccessRule(new FileSystemAccessRule(
+                    user,
+                    FileSystemRights.FullControl,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+
+                info.Create(security);
+                return;
+            }
+
+            info.Create();
+        }
+        catch (Exception ex)
+        {
+            activityLog.Log($"VAULT could not set permissions on the session directory: {ex.Message}");
+            Directory.CreateDirectory(SessionDirectory);
+        }
+    }
+}

@@ -465,16 +465,18 @@ authorize and nothing to refresh. Test appears only once a test endpoint is set.
 
 Everything — OAuth client secrets, access and refresh tokens, API keys, per-endpoint proxy keys,
 routes, upstreams, MCP sources and funnels, and settings — is stored in a vault called
-**`RavensPort`** in your password manager. **Nothing is kept on this PC.** There is no local
+**`RavensPort`** in your password manager. **None of it is kept on this PC.** There is no local
 cache and no fallback file, so the proxy does not start until 1Password or Proton Pass is
-unlocked.
+unlocked. (RavensPort does write logs, and — if you sign in to Proton Pass from inside the app —
+its own encrypted session for that sign-in. Neither contains any of the above. See
+[Logs](#logs).)
 
 ### Supported managers
 
 | Manager | CLI | Install |
 |---|---|---|
 | 1Password | `op` 2.0 or newer | `winget install AgileBits.1Password.CLI` |
-| Proton Pass | `pass-cli` | `winget install Proton.PassCLI` |
+| Proton Pass | `pass-cli` | `winget install Proton.PassCLI`, or let RavensPort fetch it — the setup page offers **Download it for me** |
 
 Open RavensPort and it walks you through the rest: install, sign in, and set up a vault. It only
 ever touches items it created, so the vault stays safe to keep other things in.
@@ -491,13 +493,27 @@ your own entries in it, and this app's housekeeping deletes items it no longer n
 take that vault over. Both controls stay available once a vault is connected — that is how you
 switch profiles.
 
-**Signing in.** For 1Password, turn on **Settings → Developer → Integrate with 1Password CLI** in
-the desktop app; without it, `op account add` then `op signin`. For Proton Pass, `pass-cli login`
-(or `pass-cli login --interactive` to stay in the terminal). Either can instead use a token —
-`OP_SERVICE_ACCOUNT_TOKEN` or `PROTON_PASS_PERSONAL_ACCESS_TOKEN` — which is the better option for
-a machine that should never show an unlock prompt. A 1Password service account must be granted
-access to `RavensPort` explicitly; it cannot use your Private vault, and without the grant it
-sees no vaults at all.
+**Signing in — Proton Pass.** Done in the app, on the setup page. RavensPort will fetch `pass-cli`
+for you if you do not have it, generate a session key, and show you a link to open in your browser
+to finish signing in. There is a **Sign out** to match.
+
+That session is RavensPort's own — its own session directory, encrypted with a key held only in
+memory. Two consequences worth knowing: signing in with `pass-cli` in a *terminal* does not sign in
+RavensPort, and `pass-cli logout` in a terminal will not interrupt the proxy. After RavensPort
+restarts you paste the session key again to resume. Save that key in Proton Pass itself when it is
+generated — it is shown once. Losing it costs the session only; everything RavensPort stores is in
+Proton Pass and survives.
+
+**Signing in — 1Password.** Turn on **Settings → Developer → Integrate with 1Password CLI** in the
+desktop app; without it, `op account add` then `op signin`. There is no in-app equivalent for
+1Password: `op` authenticates with a Secret Key and account password at a terminal rather than
+through a browser link, and its licence does not allow RavensPort to distribute it.
+
+**Either manager** can instead use a token — `OP_SERVICE_ACCOUNT_TOKEN` or
+`PROTON_PASS_PERSONAL_ACCESS_TOKEN` — which is the better option for a machine that should never
+show an unlock prompt or ask for a session key. A 1Password service account must be granted access
+to `RavensPort` explicitly; it cannot use your Private vault, and without the grant it sees no
+vaults at all.
 
 **If both are installed** and neither vault clearly holds the configuration, RavensPort asks which
 to use — **every launch**. The choice is the one thing that cannot live in the vault, and this app
@@ -619,12 +635,15 @@ tell after the fact. Run it on one machine at a time.
 
 ## Logs
 
-Logs are the only thing RavensPort writes to disk, under `%AppData%\RavensPort\`:
+No configuration is written to disk. What RavensPort does write lives under `%AppData%\RavensPort\`
+and `%LocalAppData%\RavensPort\`:
 
 | Path | Contents |
 |---|---|
-| `logs\activity-YYYYMMDD.log` | Proxied requests and responses, connects, refreshes, route reloads, vault operations. Rotates every 2 days, auto-deletes after ~10 |
-| `logs\errors.log` | Unhandled exceptions and provider errors with stack traces |
+| `%AppData%\...\logs\activity-YYYYMMDD.log` | Proxied requests and responses, connects, refreshes, route reloads, vault operations. Rotates every 2 days, auto-deletes after ~10 |
+| `%AppData%\...\logs\errors.log` | Unhandled exceptions and provider errors with stack traces |
+| `%LocalAppData%\...\pass-session\` | RavensPort's encrypted Proton Pass session, if you signed in from the app. Unreadable without the session key, which is never written down |
+| `%LocalAppData%\...\cli\pass-cli\` | The Proton Pass CLI, if you used **Download it for me** |
 
 The Settings tab can open either log, open the folder, or prune old ones.
 

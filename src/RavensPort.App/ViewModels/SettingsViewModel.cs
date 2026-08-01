@@ -22,6 +22,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly VaultGateService _gate;
     private readonly VaultSyncQueue _syncQueue;
     private readonly VaultIntegrityService _integrity;
+    private readonly ProtonPassAuthenticator _protonAuthenticator;
     private readonly ProxyConfigChangeNotifier _proxyConfigChangeNotifier;
     private readonly DispatcherTimer _logTimer;
 
@@ -113,8 +114,10 @@ public sealed partial class SettingsViewModel : ObservableObject
         VaultGateService gate,
         VaultSyncQueue syncQueue,
         VaultIntegrityService integrity,
+        ProtonPassAuthenticator protonAuthenticator,
         ProxyConfigChangeNotifier proxyConfigChangeNotifier)
     {
+        _protonAuthenticator = protonAuthenticator;
         _configStoreCache = configStoreCache;
         _autostartService = autostartService;
         _activityLog = activityLog;
@@ -177,6 +180,9 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         IsConnected = kind != VaultBackendKind.None;
         UnattendedTokenSteps = VaultLockGuidance.UnattendedTokenSteps(kind);
+
+        // Computed from two things the timer refreshes rather than stored, so it has to be told.
+        OnPropertyChanged(nameof(CanSignOutOfProtonPass));
 
         if (!IsConnected)
         {
@@ -542,24 +548,9 @@ public sealed partial class SettingsViewModel : ObservableObject
         DisconnectWarning = "";
 
         _gate.Disconnect();
-        await _configStoreCache.ResetAsync();
-
-        // Routes come from the store, so the proxy has to be rebuilt from the now-empty one —
-        // otherwise it would keep forwarding with the credentials of a vault this app has just
-        // disconnected from.
-        _proxyConfigChangeNotifier.Rebuild();
-
-        _activityLog.Log("VAULT disconnected from the Settings tab — the proxy is serving nothing until reconnected");
-
-        Orphans.Clear();
-        MissingItems.Clear();
-        OtherItems.Clear();
-        IntegritySummary = "";
-
-        StatusMessage = "Disconnected.";
-        RefreshVaultStatus();
-
-        Disconnected?.Invoke();
+        await TearDownAsync(
+            "VAULT disconnected from the Settings tab — the proxy is serving nothing until reconnected",
+            "Disconnected.");
     }
 
     [RelayCommand]
@@ -568,6 +559,81 @@ public sealed partial class SettingsViewModel : ObservableObject
         IsConfirmingDisconnect = false;
         DisconnectWarning = "";
         StatusMessage = "Left connected.";
+    }
+
+    /// <summary>
+    /// Whether to offer signing out of Proton Pass — only when Proton Pass is the backend in use,
+    /// since it is the only one whose session RavensPort owns.
+    /// </summary>
+    public bool CanSignOutOfProtonPass =>
+        IsConnected && _gate.Status.Selected == VaultBackendKind.ProtonPass;
+
+    [ObservableProperty] private bool _isConfirmingSignOut;
+
+    /// <summary>
+    /// Ends RavensPort's Proton Pass session outright, rather than only letting go of the vault.
+    ///
+    /// Stronger than Disconnect, and asked separately for that reason. Disconnect can be undone by
+    /// choosing the manager again; this cannot — it tells Proton to invalidate the session, deletes
+    /// it, and forgets the key. Coming back means signing in through the browser again.
+    /// </summary>
+    [RelayCommand]
+    private async Task SignOutOfProtonPassAsync()
+    {
+        if (!IsConfirmingSignOut)
+        {
+            if (_configStoreCache.HasPendingChanges)
+            {
+                StatusMessage = "Saving pending changes before signing out…";
+                await _syncQueue.FlushAsync(TimeSpan.FromSeconds(15));
+            }
+
+            IsConfirmingSignOut = true;
+            StatusMessage = "Confirm to sign out of Proton Pass. You will need to sign in again through your browser.";
+            return;
+        }
+
+        IsConfirmingSignOut = false;
+
+        // Ends the session and disconnects the gate in one step — see ProtonPassAuthenticator.
+        await _protonAuthenticator.SignOutAsync();
+
+        await TearDownAsync(
+            "VAULT signed out of Proton Pass from the Settings tab",
+            "Signed out of Proton Pass.");
+    }
+
+    [RelayCommand]
+    private void CancelSignOut()
+    {
+        IsConfirmingSignOut = false;
+        StatusMessage = "Left signed in.";
+    }
+
+    /// <summary>
+    /// Everything that has to happen once the app no longer has a vault, whichever way it got
+    /// there. Shared so a sign-out cannot quietly skip a step a disconnect does.
+    /// </summary>
+    private async Task TearDownAsync(string logMessage, string statusMessage)
+    {
+        await _configStoreCache.ResetAsync();
+
+        // Routes come from the store, so the proxy has to be rebuilt from the now-empty one —
+        // otherwise it would keep forwarding with the credentials of a vault this app has just
+        // disconnected from.
+        _proxyConfigChangeNotifier.Rebuild();
+
+        _activityLog.Log(logMessage);
+
+        Orphans.Clear();
+        MissingItems.Clear();
+        OtherItems.Clear();
+        IntegritySummary = "";
+
+        StatusMessage = statusMessage;
+        RefreshVaultStatus();
+
+        Disconnected?.Invoke();
     }
 
     private void RefreshActivity()

@@ -40,10 +40,17 @@ public static class VaultLockGuidance
             + "\"Integrate with 1Password CLI\". Then unlock 1Password.\n\n"
             + "Without the desktop app, run \"op account add\" once and then \"op signin\".",
 
+        // No terminal instructions here, deliberately. RavensPort keeps a pass-cli session of its
+        // own — its own session directory, encrypted with a key only it holds — so a `pass-cli
+        // login` typed in a terminal signs in that terminal and leaves this card exactly as it is.
+        // Saying so is the point: the failure it prevents is someone signing in successfully,
+        // twice, and concluding the app is broken.
+        // Only the one thing the steps below cannot say for themselves. What to actually do is
+        // rendered as the next action on the card, in the state the user is in — repeating it here
+        // put "sign in below" above a box that could not sign anyone in yet.
         VaultBackendKind.ProtonPass =>
-            "Run \"pass-cli login\" and complete the sign-in in your browser, or "
-            + "\"pass-cli login --interactive\" to stay in the terminal.\n\n"
-            + "The session then persists until you run \"pass-cli logout\".",
+            "This session belongs to RavensPort alone. Signing in with \"pass-cli\" in a terminal "
+            + "does not sign in here, and signing out there will not interrupt the proxy.",
 
         _ => "",
     };
@@ -70,9 +77,13 @@ public static class VaultLockGuidance
             + "see \"Running unattended\" on the Settings tab.",
 
         VaultBackendKind.ProtonPass =>
-            "A pass-cli session lasts until you run \"pass-cli logout\", so a vault that has become "
-            + "unavailable usually means the session ended. Run \"pass-cli login\" again.\n\n"
-            + "There is also a way to keep the vault reachable without signing in interactively — "
+            "RavensPort's Proton Pass session lasts until you sign out, but the key that opens it "
+            + "is held only in memory — so after RavensPort restarts you paste the key again, and "
+            + "the session resumes.\n\n"
+            + "If you no longer have the key, the setup page offers to discard the locked session "
+            + "so you can sign in again. That costs you the session and nothing else: every "
+            + "credential, route and key lives in Proton Pass, not in RavensPort.\n\n"
+            + "There is also a way to keep the vault reachable with no key to paste at all — "
             + "see \"Running unattended\" on the Settings tab.",
 
         _ => "",

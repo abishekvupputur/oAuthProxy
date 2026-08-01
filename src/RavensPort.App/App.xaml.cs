@@ -8,6 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using RavensPort.App.Tray;
 using RavensPort.App.ViewModels;
+using RavensPort.App.Views;
 using RavensPort.Core.Mcp;
 using RavensPort.Core.Platform;
 using RavensPort.Core.Proxy;
@@ -67,9 +68,20 @@ public partial class App : Application
             ReportError("Unexpected error", args.Exception);
             args.Handled = true;
         };
+        // Logged, deliberately not shown. An unobserved exception is by definition one nothing was
+        // waiting on, so it is not news: whatever started that work has already run its own error
+        // path and told the user in the place that makes sense. The MCP client is the reliable
+        // source of these — a source whose proxy key has expired fails its handshake, which the
+        // pool catches, logs and shows on the row, and the library's own message-pump task is then
+        // collected still holding the same 403. The dialog that produced arrived seconds later,
+        // detached from anything the user had done, and said nothing the grid had not.
+        //
+        // The finalizer thread raises this, so a MessageBox here also blocks GC until it is
+        // dismissed. Errors that genuinely need interrupting come through
+        // DispatcherUnhandledException above.
         TaskScheduler.UnobservedTaskException += (_, args) =>
         {
-            ReportError("Unexpected background error", args.Exception);
+            LogError("Unobserved background error", args.Exception);
             args.SetObserved();
         };
 
@@ -187,7 +199,38 @@ public partial class App : Application
         // was blocking this thread while a continuation tried to post back onto it; this never
         // blocks, and every piece of work below is still wrapped in Task.Run so nothing captures
         // the Dispatcher's SynchronizationContext.
-        _ = setupViewModel.CheckAsync();
+        _ = OfferHelloThenCheckAsync(setupViewModel);
+    }
+
+    /// <summary>
+    /// Offers to unlock with Windows Hello before falling through to the ordinary startup check.
+    ///
+    /// This is what lets a machine that has done this once come up without anyone visiting the
+    /// setup page: consent, gesture, vault open, proxy started. Declining is not a failure — the
+    /// check below then finds a locked session and the setup page offers the pasted key, exactly
+    /// as it does on a machine with no Hello at all.
+    /// </summary>
+    private async Task OfferHelloThenCheckAsync(SetupViewModel setupViewModel)
+    {
+        try
+        {
+            var authenticator = _webApp!.Services.GetRequiredService<ProtonPassAuthenticator>();
+
+            if (authenticator.HasHelloKey && await ProtonPassAuthenticator.IsHelloAvailableAsync())
+            {
+                // Shown, and kept open, for the whole prompt: Hello attaches to the foreground
+                // window, and this tray app has no other one at startup.
+                HelloConsentWindow.RequestUnlock(authenticator.UnlockWithHelloAsync);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Never allowed to stop the app reaching its setup page — that page is the only thing
+            // that can explain what went wrong, and pasting the key still works.
+            _webApp?.Services.GetService<ActivityLog>()?.LogError("Windows Hello unlock at startup failed", ex);
+        }
+
+        await setupViewModel.CheckAsync();
     }
 
     /// <summary>
@@ -406,6 +449,19 @@ public partial class App : Application
 
     private void ReportError(string title, Exception ex)
     {
+        LogError(title, ex);
+
+        MessageBox.Show($"{title}:{Environment.NewLine}{Environment.NewLine}{ex.Message}",
+            "RavensPort", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
+    /// <summary>
+    /// Records an error without interrupting anyone. For failures that have already been handled
+    /// and reported wherever they belong — see the unobserved-task handler in
+    /// <see cref="OnStartup"/> — where a dialog would be a second telling of the same thing.
+    /// </summary>
+    private void LogError(string title, Exception ex)
+    {
         try
         {
             // Route through ActivityLog so it lands in the same folder the Settings tab
@@ -416,9 +472,6 @@ public partial class App : Application
         {
             // Logging must never itself take the app down.
         }
-
-        MessageBox.Show($"{title}:{Environment.NewLine}{Environment.NewLine}{ex.Message}",
-            "RavensPort", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
     protected override void OnExit(ExitEventArgs e)

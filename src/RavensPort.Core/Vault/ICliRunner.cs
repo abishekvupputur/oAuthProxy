@@ -31,4 +31,26 @@ public interface ICliRunner
         IReadOnlyDictionary<string, string>? env = null,
         TimeSpan? timeout = null,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Same rules as <see cref="RunAsync"/>, but hands each line over as it arrives instead of only
+    /// at exit.
+    ///
+    /// It exists for exactly one call: <c>pass-cli login</c> prints the URL the user must open and
+    /// then keeps running until they have opened it. <see cref="RunAsync"/> reads both pipes to
+    /// EOF, so it could not surface that URL until the process it is waiting on had already
+    /// finished waiting for the URL — a deadlock made of good intentions.
+    /// </summary>
+    /// <param name="onOutputLine">
+    /// Called once per line of stdout and stderr, serialised so the callback never runs
+    /// concurrently with itself. Lines are not logged by the runner — the caller decides, because
+    /// only the caller knows whether this command's output is safe to write down.
+    /// </param>
+    Task<CliResult> RunStreamingAsync(
+        string exePath,
+        IReadOnlyList<string> args,
+        Action<string> onOutputLine,
+        IReadOnlyDictionary<string, string>? env = null,
+        TimeSpan? timeout = null,
+        CancellationToken ct = default);
 }
