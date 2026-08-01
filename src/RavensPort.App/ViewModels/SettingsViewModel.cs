@@ -216,6 +216,11 @@ public sealed partial class SettingsViewModel : ObservableObject
         // Routes and funnels can have been added on another tab since this one was last shown.
         OnPropertyChanged(nameof(KeyLocationSummary));
 
+        if (StatusMessage == "Disconnected.")
+        {
+            StatusMessage = "Ready.";
+        }
+
         RefreshVaultStatus();
     }
 
@@ -247,7 +252,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         // The vault name is worth stating even when it is the default: once a user has pointed
         // RavensPort at a vault of their own, nothing else on screen says which one it went to.
-        PasswordManagerSummary = $"{manager} — vault '{status?.VaultName ?? _gate.Selected.VaultName}'";
+        PasswordManagerSummary = $"{manager} — vault '{_gate.Selected.VaultName}'";
 
         PasswordManagerDetail = status?.ExePath is { Length: > 0 } path
             ? status.Version is { Length: > 0 } version ? $"{path}  (v{version})" : path
@@ -287,7 +292,9 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// changes used to be a no-op that left a credential on screen the vault no longer had. The
     /// re-read drops it and queues the corrected configuration, which the push below then writes.
     /// </summary>
-    [RelayCommand]
+    public bool CanSyncNow => false;
+
+    [RelayCommand(CanExecute = nameof(CanSyncNow))]
     private async Task SyncNowAsync()
     {
         if (!_configStoreCache.HasPendingChanges && ReloadFromVaultRequested is { } reload)
@@ -600,6 +607,17 @@ public sealed partial class SettingsViewModel : ObservableObject
         IsConfirmingDisconnect = false;
         DisconnectWarning = "";
 
+        // Nothing may be mid-write when the backend changes underneath it. A save resolves its
+        // target as it runs, so one still in flight here would finish against whichever vault is
+        // connected next — which is how a user's Proton Pass items were deleted by a configuration
+        // that belonged to 1Password.
+        if (!await _syncQueue.WaitForQuietAsync(TimeSpan.FromSeconds(30)))
+        {
+            IsConfirmingDisconnect = false;
+            StatusMessage = "A save to the vault is still running. Wait for it to finish, then try again.";
+            return;
+        }
+
         _gate.Disconnect();
         await TearDownAsync(
             "VAULT disconnected from the Settings tab — the proxy is serving nothing until reconnected",
@@ -648,6 +666,17 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         IsConfirmingSignOut = false;
 
+        // Nothing may be mid-write when the backend changes underneath it. A save resolves its
+        // target as it runs, so one still in flight here would finish against whichever vault is
+        // connected next — which is how a user's Proton Pass items were deleted by a configuration
+        // that belonged to 1Password.
+        if (!await _syncQueue.WaitForQuietAsync(TimeSpan.FromSeconds(30)))
+        {
+            IsConfirmingSignOut = false;
+            StatusMessage = "A save to the vault is still running. Wait for it to finish, then try again.";
+            return;
+        }
+
         // Ends the session and disconnects the gate in one step — see ProtonPassAuthenticator.
         await _protonAuthenticator.SignOutAsync();
 
@@ -667,6 +696,15 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// Everything that has to happen once the app no longer has a vault, whichever way it got
     /// there. Shared so a sign-out cannot quietly skip a step a disconnect does.
     /// </summary>
+    /// <summary>
+    /// Returns the app to its first-run state: nothing of the vault being left survives anywhere.
+    ///
+    /// Every list here is one the user could otherwise still be looking at — or worse, still
+    /// editing — after disconnecting. The store is emptied, the proxy is rebuilt from it, the four
+    /// tabs are rebuilt from it, and the integrity results are dropped. Anything skipped is a row
+    /// belonging to one vault presented under another, which is exactly what makes a switch between
+    /// password managers, or between two vaults in one, look like it half-worked.
+    /// </summary>
     private async Task TearDownAsync(string logMessage, string statusMessage)
     {
         await _configStoreCache.ResetAsync();
@@ -678,16 +716,39 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         _activityLog.Log(logMessage);
 
+        // Credentials, Routes and MCP Funnel hold their own row collections built from the store.
+        // Emptying the store does not empty those, and only Routes, Funnel and Settings rebuild on
+        // a tab switch — so without this the Credentials tab kept showing the disconnected vault's
+        // credentials until something else happened to reload it.
+        _rebuildTabs?.Invoke();
+
         Orphans.Clear();
         MissingItems.Clear();
         OtherItems.Clear();
         IntegritySummary = "";
+
+        // Confirmation flags too: leaving one set means the next visit to this tab opens already
+        // asking a question about a vault that is no longer connected.
+        IsConfirmingDisconnect = false;
+        IsConfirmingReinitialise = false;
+        IsConfirmingSignOut = false;
+        DisconnectWarning = "";
 
         StatusMessage = statusMessage;
         RefreshVaultStatus();
 
         Disconnected?.Invoke();
     }
+
+    /// <summary>
+    /// Rebuilds all four tabs from the store. Supplied by the host rather than resolved here,
+    /// because the view models this needs are the ones that own this one — see
+    /// <c>VaultStatusViewModel.ReloadTabs</c>.
+    /// </summary>
+    private Action? _rebuildTabs;
+
+    /// <summary>Wired at startup, once every tab's view model exists.</summary>
+    public void UseTabRebuilder(Action rebuildTabs) => _rebuildTabs = rebuildTabs;
 
     private void RefreshActivity()
     {

@@ -36,10 +36,53 @@ public sealed class OnePasswordVaultProvider(
     private long _loadedRevision;
 
     /// <summary>
+    /// Whether this provider has a trustworthy picture of what is in this vault — set by a
+    /// complete read, and equally by a save, which establishes the same thing by writing it.
+    ///
+    /// Gates the delete sweep, and nothing else. The sweep decides which items are no longer wanted
+    /// by subtraction: anything in the vault the store does not account for. That inference is only
+    /// sound once this instance knows the vault, so without it nothing is deleted — an empty store
+    /// might mean "the user removed everything" or might mean "nothing was ever read", and the two
+    /// are indistinguishable from here.
+    ///
+    /// A save counts because it is not a guess: it has just written the note and every item the
+    /// store calls for. Requiring a *load* specifically would break the first run, where a fresh
+    /// vault has no configuration item to read and every later save would then refuse to tidy up
+    /// after itself.
+    ///
+    /// Reset by <see cref="Forget"/>, so a disconnect or a switch to another vault starts from "I
+    /// know nothing" rather than carrying one vault's baseline into another.
+    /// </summary>
+    private bool _hasCompletedLoad;
+
+    /// <summary>
     /// Set by <see cref="Forget"/>, cleared when the user names a vault again. Without it a probe
     /// after disconnecting would rediscover the vault the user has just left and reattach to it.
     /// </summary>
     private bool _discoveryDisabled;
+
+    /// <summary>
+    /// Set by <see cref="Forget"/>, cleared the moment the user chooses a vault again. While set,
+    /// every write refuses rather than re-resolving a vault to write into.
+    ///
+    /// Reads stay allowed: probing is how the setup page finds out what is available, and a read
+    /// cannot destroy anything.
+    /// </summary>
+    private bool _writesDisabled;
+
+    /// <summary>
+    /// Refuses a write issued while this provider has no vault the user has chosen. Called by every
+    /// mutating entry point, ahead of the vault lookup that would otherwise adopt one.
+    /// </summary>
+    private void RequireWritesAllowed()
+    {
+        if (!_writesDisabled) return;
+
+        throw new VaultSaveException(
+            "RavensPort is not connected to a 1Password vault, so nothing was written. "
+            + "Choose a vault on the setup page first.",
+            partiallyApplied: false);
+    }
 
     public VaultBackendKind Kind => VaultBackendKind.OnePassword;
 
@@ -137,6 +180,11 @@ public sealed class OnePasswordVaultProvider(
             VaultName: _vaultName,
             Vaults: [.. vaults.Select(v => v.Name)],
             ConfiguredVaults: [.. configured.Select(v => v.Name)],
+
+            // Computed even when a vault is already resolved, though it costs an `op item list` per
+            // candidate. Skipping it there looked like free speed and is not: this list is what the
+            // setup page offers for *switching* vaults, so an install already connected to
+            // 'RavensPort' would lose the ability to move to 'RavensPort Work'. Parallel instead.
             AdoptableVaults: await FindAdoptableVaultsAsync(vaults, configured, ct));
 
         // More than one configured vault is separate profiles, and opening one would mean
@@ -185,6 +233,9 @@ public sealed class OnePasswordVaultProvider(
         _loadedRevision = 0;
         _discoveryDisabled = false;
 
+        // The user has named a vault, which is the only thing that re-opens writing.
+        _writesDisabled = false;
+
         // Stamped straight away: the config item is what identifies this vault as RavensPort's on
         // the next launch, and the name the user just chose is not written down anywhere on this PC.
         await SaveAsync(new ConfigStore(), ct);
@@ -228,6 +279,9 @@ public sealed class OnePasswordVaultProvider(
         _vaultId = match.VaultId;
         _loadedRevision = 0;
         _discoveryDisabled = false;
+
+        // The user has named a vault, which is the only thing that re-opens writing.
+        _writesDisabled = false;
         LastLoadWarning = null;
 
         if (outcome == VaultAdoptionOutcome.Empty)
@@ -249,6 +303,19 @@ public sealed class OnePasswordVaultProvider(
         LastLoadRemovals = [];
         LastLoadWarning = null;
 
+        // The baseline the delete sweep relies on belonged to the vault being left. Carrying it
+        // into the next one would let a save decide that vault's items are unwanted.
+        _hasCompletedLoad = false;
+
+        // No writing until the user names a vault again.
+        //
+        // This is the mechanism that lost a user's items. Disconnect clears the vault id, but a save
+        // already queued — or one racing the disconnect — reaches RequireVaultAsync, finds no vault,
+        // probes, silently adopts whatever it discovers, and writes a configuration belonging to
+        // somewhere else into it. Refusing outright means a stale save dies with an error instead of
+        // finding a new home for itself.
+        _writesDisabled = true;
+
         // Until the user names a vault again. Otherwise the next probe finds the vault holding the
         // configuration — the one they just disconnected from — and quietly picks it up again.
         _discoveryDisabled = true;
@@ -258,6 +325,10 @@ public sealed class OnePasswordVaultProvider(
     {
         LastLoadWarning = null;
         LastLoadRemovals = [];
+
+        // Cleared on the way in, set only on the way out. A load that throws half-way must not
+        // leave the delete sweep believing it has a complete picture of the vault.
+        _hasCompletedLoad = false;
 
         await RequireVaultAsync(ct);
 
@@ -306,6 +377,13 @@ public sealed class OnePasswordVaultProvider(
                 .Where(w => !string.IsNullOrEmpty(w)));
         }
 
+        // Only here. The earlier returns above — no config item, or one that could not be parsed —
+        // are answers rather than reads: they produce an empty store, and letting the delete sweep
+        // act on that would wipe every item in the vault on the next save. Reaching this line means
+        // the note was read and every secret it indexes either resolved or was positively reported
+        // gone, which is the only state where "not in the store" reliably means "not wanted".
+        _hasCompletedLoad = true;
+
         return store;
     }
 
@@ -327,6 +405,7 @@ public sealed class OnePasswordVaultProvider(
 
     public async Task DeleteItemAsync(string itemId, CancellationToken ct = default)
     {
+        RequireWritesAllowed();
         await RequireVaultAsync(ct);
 
         var result = await RunAsync(
@@ -341,6 +420,7 @@ public sealed class OnePasswordVaultProvider(
 
     public async Task SaveAsync(ConfigStore store, CancellationToken ct = default)
     {
+        RequireWritesAllowed();
         await RequireVaultAsync(ct);
 
         var items = await ListOwnedSummariesAsync(ct);
@@ -406,7 +486,14 @@ public sealed class OnePasswordVaultProvider(
                 ex);
         }
 
-        await ReconcileDeletionsAsync(items, secretItems, ct);
+await ReconcileDeletionsAsync(items, secretItems, previousIndex, ct);
+
+        // After the sweep, deliberately. Setting it first would let a save authorise its own
+        // deletions, which is no guard at all: the very first save by a provider that has never
+        // read this vault would sweep it on the strength of a baseline that save had just invented.
+        // A save earns the baseline for the *next* one — on a first run, where there was no note to
+        // read, that is what eventually allows tidying up at all.
+        _hasCompletedLoad = true;
     }
 
     // ---- CLI calls ------------------------------------------------------------------------------
@@ -491,13 +578,85 @@ public sealed class OnePasswordVaultProvider(
     private Task<VaultItemContents?> GetItemAsync(string itemId, CancellationToken ct) =>
         GetItemAsync(itemId, _vaultId!, ct);
 
+    /// <summary>
+    /// How many times a read is attempted before it is called inconclusive. `op` reaches the
+    /// desktop app over IPC, and that handshake times out under load often enough to see in a
+    /// single startup — see the retry note on <see cref="GetItemAsync"/>.
+    /// </summary>
+    private const int ReadAttempts = 3;
+
+    /// <summary>
+    /// Whether `op` is saying the item does not exist, as opposed to saying it could not look.
+    ///
+    /// **Matched narrowly, and everything unmatched is treated as unreachable.** That direction is
+    /// deliberate: mistaking "gone" for "unreachable" costs a failed load the user can retry, while
+    /// mistaking "unreachable" for "gone" deletes their credential. A new `op` release wording a
+    /// message differently must therefore fall through to the safe side.
+    /// </summary>
+    private static bool SaysItemDoesNotExist(string stderr) =>
+        stderr.Contains("isn't an item", StringComparison.OrdinalIgnoreCase)
+        || stderr.Contains("no item matching", StringComparison.OrdinalIgnoreCase)
+        || stderr.Contains("item not found", StringComparison.OrdinalIgnoreCase)
+        || stderr.Contains("doesn't exist", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// One item's contents. Null means 1Password positively reported it is not there; anything else
+    /// that goes wrong throws.
+    ///
+    /// **This used to return null for every failure**, on the reasoning that a listing and a fetch
+    /// are separate calls and an item can be deleted between them. That is true, but it made a
+    /// transient failure indistinguishable from a deletion — and the consequences are not
+    /// symmetric. A null here drops the record from the store, which marks the store changed, which
+    /// makes the next save rewrite the note without it and then
+    /// <see cref="ReconcileDeletionsAsync"/> delete the item from the vault. So a desktop-app IPC
+    /// timeout, which shows up in the logs of an ordinary startup, silently destroyed a credential.
+    ///
+    /// Retried before giving up, because the common failure is the desktop app being busy rather
+    /// than absent, and a read is idempotent so there is nothing to be careful about in repeating
+    /// it.
+    /// </summary>
     private async Task<VaultItemContents?> GetItemAsync(string itemId, string vaultId, CancellationToken ct)
     {
-        var result = await RunAsync(["item", "get", itemId, "--vault", vaultId, "--format", "json"], ct: ct);
+        CliResult result = default;
+        Exception? lastFailure = null;
 
-        // A miss is normal: the listing and the fetch are separate calls, and an item can be
-        // deleted between them by the user or another machine.
-        if (!result.Succeeded) return null;
+        for (var attempt = 1; attempt <= ReadAttempts; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            try
+            {
+                result = await RunAsync(["item", "get", itemId, "--vault", vaultId, "--format", "json"], ct: ct);
+                lastFailure = null;
+
+                if (result.Succeeded) break;
+
+                // The one failure that is an answer rather than a fault.
+                if (SaysItemDoesNotExist(result.StdErr)) return null;
+            }
+            catch (VaultCliException ex)
+            {
+                // The runner's own timeout or a process that would not start. Inconclusive, so it
+                // is retried rather than believed.
+                lastFailure = ex;
+            }
+
+            if (attempt < ReadAttempts)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(400 * attempt), ct).ConfigureAwait(false);
+            }
+        }
+
+        if (lastFailure is not null || !result.Succeeded)
+        {
+            var detail = lastFailure?.Message ?? result.FirstErrorLine();
+
+            throw new VaultCliException(
+                $"1Password could not be asked for one of the items holding your secrets ({detail}). "
+                + "Nothing has been changed — RavensPort will not treat an item it could not read as "
+                + "one you deleted.",
+                lastFailure);
+        }
 
         var node = JsonNode.Parse(result.StdOut);
         if (node is null) return null;
@@ -519,15 +678,75 @@ public sealed class OnePasswordVaultProvider(
     }
 
     private async Task ReconcileDeletionsAsync(
-        List<VaultItemSummary> existing, List<VaultSecretItem> live, CancellationToken ct)
+        List<VaultItemSummary> existing,
+        List<VaultSecretItem> live,
+        VaultIndex previousIndex,
+        CancellationToken ct)
     {
+        // The only irreversible thing this app does to a user's vault, so it refuses to act on a
+        // baseline it did not establish itself.
+        //
+        // Deleting means answering "is this item still wanted", and the store in memory is only a
+        // trustworthy answer if it came from a complete read of this vault. Without that read the
+        // store may be empty because nothing was loaded rather than because the user removed
+        // everything — after a disconnect, a failed load, or a save that raced initialisation —
+        // and sweeping then deletes the entire configuration.
+        if (!_hasCompletedLoad)
+        {
+            activityLog.Log(
+                "VAULT skipped deleting unused 1Password items — this session has not completed a full "
+                + "read of the vault, so it cannot tell an item you removed from one it never saw");
+            return;
+        }
+
+        var previousRecordIds = previousIndex.Credentials.Keys
+            .Concat(previousIndex.RouteKeys.Keys)
+            .Concat(previousIndex.FunnelKeys.Keys)
+            .ToHashSet();
+
+        var liveRecordIds = live.Select(i => i.RecordId).ToHashSet();
+
+        if (previousRecordIds.Count > 0 && liveRecordIds.Count > 0 && !liveRecordIds.Overlaps(previousRecordIds))
+        {
+            activityLog.Log(
+                "VAULT skipped deleting unused 1Password items — the incoming configuration carries records "
+                + "that share no identity with this vault's index, so it cannot authorize deletions here");
+            return;
+        }
+
         var keep = live.Select(i => (i.Role, i.RecordId)).ToHashSet();
 
-        foreach (var item in existing)
-        {
-            if (!VaultItemNaming.TryParse(item.Title, out var role, out var id)) continue;
-            if (role == VaultItemRole.Config || keep.Contains((role, id))) continue;
+        // Every item id the note being replaced actually pointed at. This is the whole safety
+        // property: an item is only ever deleted if *this vault's own note* claimed it and the
+        // store no longer does.
+        //
+        // The sweep used to work by subtraction over the entire vault — delete anything titled like
+        // ours that the store does not account for. That is sound only while the store and the
+        // vault describe the same thing, and they can come apart: a save carrying one vault's
+        // configuration reached another vault, and every item the incoming note had never heard of
+        // looked unwanted. Nine of a user's items were deleted that way.
+        //
+        // Restricting deletion to the previous index makes that impossible rather than unlikely.
+        // A note from elsewhere indexes item ids that do not exist here, so nothing matches and
+        // nothing is deleted. A record the user genuinely removed was in the note a moment ago, so
+        // it still is. The cost is that an item created by hand, which no note ever referenced, is
+        // left alone — which is the right way to be wrong.
+        var deletable = previousIndex.Credentials.Values
+            .Concat(previousIndex.RouteKeys.Values)
+            .Concat(previousIndex.FunnelKeys.Values)
+            .ToHashSet(StringComparer.Ordinal);
 
+        var doomed = existing
+            .Where(item => deletable.Contains(item.ItemId))
+            .Where(item => VaultItemNaming.TryParse(item.Title, out var role, out var id)
+                           && role != VaultItemRole.Config
+                           && !keep.Contains((role, id)))
+            .ToList();
+
+        if (!WithinDeletionBudget(doomed.Count, keep.Count)) return;
+
+        foreach (var item in doomed)
+        {
             var result = await RunAsync(
                 ["item", "delete", item.ItemId, "--vault", _vaultId!],
                 timeout: CliRunner.WriteTimeout, ct: ct);
@@ -540,6 +759,29 @@ public sealed class OnePasswordVaultProvider(
                 activityLog.Log($"VAULT could not delete '{item.Title}': {result.FirstErrorLine()}");
             }
         }
+    }
+
+    /// <summary>
+    /// The last line of defence: a routine save is never allowed to be a mass deletion.
+    ///
+    /// Everything above is meant to make an unwanted sweep impossible, and something like it was
+    /// meant to be impossible before. This does not reason about *why* the numbers look wrong — it
+    /// simply refuses to let a background write remove a large number of a user's items at once,
+    /// and says so loudly. Removing several credentials at a stroke is a deliberate act, and the
+    /// Settings tab's integrity tools exist to do it with the user watching.
+    /// </summary>
+    private bool WithinDeletionBudget(int doomed, int kept)
+    {
+        const int alwaysAllowed = 2;
+
+        if (doomed <= alwaysAllowed || doomed <= kept) return true;
+
+        activityLog.Log(
+            $"VAULT REFUSED to delete {doomed} 1Password item(s) during a save that kept only {kept} — "
+            + "a routine save does not remove that much at once. Nothing was deleted. Use the vault "
+            + "integrity check on the Settings tab if these items really should go.");
+
+        return false;
     }
 
     // ---- Templates and parsing ------------------------------------------------------------------
@@ -786,30 +1028,28 @@ public sealed class OnePasswordVaultProvider(
     private async Task<List<string>> FindAdoptableVaultsAsync(
         List<OnePasswordVault> vaults, List<OnePasswordVault> configured, CancellationToken ct)
     {
-        var adoptable = new List<string>();
-
-        foreach (var vault in vaults.Where(v => VaultProfile.Matches(v.Name)))
+        // Concurrently, like FindConfiguredVaultsAsync above. These are independent vaults with
+        // nothing to order between them, and each look is a subprocess launch measured in seconds —
+        // done one after another this was the slowest thing on the setup path.
+        var checks = vaults.Where(v => VaultProfile.Matches(v.Name)).Select(async vault =>
         {
-            if (configured.Any(c => c.VaultId == vault.VaultId))
-            {
-                adoptable.Add(vault.Name);
-                continue;
-            }
+            if (configured.Any(c => c.VaultId == vault.VaultId)) return vault.Name;
 
             try
             {
                 var items = await ListItemsAsync(vault.VaultId, vault.Name, ct);
-                if (VaultAdoption.LooksAdoptable([.. items.Select(i => i.Title)])) adoptable.Add(vault.Name);
+                return VaultAdoption.LooksAdoptable([.. items.Select(i => i.Title)]) ? vault.Name : null;
             }
             catch (Exception ex) when (ex is VaultCliException or JsonException)
             {
                 // A vault this session cannot list cannot be offered either — it would be refused
                 // for the same reason the moment it was picked. The rest still get an answer.
                 activityLog.Log($"VAULT could not look inside the '{vault.Name}' vault: {ex.Message}");
+                return null;
             }
-        }
+        });
 
-        return adoptable;
+        return [.. (await Task.WhenAll(checks)).Where(name => name is not null).Select(name => name!)];
     }
 
     /// <summary>One vault from <c>vault list</c>.</summary>

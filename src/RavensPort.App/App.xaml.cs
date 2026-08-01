@@ -184,6 +184,12 @@ public partial class App : Application
             _webApp.Services.GetRequiredService<McpFunnelViewModel>().Reload();
         };
 
+        // Every tab rebuilt from the emptied store, so a disconnect leaves no row belonging to the
+        // vault just left. VaultStatusViewModel owns the four tab view models, so it is what knows
+        // how to rebuild them.
+        settingsViewModel.UseTabRebuilder(
+            () => _webApp.Services.GetRequiredService<VaultStatusViewModel>().ReloadTabs());
+
         // Disconnecting from the Settings tab puts the whole window back to the setup page: with no
         // password manager there is no configuration, so the tabs would be four empty grids whose
         // every control fails — the same reason the app starts there.
@@ -370,6 +376,8 @@ public partial class App : Application
                 $"STARTUP this vault asks for port {configStoreCache.Current.Settings.ListenPort}, but the proxy is "
                 + $"already listening on {_boundPort} — restart RavensPort to move it");
         }
+
+
 
         mainWindowViewModel.EnterNormalMode();
         _trayIconManager?.SetState(TrayState.Running);

@@ -94,8 +94,10 @@ public sealed partial class VaultStatusViewModel : ObservableObject
 
     public bool IsWaitingForUnlock => State == VaultSyncState.WaitingForUnlock;
 
+    public bool CanSyncNow => false;
+
     /// <summary>Pushes now, for when the user has just unlocked their manager.</summary>
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanSyncNow))]
     private async Task SyncNowAsync()
     {
         await _syncQueue.FlushAsync(TimeSpan.FromSeconds(30));

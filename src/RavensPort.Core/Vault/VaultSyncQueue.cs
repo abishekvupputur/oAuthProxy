@@ -127,6 +127,18 @@ public sealed class VaultSyncQueue : BackgroundService
         // right — the changes are still good, and the first thing a chosen backend does is drain.
         if (_gate.Status.Selected == VaultBackendKind.None) return false;
 
+        // Never write a store into a vault it did not come from. Choosing another password manager,
+        // or another vault in the same one, repoints the gate immediately — and until the reload
+        // that follows has landed, memory still holds the previous vault's configuration. Writing
+        // it here would copy one vault's credentials, routes and keys into another, and then the
+        // delete sweep would prune the destination to match. Staying pending is correct: the reload
+        // replaces this store, and there is nothing worth saving from it.
+        if (_configStoreCache.IsFromAnotherVault)
+        {
+            SetState(VaultSyncState.WaitingForUnlock);
+            return false;
+        }
+
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -196,6 +208,18 @@ public sealed class VaultSyncQueue : BackgroundService
     {
         if (_gate.Status.Selected == VaultBackendKind.None) return false;
 
+        // Never write a store into a vault it did not come from. Choosing another password manager,
+        // or another vault in the same one, repoints the gate immediately — and until the reload
+        // that follows has landed, memory still holds the previous vault's configuration. Writing
+        // it here would copy one vault's credentials, routes and keys into another, and then the
+        // delete sweep would prune the destination to match. Staying pending is correct: the reload
+        // replaces this store, and there is nothing worth saving from it.
+        if (_configStoreCache.IsFromAnotherVault)
+        {
+            SetState(VaultSyncState.WaitingForUnlock);
+            return false;
+        }
+
         using var cts = new CancellationTokenSource(timeout);
 
         try
@@ -264,6 +288,41 @@ public sealed class VaultSyncQueue : BackgroundService
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Waits until no write is in flight, then returns. Nothing new is started.
+    ///
+    /// Called before the gate is repointed — by disconnecting, or by choosing another vault. A save
+    /// takes seconds of subprocess time, and the backend it lands on is resolved as it goes, so a
+    /// write still running while the gate moves can finish against a vault it was never meant for.
+    /// That is not hypothetical: an activity log shows a 1Password item being written three seconds
+    /// *after* Disconnect was pressed, with a Proton Pass vault being connected moments later.
+    ///
+    /// Returns false when the write did not finish inside the timeout, so the caller can decide
+    /// whether to proceed — it should not, but pausing the app forever is worse than saying so.
+    /// </summary>
+    public async Task<bool> WaitForQuietAsync(TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+
+        try
+        {
+            await _writeLock.WaitAsync(cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _activityLog.Log(
+                "VAULT a save was still running when the password manager was about to change — "
+                + "waited and gave up, so the change was not made");
+
+            return false;
+        }
+
+        // Taken and released immediately: the point is to observe that nothing holds it, not to
+        // keep it. Holding it would deadlock the disconnect against the queue's own pump.
+        _writeLock.Release();
+        return true;
     }
 
     /// <summary>
