@@ -69,6 +69,10 @@ public class ProtonPassSignInTests : IDisposable
         Assert.All(keys, key => Assert.Equal(32, Convert.FromBase64String(key).Length));
     }
 
+    // Hello now has its own files: HelloSealedKeyTests for the envelope, HelloCredentialBindingTests
+    // for the link between the gesture and the Credential Manager, HelloKeyStorageTests for the
+    // real Windows pieces.
+
     [Fact]
     public void Wipe_RemovesTheSessionEvenWhenPassCliCannot()
     {

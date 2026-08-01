@@ -666,11 +666,18 @@ public sealed class OnePasswordVaultProvider(
 
         var resolved = new Dictionary<(VaultItemRole, Guid), VaultItemContents>();
 
-        foreach (var ((role, id), itemId) in wanted)
+        var tasks = wanted.Select(async pair =>
         {
-            ct.ThrowIfCancellationRequested();
+            var ((role, id), itemId) = pair;
+            var contents = await GetItemAsync(itemId, ct);
+            return (role, id, contents);
+        });
 
-            if (await GetItemAsync(itemId, ct) is { } contents) resolved[(role, id)] = contents;
+        var results = await Task.WhenAll(tasks);
+
+        foreach (var (role, id, contents) in results)
+        {
+            if (contents is not null) resolved[(role, id)] = contents;
         }
 
         return resolved;
@@ -730,24 +737,40 @@ public sealed class OnePasswordVaultProvider(
     private async Task<List<OnePasswordVault>> FindConfiguredVaultsAsync(
         List<OnePasswordVault> vaults, CancellationToken ct)
     {
-        var configured = new List<OnePasswordVault>();
-
-        foreach (var vault in vaults)
+        var matchingVaults = vaults.Where(v => VaultProfile.Matches(v.Name)).ToList();
+        var matchingChecks = matchingVaults.Select(async vault =>
         {
             try
             {
                 var items = await ListItemsAsync(vault.VaultId, vault.Name, ct);
-                if (items.Any(i => i.Title == VaultItemNaming.ConfigTitle)) configured.Add(vault);
+                return items.Any(i => i.Title == VaultItemNaming.ConfigTitle) ? vault : null;
             }
             catch (Exception ex) when (ex is VaultCliException or JsonException)
             {
-                // A vault this session cannot list is simply not a candidate — one shared with the
-                // account but not readable, say. Probing must still reach an answer for the others.
                 activityLog.Log($"VAULT could not look inside the '{vault.Name}' vault: {ex.Message}");
+                return null;
             }
-        }
+        });
 
-        return configured;
+        var matchingResults = (await Task.WhenAll(matchingChecks)).Where(v => v is not null).Select(v => v!).ToList();
+        if (matchingResults.Count > 0) return matchingResults;
+
+        var remainingVaults = vaults.Except(matchingVaults).ToList();
+        var remainingChecks = remainingVaults.Select(async vault =>
+        {
+            try
+            {
+                var items = await ListItemsAsync(vault.VaultId, vault.Name, ct);
+                return items.Any(i => i.Title == VaultItemNaming.ConfigTitle) ? vault : null;
+            }
+            catch (Exception ex) when (ex is VaultCliException or JsonException)
+            {
+                activityLog.Log($"VAULT could not look inside the '{vault.Name}' vault: {ex.Message}");
+                return null;
+            }
+        });
+
+        return (await Task.WhenAll(remainingChecks)).Where(v => v is not null).Select(v => v!).ToList();
     }
 
     /// <summary>

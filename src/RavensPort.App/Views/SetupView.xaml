@@ -194,39 +194,12 @@
                                                     <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
                                                                Margin="0,0,0,6"><Run
                                                         Style="{StaticResource EmphasisRunStyle}">Unlock with Windows Hello.</Run><Run
-                                                        xml:space="preserve"> Your session key is stored on this PC encrypted so that only a Hello gesture can decrypt it — RavensPort cannot read it without you.</Run></TextBlock>
+                                                        xml:space="preserve"> Your session key is held in Windows Credential Manager, encrypted so that only a Hello gesture on this PC can decrypt it. RavensPort cannot read it without you, and it is never shown to you either.</Run></TextBlock>
                                                     <Button Content="Unlock with Windows Hello" HorizontalAlignment="Left"
                                                             IsEnabled="{Binding DataContext.IsBusy,
                                                                         RelativeSource={RelativeSource AncestorType=UserControl},
                                                                         Converter={StaticResource InverseBoolConverter}}"
                                                             Command="{Binding DataContext.UnlockWithHelloCommand,
-                                                                      RelativeSource={RelativeSource AncestorType=UserControl}}"/>
-                                                </StackPanel>
-
-                                                <!-- Always present, never hidden behind a toggle:
-                                                     it is the way back when Hello is reset, locked
-                                                     out, or signing differently than it used to. -->
-                                                <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
-                                                           Margin="0,0,0,6"
-                                                           Visibility="{Binding DataContext.MustPasteSessionKey,
-                                                                        RelativeSource={RelativeSource AncestorType=UserControl},
-                                                                        Converter={StaticResource BoolToVisibilityConverter}}"><Run
-                                                    Style="{StaticResource EmphasisRunStyle}">Paste your session key.</Run><Run
-                                                    xml:space="preserve"> It is the key you saved the first time you signed in. RavensPort holds it only while it is running, which is why it asks again after a restart.</Run></TextBlock>
-                                                <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
-                                                           Margin="0,0,0,6"
-                                                           Text="Or paste your session key:"
-                                                           Visibility="{Binding DataContext.CanUnlockWithHello,
-                                                                        RelativeSource={RelativeSource AncestorType=UserControl},
-                                                                        Converter={StaticResource BoolToVisibilityConverter}}"/>
-                                                <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
-                                                    <!-- No x:Name: this lives in a DataTemplate, so
-                                                         one would not produce a code-behind field
-                                                         anyway. The handler reads the sender. -->
-                                                    <PasswordBox Width="260" VerticalAlignment="Center"
-                                                                 PasswordChanged="SessionKeyBox_PasswordChanged"/>
-                                                    <Button Content="Unlock" Margin="8,0,0,0"
-                                                            Command="{Binding DataContext.UnlockSessionCommand,
                                                                       RelativeSource={RelativeSource AncestorType=UserControl}}"/>
                                                 </StackPanel>
                                                 <!-- The way out has to be on this page. Sign out is
@@ -263,31 +236,30 @@
                                                 </StackPanel>
                                             </StackPanel>
 
-                                            <!-- First time: nothing to unlock, so the key has to be
-                                                 made before there is anything to sign in with. -->
+                                            <!-- First time: nothing to unlock, sign in through browser. -->
                                             <StackPanel Visibility="{Binding DataContext.IsFirstSignIn,
                                                                      RelativeSource={RelativeSource AncestorType=UserControl},
                                                                      Converter={StaticResource BoolToVisibilityConverter}}">
                                                 <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
                                                            Margin="0,0,0,2"><Run
-                                                    Style="{StaticResource EmphasisRunStyle}">First sign-in — two steps.</Run></TextBlock>
-                                                <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
-                                                           Margin="8,0,0,2"
-                                                           Text="1.  Generate a session key, and save it somewhere you will still have it later."/>
+                                                    Style="{StaticResource EmphasisRunStyle}">First sign-in.</Run></TextBlock>
                                                 <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
                                                            Margin="8,0,0,8"
-                                                           Text="2.  Sign in through your browser. RavensPort will show you the link."/>
+                                                           Text="Sign in through your browser. RavensPort will show you the link."/>
 
-                                                <!-- Said before they generate the key, not after:
-                                                     it changes how much ceremony saving it needs. -->
+                                                <!-- Said before the gesture is asked for, not after:
+                                                     it is what the Hello prompt about to appear is
+                                                     for, and a prompt with no stated reason is one
+                                                     people learn to click through. -->
                                                 <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
                                                            Margin="0,0,0,8"
                                                            Visibility="{Binding DataContext.IsHelloAvailable,
                                                                         RelativeSource={RelativeSource AncestorType=UserControl},
-                                                                        Converter={StaticResource BoolToVisibilityConverter}}"
-                                                           Text="Windows Hello is set up on this PC, so RavensPort will offer to store the key behind it once you have signed in — after that, unlocking is a gesture rather than a paste. Keep your own copy anyway: Hello only covers this PC, and it cannot help you on another one."/>
+                                                                        Converter={StaticResource BoolToVisibilityConverter}}"><Run
+                                                    Style="{StaticResource EmphasisRunStyle}">Windows Hello will ask before the sign-in starts.</Run><Run
+                                                    xml:space="preserve"> RavensPort generates a session key, encrypts it so that only a Hello gesture on this PC can decrypt it, and keeps it in Windows Credential Manager. You never see the key, and after a restart a gesture is all it takes to reopen the session. Cancel that prompt and nothing is created.</Run></TextBlock>
 
-                                                <!-- Says what the key is NOT, first. Every wrong
+                                                <!-- Says what the session key is NOT, first. Every wrong
                                                      guess about it is alarming: that it is a Proton
                                                      password, that Proton receives it, or that
                                                      RavensPort is keeping the user's secrets on
@@ -295,40 +267,26 @@
                                                 <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
                                                            Margin="0,0,0,8"><Run
                                                     Style="{StaticResource EmphasisRunStyle}">RavensPort stores none of your data on this PC.</Run><Run
-                                                    xml:space="preserve"> Every credential, route, funnel and key lives in your Proton Pass vault and nowhere else. The one thing kept here is the Proton Pass sign-in session, and this key is what encrypts it. It is not your Proton password, and Proton never receives it.</Run></TextBlock>
-                                                <Button Content="Generate a key" HorizontalAlignment="Left"
-                                                        Command="{Binding DataContext.GenerateSessionKeyCommand,
-                                                                  RelativeSource={RelativeSource AncestorType=UserControl}}"/>
-                                            </StackPanel>
+                                                    xml:space="preserve"> Every credential, route, funnel and key lives in your Proton Pass vault and nowhere else. The one thing kept here is the Proton Pass sign-in session, and the key that encrypts it never leaves Windows Credential Manager unencrypted. It is not your Proton password, and Proton never receives it.</Run></TextBlock>
 
-                                            <!-- Shown exactly once, and not recoverable afterwards. -->
-                                            <StackPanel Margin="0,0,0,8"
-                                                        Visibility="{Binding DataContext.HasGeneratedKey,
-                                                                     RelativeSource={RelativeSource AncestorType=UserControl},
-                                                                     Converter={StaticResource BoolToVisibilityConverter}}">
+                                                <!-- No Hello, no in-app sign-in. Stated rather than
+                                                     worked around: the key is never displayed, so
+                                                     Hello is the only thing that could bring it
+                                                     back, and a sign-in without it would produce a
+                                                     session that dies unopenable at the next
+                                                     restart with nothing said about it. -->
                                                 <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
-                                                           Margin="0,0,0,4"><Run
-                                                    Style="{StaticResource EmphasisRunStyle}">Save this key now.</Run><Run
-                                                    xml:space="preserve"> Store it in Proton Pass itself, so you can copy it back here after a restart. RavensPort keeps it only while it is running and cannot show it again. Losing it costs you the session, never your data — everything RavensPort stores lives in Proton Pass, and you can simply sign in again.</Run></TextBlock>
-                                                <TextBox Text="{Binding DataContext.GeneratedKey, Mode=OneWay,
-                                                                RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                         IsReadOnly="True" FontFamily="Cascadia Code, Consolas"
-                                                         FontSize="11" Margin="0,0,0,6"/>
-                                                <StackPanel Orientation="Horizontal">
-                                                    <Button Content="Copy" Style="{StaticResource GhostButtonStyle}"
-                                                            Command="{Binding DataContext.CopyToClipboardCommand,
-                                                                      RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                            CommandParameter="{Binding DataContext.GeneratedKey,
-                                                                               RelativeSource={RelativeSource AncestorType=UserControl}}"/>
-                                                    <Button Content="I have saved it" Margin="8,0,0,0"
-                                                            Style="{StaticResource GhostButtonStyle}"
-                                                            Command="{Binding DataContext.DismissGeneratedKeyCommand,
-                                                                      RelativeSource={RelativeSource AncestorType=UserControl}}"/>
-                                                </StackPanel>
+                                                           Margin="0,0,0,8" Foreground="{StaticResource ErrorBrush}"
+                                                           Visibility="{Binding DataContext.NeedsHelloSetup,
+                                                                        RelativeSource={RelativeSource AncestorType=UserControl},
+                                                                        Converter={StaticResource BoolToVisibilityConverter}}"
+                                                           Text="{Binding DataContext.HelloRequiredMessage,
+                                                                  RelativeSource={RelativeSource AncestorType=UserControl},
+                                                                  Mode=OneTime}"/>
                                             </StackPanel>
 
                                             <StackPanel Orientation="Horizontal"
-                                                        Visibility="{Binding DataContext.HasSessionKey,
+                                                        Visibility="{Binding DataContext.CanShowSignInButton,
                                                                      RelativeSource={RelativeSource AncestorType=UserControl},
                                                                      Converter={StaticResource BoolToVisibilityConverter}}">
                                                 <Button Content="Sign in to Proton Pass"

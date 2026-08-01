@@ -77,13 +77,14 @@ public static class VaultLockGuidance
             + "see \"Running unattended\" on the Settings tab.",
 
         VaultBackendKind.ProtonPass =>
-            "RavensPort's Proton Pass session lasts until you sign out, but the key that opens it "
-            + "is held only in memory — so after RavensPort restarts you paste the key again, and "
-            + "the session resumes.\n\n"
-            + "If you no longer have the key, the setup page offers to discard the locked session "
-            + "so you can sign in again. That costs you the session and nothing else: every "
-            + "credential, route and key lives in Proton Pass, not in RavensPort.\n\n"
-            + "There is also a way to keep the vault reachable with no key to paste at all — "
+            "RavensPort's Proton Pass session lasts until you sign out. The key that opens it lives "
+            + "in Windows Credential Manager, encrypted so that only a Windows Hello gesture on this "
+            + "PC can decrypt it — so after RavensPort restarts, a gesture unlocks the session. The "
+            + "key is never displayed to you, and RavensPort cannot read it without you.\n\n"
+            + "If a gesture stops working — Hello reset, or a new PC — the setup page offers to "
+            + "discard the locked session so you can sign in again. That costs you the session and "
+            + "nothing else: every credential, route and key lives in Proton Pass, not in RavensPort.\n\n"
+            + "There is also a way to keep the vault reachable with no gesture at all — "
             + "see \"Running unattended\" on the Settings tab.",
 
         _ => "",
