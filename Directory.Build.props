@@ -15,6 +15,22 @@
       Regenerate intentionally by restoring with the "force-evaluate" switch.
     -->
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+
+    <!--
+      One target framework for every project, because they have to move together: the App
+      references Core, and the test project references Core, so a Windows API version raised in one
+      place has to be raised in all three or the references stop resolving.
+
+      The 10.0.19041.0 part is what makes the WinRT projection available, which is needed for
+      exactly one thing: Windows.Security.Credentials.KeyCredentialManager, the only API on Windows
+      that can hold a secret behind a Hello gesture rather than merely asking for one. See
+      HelloKeyProtector. The cost is a floor of Windows 10 2004 (May 2020); the app is Windows-only
+      and self-contained already, so this narrows the audience less than it looks.
+    -->
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+
+    <!-- Runs on anything from Windows 10 1809 up; only the Hello path needs 2004, and it checks. -->
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
   </PropertyGroup>
 
 </Project>

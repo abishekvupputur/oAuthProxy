@@ -31,10 +31,16 @@ namespace RavensPort.Core.Vault;
 /// happens to be installed — and must not reach for the process-wide environment variable, since
 /// test classes run in parallel and would clobber each other's.
 /// </param>
+/// <param name="session">
+/// RavensPort's own pass-cli session. Optional so the existing tests, which drive the provider
+/// against a fake runner, keep working unchanged: without one this behaves exactly as it did
+/// before, using whatever session the machine's pass-cli defaults to.
+/// </param>
 public sealed class ProtonPassVaultProvider(
     ICliRunner cliRunner,
     ActivityLog activityLog,
-    string? exePathOverride = null) : IConfigVault
+    string? exePathOverride = null,
+    ProtonPassSession? session = null) : IConfigVault
 {
     /// <summary>Section every custom field goes in, so the Proton Pass UI groups them together.</summary>
     private const string SectionName = "RavensPort";
@@ -68,6 +74,23 @@ public sealed class ProtonPassVaultProvider(
     {
         _exePath = exePathOverride ?? VaultProbe.FindProtonPass();
         if (_exePath is null || !File.Exists(_exePath)) return VaultStatus.NotInstalled(Kind);
+
+        // Answered without launching anything. The env key provider refuses an empty
+        // PROTON_PASS_ENCRYPTION_KEY, so running the CLI now would spend a process launch to be
+        // told off in wording that says nothing about the actual problem — which is simply that
+        // nobody has unlocked this session since the app started.
+        if (session is not null && !session.HasKey && PersonalAccessToken is not { Length: > 0 })
+        {
+            return new VaultStatus(
+                Kind,
+                VaultAvailability.NotSignedIn,
+                _exePath,
+                // States the situation only. What to do about it is the setup page's job, and
+                // saying it in both places made the card repeat itself twice over.
+                Detail: session.HasSessionOnDisk
+                    ? "Locked — RavensPort has a session here but not the key that opens it."
+                    : "RavensPort is not signed in to Proton Pass yet.");
+        }
 
         string? version;
         CliResult vaultList;
@@ -914,13 +937,30 @@ public sealed class ProtonPassVaultProvider(
     private Task<CliResult> RunAsync(
         IReadOnlyList<string> args, string? stdin = null, TimeSpan? timeout = null, CancellationToken ct = default)
     {
-        var env = PersonalAccessToken is { Length: > 0 } token
-            ? new Dictionary<string, string> { ["PROTON_PASS_PERSONAL_ACCESS_TOKEN"] = token }
-            : null;
-
         return cliRunner.RunAsync(
             _exePath ?? throw new VaultCliException("The Proton Pass CLI has not been located yet."),
-            args, stdin, env, timeout, ct);
+            args, stdin, BuildEnvironment(), timeout, ct);
+    }
+
+    /// <summary>
+    /// The environment every pass-cli child gets. The single place both credentials are decided,
+    /// so no call site can accidentally run against the wrong session.
+    ///
+    /// A personal access token wins outright rather than being merged: it authenticates on its own
+    /// and needs no session, so handing it a session directory as well would just be two answers to
+    /// one question. This is the unattended path from
+    /// <see cref="VaultLockGuidance.UnattendedTokenSteps"/>, where there is no user to unlock
+    /// anything.
+    /// </summary>
+    private IReadOnlyDictionary<string, string>? BuildEnvironment()
+    {
+        if (PersonalAccessToken is { Length: > 0 } token)
+        {
+            return new Dictionary<string, string> { ["PROTON_PASS_PERSONAL_ACCESS_TOKEN"] = token };
+        }
+
+        var env = session?.BuildEnvironment();
+        return env is { Count: > 0 } ? env : null;
     }
 
     /// <summary>An item as this provider needs it: its id, its title, and its fields flattened.</summary>

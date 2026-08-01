@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using RavensPort.App.Views;
 using RavensPort.Core.Diagnostics;
 using RavensPort.Core.Vault;
 
@@ -17,6 +18,8 @@ namespace RavensPort.App.ViewModels;
 /// </summary>
 public sealed partial class SetupViewModel(
     VaultGateService gate,
+    ProtonPassSession protonSession,
+    ProtonPassAuthenticator protonAuthenticator,
     ActivityLog activityLog) : ObservableObject
 {
     /// <summary>The pre-vault store, kept only so the page can offer to delete it.</summary>
@@ -68,6 +71,14 @@ public sealed partial class SetupViewModel(
 
         try
         {
+            // Asked once and cached: a WinRT capability check that cannot change while the app runs,
+            // on the path that already blocks on two CLI probes.
+            if (!_helloChecked)
+            {
+                _isHelloAvailable = await ProtonPassAuthenticator.IsHelloAvailableAsync();
+                _helloChecked = true;
+            }
+
             var status = await Task.Run(() => gate.EvaluateAsync());
             Apply(status);
 
@@ -270,6 +281,357 @@ public sealed partial class SetupViewModel(
     [RelayCommand]
     private void OpenDownloadPage(ManagerCardViewModel card) => OpenUrl(card.DownloadUrl);
 
+    // ---- Proton Pass: install, unlock, sign in, sign out ------------------------------------
+    //
+    // All of this is Proton Pass only, and the asymmetry is not an oversight. 1Password's CLI has
+    // no browser sign-in to drive — it wants a Secret Key and an account password typed at a
+    // terminal — and its licence does not allow RavensPort to ship it. Offering a "Sign in" button
+    // that could only ever open a text box asking for someone's 1Password master credentials would
+    // be worse than the honest instructions the card already shows.
+
+    /// <summary>The key the user pasted, pushed in from the PasswordBox — see SetupView.xaml.cs.</summary>
+    [ObservableProperty] private string _sessionKeyInput = "";
+
+    /// <summary>
+    /// A freshly generated key, shown once so the user can save it. Held only until they dismiss
+    /// it: this is the single moment it is on screen, and it is not recoverable afterwards.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasGeneratedKey))]
+    private string? _generatedKey;
+
+    public bool HasGeneratedKey => GeneratedKey is { Length: > 0 };
+
+    /// <summary>The URL pass-cli printed. Shown, never launched — see <see cref="SignInProtonAsync"/>.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasSignInUrl))]
+    private string? _signInUrl;
+
+    public bool HasSignInUrl => SignInUrl is { Length: > 0 };
+
+    [ObservableProperty] private bool _isSigningIn;
+
+    /// <summary>Cancels an in-flight sign-in, which kills the pass-cli process tree.</summary>
+    private CancellationTokenSource? _signInCts;
+
+    public bool HasSessionKey => protonSession.HasKey;
+
+    /// <summary>
+    /// Returning: a session is sitting on disk and only needs the key that opens it.
+    ///
+    /// Split from <see cref="IsFirstSignIn"/> because the two need opposite advice and opposite
+    /// buttons. Showing Unlock and Generate side by side asked the user to know which of two
+    /// situations they were in — and picking Generate in this one destroys the session they were
+    /// trying to open.
+    /// </summary>
+    public bool NeedsSessionKey => !protonSession.HasKey && protonSession.HasSessionOnDisk;
+
+    /// <summary>First time here: nothing to unlock, so a key has to be made before signing in.</summary>
+    public bool IsFirstSignIn => !protonSession.HasKey && !protonSession.HasSessionOnDisk;
+
+    /// <summary>
+    /// Whether a Hello gesture can open this session — a key is stored and this PC can still do it.
+    ///
+    /// The availability half is cached rather than awaited per binding: it is an async WinRT call,
+    /// and a property getter that blocks on one is a deadlock waiting for a slow TPM.
+    /// </summary>
+    public bool CanUnlockWithHello => _isHelloAvailable && protonAuthenticator.HasHelloKey;
+
+    /// <summary>True when pasting is the only way in — no Hello, or nothing stored behind it.</summary>
+    public bool MustPasteSessionKey => NeedsSessionKey && !CanUnlockWithHello;
+
+    /// <summary>Whether this PC can do Hello at all, for the first-run explanation.</summary>
+    public bool IsHelloAvailable => _isHelloAvailable;
+
+    private bool _isHelloAvailable;
+    private bool _helloChecked;
+
+    /// <summary>The key-state flags move together and none of them is settable.</summary>
+    private void NotifySessionStateChanged()
+    {
+        OnPropertyChanged(nameof(HasSessionKey));
+        OnPropertyChanged(nameof(NeedsSessionKey));
+        OnPropertyChanged(nameof(IsFirstSignIn));
+        OnPropertyChanged(nameof(CanUnlockWithHello));
+        OnPropertyChanged(nameof(MustPasteSessionKey));
+        OnPropertyChanged(nameof(IsHelloAvailable));
+    }
+
+    /// <summary>Opens the session with a Hello gesture instead of a pasted key.</summary>
+    [RelayCommand]
+    private async Task UnlockWithHelloAsync()
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+
+        try
+        {
+            // Through the consent window even though the button the user just pressed says
+            // "Windows Hello" on it. The rule only protects anyone if it has no exceptions — see
+            // HelloConsentWindow.
+            if (!HelloConsentWindow.RequestUnlock(protonAuthenticator.UnlockWithHelloAsync))
+            {
+                StatusMessage = "Not unlocked. Paste your session key, or try Windows Hello again.";
+                return;
+            }
+
+            NotifySessionStateChanged();
+            Apply(gate.Status);
+
+            if (gate.Status.IsReady) await StartAsync("Loading your configuration from the vault…");
+        }
+        catch (VaultCliException ex)
+        {
+            // Cancelled, locked out, or a blob that no longer opens. Every one of those has a
+            // pasted key as the way through, and the message says so.
+            StatusMessage = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            activityLog.LogError("Windows Hello unlock failed", ex);
+            StatusMessage = ex.Message;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>Downloads pass-cli when the machine has none.</summary>
+    [RelayCommand]
+    private async Task InstallProtonCliAsync()
+    {
+        if (IsBusy) return;
+
+        IsBusy = true;
+
+        try
+        {
+            var progress = new Progress<string>(message => StatusMessage = message);
+            await protonAuthenticator.EnsureInstalledAsync(progress);
+
+            await CheckAsync();
+        }
+        catch (Exception ex)
+        {
+            activityLog.LogError("Could not install the Proton Pass CLI", ex);
+            StatusMessage = ex.Message;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// Makes a new session key and shows it.
+    ///
+    /// Destructive when a session already exists — the old session is encrypted with the old key,
+    /// so replacing it makes that session unopenable. Refused outright in that case rather than
+    /// warned about: the recovery is to sign out and sign in again, which the user can do
+    /// deliberately, and a confirmation dialog here would be one careless click away from the
+    /// same damage.
+    /// </summary>
+    [RelayCommand]
+    private void GenerateSessionKey()
+    {
+        if (NeedsSessionKey)
+        {
+            StatusMessage =
+                "There is already a Proton Pass session here, encrypted with your existing key. "
+                + "Paste that key to unlock it, or choose Sign out to discard the session and start again.";
+            return;
+        }
+
+        GeneratedKey = ProtonPassSession.GenerateKey();
+        protonSession.Unlock(GeneratedKey);
+
+        NotifySessionStateChanged();
+
+        StatusMessage = "Save this key somewhere safe — in Proton Pass itself is a good place. "
+                        + "RavensPort keeps it only while it is running and cannot show it to you again.";
+    }
+
+    /// <summary>Dismisses the generated key from the screen. It stays in memory for this run.</summary>
+    [RelayCommand]
+    private void DismissGeneratedKey() => GeneratedKey = null;
+
+    /// <summary>Set once the user has asked to throw away a session they can no longer open.</summary>
+    [ObservableProperty] private bool _isConfirmingDiscard;
+
+    /// <summary>
+    /// The way out for someone who has lost their session key.
+    ///
+    /// It has to live here, on the setup page. Sign out is on the Settings tab, which is only
+    /// reachable once a vault is open — so pointing a locked-out user at it sent them to the far
+    /// side of the door they could not open.
+    /// </summary>
+    [RelayCommand]
+    private async Task DiscardSessionAsync()
+    {
+        if (!IsConfirmingDiscard)
+        {
+            IsConfirmingDiscard = true;
+            StatusMessage = "Confirm to discard the locked session and start again.";
+            return;
+        }
+
+        IsConfirmingDiscard = false;
+
+        try
+        {
+            await protonAuthenticator.DiscardLocalSessionAsync();
+
+            NotifySessionStateChanged();
+            await CheckAsync();
+
+            StatusMessage = "Session discarded. Generate a new key, then sign in again.";
+        }
+        catch (Exception ex)
+        {
+            activityLog.LogError("Could not discard the Proton Pass session", ex);
+            StatusMessage = ex.Message;
+        }
+    }
+
+    [RelayCommand]
+    private void CancelDiscard()
+    {
+        IsConfirmingDiscard = false;
+        StatusMessage = "Left as it is.";
+    }
+
+    /// <summary>Takes the key the user pasted, so this run can open the session.</summary>
+    [RelayCommand]
+    private async Task UnlockSessionAsync()
+    {
+        if (IsBusy) return;
+
+        try
+        {
+            protonSession.Unlock(SessionKeyInput);
+        }
+        catch (VaultCliException ex)
+        {
+            StatusMessage = ex.Message;
+            return;
+        }
+        finally
+        {
+            // Cleared whether or not it was accepted: the box is on the setup page, which stays
+            // open behind the app for as long as the vault is unreachable.
+            SessionKeyInput = "";
+        }
+
+        NotifySessionStateChanged();
+
+        // A pasted key counts as much as a fresh sign-in. Without this, anyone who already had a
+        // session before Hello existed would keep pasting forever — the offer only ever reaching
+        // people who happened to sign in again.
+        OfferToRememberWithHello();
+
+        await CheckAsync();
+    }
+
+    /// <summary>
+    /// Asks whether to keep the key behind Hello, and does it if the user says yes.
+    ///
+    /// Asked, not assumed. It is the moment RavensPort would begin keeping something on disk that
+    /// was not there before, and doing that on the user's behalf because it happens to be
+    /// convenient is not the app's call. Declining leaves the current arrangement exactly as it is.
+    ///
+    /// Synchronous on the UI thread throughout: the consent window is modal, and the Hello prompt
+    /// it raises needs a foreground window to attach to.
+    /// </summary>
+    private void OfferToRememberWithHello()
+    {
+        if (!_isHelloAvailable || protonAuthenticator.HasHelloKey) return;
+
+        HelloConsentWindow.RequestSave(protonAuthenticator.TryRememberWithHelloAsync);
+
+        NotifySessionStateChanged();
+    }
+
+    /// <summary>
+    /// Runs the browser sign-in and shows the URL.
+    ///
+    /// The URL is deliberately not opened for the user. It carries a live single-use
+    /// authentication handle, and launching it fires it at whichever browser happens to be default
+    /// — quite possibly a profile signed in as someone else. Showing it lets them choose.
+    /// </summary>
+    [RelayCommand]
+    private async Task SignInProtonAsync()
+    {
+        if (IsBusy || IsSigningIn) return;
+
+        IsSigningIn = true;
+        SignInUrl = null;
+
+        _signInCts = new CancellationTokenSource();
+
+        try
+        {
+            var progress = new Progress<string>(message => StatusMessage = message);
+
+            await protonAuthenticator.SignInAsync(
+                url => SignInUrl = url,
+                progress,
+                _signInCts.Token);
+
+            SignInUrl = null;
+
+            // Here, not inside SignInAsync: this is the UI thread, and the Hello prompt needs a
+            // foreground window to attach to. Called from a background thread the credential
+            // service returns "cancelled" without ever showing a prompt.
+            OfferToRememberWithHello();
+
+            var status = gate.Status;
+            Apply(status);
+
+            if (status.IsReady) await StartAsync("Loading your configuration from the vault…");
+        }
+        catch (OperationCanceledException)
+        {
+            SignInUrl = null;
+            StatusMessage = "Sign-in cancelled.";
+        }
+        catch (Exception ex)
+        {
+            SignInUrl = null;
+            activityLog.LogError("Proton Pass sign-in failed", ex);
+            StatusMessage = ex.Message;
+        }
+        finally
+        {
+            _signInCts?.Dispose();
+            _signInCts = null;
+            IsSigningIn = false;
+        }
+    }
+
+    [RelayCommand]
+    private void CancelSignIn() => _signInCts?.Cancel();
+
+    /// <summary>Copies a shown value — the sign-in URL, or a freshly generated key.</summary>
+    [RelayCommand]
+    private void CopyToClipboard(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+
+        try
+        {
+            System.Windows.Clipboard.SetText(text);
+            StatusMessage = "Copied.";
+        }
+        catch (Exception ex)
+        {
+            // The clipboard is genuinely flaky — another process can hold it open — and this is
+            // never worth failing anything over. The text is on screen to select by hand.
+            StatusMessage = $"Could not copy: {ex.Message}";
+        }
+    }
+
     /// <summary>
     /// Deletes the pre-vault store. Offered rather than done automatically: it is an encrypted
     /// file full of the user's secrets, and this version can no longer read it — silently
@@ -313,6 +675,10 @@ public sealed partial class SetupViewModel(
         NeedsAChoice = status.NeedsAChoice;
         IsDisconnected = gate.IsDisconnected;
         HasLegacyStore = File.Exists(LegacyStorePath);
+
+        // Re-read on every evaluation: signing out happens on the Settings tab, which deletes the
+        // session and clears the key without this page hearing about it directly.
+        NotifySessionStateChanged();
 
         StatusMessage = status switch
         {

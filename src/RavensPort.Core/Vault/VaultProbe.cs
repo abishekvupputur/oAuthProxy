@@ -44,6 +44,11 @@ public static partial class VaultProbe
             Path.Combine(Env("LOCALAPPDATA"), "Microsoft", "WinGet", "Links", "pass-cli.exe"),
             Path.Combine(Env("ProgramFiles"), "Proton", "Pass CLI", "pass-cli.exe"),
             Path.Combine(Env("USERPROFILE"), ".cargo", "bin", "pass-cli.exe"),
+
+            // Last: the copy RavensPort downloaded for itself. Deliberately behind every real
+            // install, so a user who manages their own pass-cli keeps control of which one runs
+            // and does not silently get pinned to whatever version this build knows about.
+            ProtonPassInstaller.DefaultExePath,
         ]);
 
     /// <summary>

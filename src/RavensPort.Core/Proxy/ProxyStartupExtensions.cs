@@ -24,8 +24,21 @@ public static class ProxyStartupExtensions
         services.AddSingleton<ICliRunner, CliRunner>();
 
         services.AddSingleton<OnePasswordVaultProvider>();
-        services.AddSingleton<ProtonPassVaultProvider>();
+        services.AddSingleton<ProtonPassSession>();
+        services.AddSingleton<ProtonPassInstaller>();
+        services.AddSingleton<HelloKeyProtector>();
+
+        // Constructed by hand rather than by convention: the provider's exePathOverride parameter
+        // is a test seam that takes a string, and letting the container guess at a string is how
+        // you end up with a connection string as an executable path.
+        services.AddSingleton(sp => new ProtonPassVaultProvider(
+            sp.GetRequiredService<ICliRunner>(),
+            sp.GetRequiredService<ActivityLog>(),
+            exePathOverride: null,
+            sp.GetRequiredService<ProtonPassSession>()));
+
         services.AddSingleton<VaultGateService>();
+        services.AddSingleton<ProtonPassAuthenticator>();
 
         // Not a provider directly: which one is active is not known until the gate has probed both
         // managers, which happens after this container is built. GatedConfigVault forwards to

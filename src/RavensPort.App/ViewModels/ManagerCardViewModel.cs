@@ -19,6 +19,12 @@ public sealed partial class ManagerCardViewModel(VaultStatus status) : Observabl
     public string StateLabel { get; } = status.Availability switch
     {
         VaultAvailability.NotInstalled => "Not installed",
+
+        // "Locked or signed out" hedges because for 1Password it genuinely could be either, and
+        // only the CLI knows which. RavensPort owns its Proton Pass session, so there it does know:
+        // not signed in, or signed in and waiting for the key — and the Detail line says which.
+        VaultAvailability.NotSignedIn when status.Kind == VaultBackendKind.ProtonPass =>
+            "Not signed in",
         VaultAvailability.NotSignedIn => "Locked or signed out",
         VaultAvailability.VaultMissing => $"No '{VaultConstants.VaultName}' vault",
         VaultAvailability.VaultChoiceNeeded => "Choose a vault",
@@ -110,6 +116,20 @@ public sealed partial class ManagerCardViewModel(VaultStatus status) : Observabl
     public bool ShowInstall => Availability == VaultAvailability.NotInstalled;
     public bool ShowSignIn => Availability is VaultAvailability.NotSignedIn or VaultAvailability.Faulted;
     public bool ShowVaultChoice => Availability == VaultAvailability.VaultChoiceNeeded;
+
+    /// <summary>
+    /// Whether RavensPort can install the CLI and drive the sign-in itself, rather than only
+    /// telling the user how.
+    ///
+    /// True for Proton Pass alone. pass-cli signs in through a URL it prints, which the app can
+    /// show; and it is open source, so the app may fetch it. 1Password's CLI has neither property —
+    /// it authenticates with a Secret Key and account password at a terminal, and its licence does
+    /// not permit redistribution — so its card keeps the written instructions.
+    /// </summary>
+    public bool SupportsInAppSignIn => Kind == VaultBackendKind.ProtonPass;
+
+    public bool ShowInAppInstall => ShowInstall && SupportsInAppSignIn;
+    public bool ShowInAppSignIn => ShowSignIn && SupportsInAppSignIn;
 
     /// <summary>
     /// Picking a vault and creating one are offered together, in every state where either is

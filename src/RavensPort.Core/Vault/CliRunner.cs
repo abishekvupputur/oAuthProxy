@@ -30,6 +30,12 @@ public sealed class CliRunner(ActivityLog activityLog) : ICliRunner
     /// </summary>
     public static readonly TimeSpan WriteTimeout = TimeSpan.FromSeconds(45);
 
+    /// <summary>
+    /// A browser sign-in is a human doing something in another window. Anything short of minutes
+    /// here would cancel people mid-login.
+    /// </summary>
+    public static readonly TimeSpan InteractiveTimeout = TimeSpan.FromMinutes(5);
+
     public async Task<CliResult> RunAsync(
         string exePath,
         IReadOnlyList<string> args,
@@ -38,33 +44,7 @@ public sealed class CliRunner(ActivityLog activityLog) : ICliRunner
         TimeSpan? timeout = null,
         CancellationToken ct = default)
     {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = exePath,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-
-            // UTF8Encoding(false) rather than Encoding.UTF8, which emits a byte-order mark. These
-            // CLIs read a JSON template from stdin, and a BOM ahead of the opening brace is not
-            // valid JSON — pass-cli rejects it with "expected value at line 1 column 1", which
-            // reads like a bug in the template rather than three invisible bytes in front of it.
-            StandardInputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-        };
-
-        // ArgumentList, not a joined Arguments string: .NET applies the exact quoting rules the
-        // Windows command-line parser expects. Hand-rolled quoting is where argument-injection
-        // bugs live, and a vault name or route prefix is user-controlled text.
-        foreach (var arg in args) startInfo.ArgumentList.Add(arg);
-
-        if (env is not null)
-        {
-            foreach (var (key, value) in env) startInfo.Environment[key] = value;
-        }
+        var startInfo = BuildStartInfo(exePath, args, env);
 
         var stopwatch = Stopwatch.StartNew();
         var effectiveTimeout = timeout ?? ReadTimeout;
@@ -72,17 +52,7 @@ public sealed class CliRunner(ActivityLog activityLog) : ICliRunner
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(effectiveTimeout);
 
-        using var process = new Process { StartInfo = startInfo };
-
-        try
-        {
-            process.Start();
-        }
-        catch (Exception ex)
-        {
-            activityLog.LogError($"VAULT {Describe(exePath, args)} could not start", ex);
-            throw new VaultCliException($"Could not run '{Path.GetFileName(exePath)}': {ex.Message}", ex);
-        }
+        using var process = Start(startInfo, exePath, args);
 
         // Start draining both pipes before writing stdin. A child that fills its stdout buffer
         // blocks on the write, and if this side is still busy sending stdin neither can move —
@@ -127,6 +97,132 @@ public sealed class CliRunner(ActivityLog activityLog) : ICliRunner
         {
             TryKill(process);
             throw;
+        }
+    }
+
+    public async Task<CliResult> RunStreamingAsync(
+        string exePath,
+        IReadOnlyList<string> args,
+        Action<string> onOutputLine,
+        IReadOnlyDictionary<string, string>? env = null,
+        TimeSpan? timeout = null,
+        CancellationToken ct = default)
+    {
+        var startInfo = BuildStartInfo(exePath, args, env);
+
+        var stopwatch = Stopwatch.StartNew();
+        var effectiveTimeout = timeout ?? InteractiveTimeout;
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(effectiveTimeout);
+
+        using var process = Start(startInfo, exePath, args);
+
+        // Nothing to send, but the child still needs to see EOF rather than a pipe that might
+        // one day produce input.
+        process.StandardInput.Close();
+
+        var gate = new object();
+        var stdout = new StringBuilder();
+        var stderr = new StringBuilder();
+
+        var pumps = Task.WhenAll(
+            PumpAsync(process.StandardOutput, stdout),
+            PumpAsync(process.StandardError, stderr));
+
+        try
+        {
+            await process.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
+
+            // After exit, not before: the pumps end when the pipes close, which is what tells us
+            // every line has actually been delivered to the callback.
+            await pumps.ConfigureAwait(false);
+
+            var result = new CliResult(process.ExitCode, stdout.ToString(), stderr.ToString());
+
+            Log(exePath, args, result, stopwatch.ElapsedMilliseconds);
+            return result;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            TryKill(process);
+
+            activityLog.Log($"VAULT {Describe(exePath, args)} timed out after {effectiveTimeout.TotalSeconds:0}s");
+            throw new VaultCliException(
+                $"'{Path.GetFileName(exePath)}' did not finish within {effectiveTimeout.TotalMinutes:0} minutes.");
+        }
+        catch (OperationCanceledException)
+        {
+            TryKill(process);
+            throw;
+        }
+
+        async Task PumpAsync(StreamReader reader, StringBuilder sink)
+        {
+            while (await reader.ReadLineAsync(timeoutCts.Token).ConfigureAwait(false) is { } line)
+            {
+                sink.AppendLine(line);
+
+                // Serialised so a caller's callback never has to be thread-safe: stdout and stderr
+                // are two independent pumps, and this is the one place they meet.
+                lock (gate) onOutputLine(line);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The one description of how a password-manager CLI is launched, shared by both paths so the
+    /// argument-quoting and no-window rules cannot drift apart between them.
+    /// </summary>
+    private static ProcessStartInfo BuildStartInfo(
+        string exePath, IReadOnlyList<string> args, IReadOnlyDictionary<string, string>? env)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = exePath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+
+            // UTF8Encoding(false) rather than Encoding.UTF8, which emits a byte-order mark. These
+            // CLIs read a JSON template from stdin, and a BOM ahead of the opening brace is not
+            // valid JSON — pass-cli rejects it with "expected value at line 1 column 1", which
+            // reads like a bug in the template rather than three invisible bytes in front of it.
+            StandardInputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+        };
+
+        // ArgumentList, not a joined Arguments string: .NET applies the exact quoting rules the
+        // Windows command-line parser expects. Hand-rolled quoting is where argument-injection
+        // bugs live, and a vault name or route prefix is user-controlled text.
+        foreach (var arg in args) startInfo.ArgumentList.Add(arg);
+
+        if (env is not null)
+        {
+            foreach (var (key, value) in env) startInfo.Environment[key] = value;
+        }
+
+        return startInfo;
+    }
+
+    private Process Start(ProcessStartInfo startInfo, string exePath, IReadOnlyList<string> args)
+    {
+        var process = new Process { StartInfo = startInfo };
+
+        try
+        {
+            process.Start();
+            return process;
+        }
+        catch (Exception ex)
+        {
+            process.Dispose();
+
+            activityLog.LogError($"VAULT {Describe(exePath, args)} could not start", ex);
+            throw new VaultCliException($"Could not run '{Path.GetFileName(exePath)}': {ex.Message}", ex);
         }
     }
 

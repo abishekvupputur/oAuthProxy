@@ -34,9 +34,17 @@
                         <Button Content="Re-initialise from vault" Margin="0,0,8,6" Style="{StaticResource GhostButtonStyle}"
                                 Command="{Binding ReinitialiseCommand}"
                                 Visibility="{Binding IsConfirmingReinitialise, Converter={StaticResource InverseBoolToVisibilityConverter}}"/>
-                        <Button Content="Disconnect" Margin="0,0,0,6" Style="{StaticResource GhostButtonStyle}"
+                        <Button Content="Disconnect" Margin="0,0,8,6" Style="{StaticResource GhostButtonStyle}"
                                 Command="{Binding DisconnectCommand}"
                                 Visibility="{Binding IsConfirmingDisconnect, Converter={StaticResource InverseBoolToVisibilityConverter}}"/>
+
+                        <!-- Proton Pass only: the one backend whose session RavensPort owns, and so
+                             the only one it can end. 1Password's session belongs to the desktop app
+                             or to a service-account token, neither of which is this app's to revoke. -->
+                        <Button Content="Sign out of Proton Pass" Margin="0,0,0,6"
+                                Style="{StaticResource GhostButtonStyle}"
+                                Visibility="{Binding CanSignOutOfProtonPass, Converter={StaticResource BoolToVisibilityConverter}}"
+                                Command="{Binding SignOutOfProtonPassCommand}"/>
                     </WrapPanel>
 
                     <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
@@ -67,6 +75,20 @@
                             <Button Content="Disconnect" Margin="0,0,8,6" Command="{Binding DisconnectCommand}"/>
                             <Button Content="Cancel" Margin="0,0,0,6" Style="{StaticResource GhostButtonStyle}"
                                     Command="{Binding CancelDisconnectCommand}"/>
+                        </WrapPanel>
+                    </StackPanel>
+
+                    <!-- Stronger than Disconnect, so asked separately. Disconnect can be undone by
+                         choosing the manager again; this cannot. -->
+                    <StackPanel Visibility="{Binding IsConfirmingSignOut, Converter={StaticResource BoolToVisibilityConverter}}">
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
+                                   Foreground="{StaticResource ErrorBrush}"
+                                   Text="Signing out ends RavensPort's Proton Pass session with Proton, deletes it from this PC, and forgets your session key. Everything Disconnect does happens too: the proxy serves nothing until you connect again. Nothing in the vault is deleted — but coming back means signing in through your browser and saving a new session key."/>
+                        <WrapPanel>
+                            <Button Content="Sign out of Proton Pass" Margin="0,0,8,6"
+                                    Command="{Binding SignOutOfProtonPassCommand}"/>
+                            <Button Content="Cancel" Margin="0,0,0,6" Style="{StaticResource GhostButtonStyle}"
+                                    Command="{Binding CancelSignOutCommand}"/>
                         </WrapPanel>
                     </StackPanel>
 
