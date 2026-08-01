@@ -3,12 +3,17 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         mc:Ignorable="d"
-        Title="RavensPort" SizeToContent="Height" Width="440"
-        ResizeMode="NoResize" ShowInTaskbar="True" Topmost="True"
+        Title="RavensPort access request" SizeToContent="Height" Width="480"
+        WindowStyle="None" ResizeMode="NoResize" ShowInTaskbar="True" Topmost="True"
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}"
         TextElement.FontFamily="Segoe UI">
+    <shell:WindowChrome.WindowChrome>
+        <shell:WindowChrome CaptionHeight="34" ResizeBorderThickness="0" CornerRadius="0"
+                           GlassFrameThickness="0"/>
+    </shell:WindowChrome.WindowChrome>
     <!--
         Shown before Windows Hello is asked for anything. Every time, without exception — including
         when the user has just pressed a button that says "Windows Hello" on it.
@@ -26,34 +31,102 @@
         window at all, the credential service reports the request cancelled without ever showing
         anything — indistinguishable from the user saying no.
     -->
-    <Border Padding="22">
-        <StackPanel>
-            <TextBlock x:Name="HeadingText" Style="{StaticResource SectionHeaderStyle}"
-                       FontSize="17" Margin="0,0,0,10"/>
+    <Border BorderBrush="{StaticResource BorderBrush0}" BorderThickness="1" Background="{StaticResource BgBrush}">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="34"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
 
-            <TextBlock x:Name="BodyText" Style="{StaticResource HintTextStyle}"
-                       TextWrapping="Wrap" Margin="0,0,0,10"/>
+            <!-- A real caption area, rather than Windows' light title bar, so this safety-critical
+                 dialog keeps the same visual identity as the screen that opened it. -->
+            <Border Grid.Row="0" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderSubtleBrush}"
+                    BorderThickness="0,0,0,1">
+                <Grid>
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="11,0,0,0">
+                        <Image Source="/Assets/ravensport-mark.png" Width="17" Height="17" Margin="0,0,7,0"/>
+                        <TextBlock Text="RavensPort access request" FontSize="12"
+                                   Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <Button Content="×" FontSize="20" FontWeight="Light" Width="42" Height="33"
+                            HorizontalAlignment="Right" VerticalAlignment="Top" Padding="0,0,0,3"
+                            Background="Transparent" BorderThickness="0" Foreground="{StaticResource MutedTextBrush}"
+                            ToolTip="Close" Command="{x:Static SystemCommands.CloseWindowCommand}"
+                            CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=Window}}"
+                            shell:WindowChrome.IsHitTestVisibleInChrome="True"/>
+                </Grid>
+            </Border>
 
-            <Border Background="{StaticResource PanelAltBrush}" Padding="12" CornerRadius="4"
-                    Margin="0,0,0,12">
+            <Border Grid.Row="1" Padding="30,26,30,22">
                 <StackPanel>
+            <TextBlock Text="WINDOWS HELLO ACCESS REQUEST" FontSize="11" FontWeight="SemiBold"
+                       Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center"
+                       Margin="0,0,0,10"/>
+            <TextBlock x:Name="HeadingText" Style="{StaticResource SectionHeaderStyle}"
+                       FontSize="21" HorizontalAlignment="Center" TextAlignment="Center"
+                       Margin="0,0,0,20"/>
+
+            <!-- RavensPort and the local Windows Hello credential are deliberately shown as
+                 distinct parties, like an access-request screen: the gesture authorizes this
+                 app, but neither Proton nor the password manager receives it. -->
+            <Grid HorizontalAlignment="Center" Margin="0,0,0,20">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="78"/>
+                    <ColumnDefinition Width="38"/>
+                    <ColumnDefinition Width="78"/>
+                </Grid.ColumnDefinitions>
+
+                <Border Width="72" Height="72" CornerRadius="14" Background="#111111"
+                        BorderBrush="{StaticResource BorderBrush0}" BorderThickness="1">
+                    <Image Source="/Assets/ravensport-mark.png" Stretch="Uniform" Margin="2"/>
+                </Border>
+
+                <Grid Grid.Column="1" VerticalAlignment="Center">
+                    <Border Width="18" Height="18" Background="{StaticResource SuccessBrush}"
+                            CornerRadius="9" HorizontalAlignment="Center"/>
+                    <Path Data="M 4 9 L 7.5 12.5 L 14 5.5" Stroke="White" StrokeThickness="1.8"
+                          StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                          HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Grid>
+
+                <Border Grid.Column="2" Width="72" Height="72" CornerRadius="14" Background="#111111"
+                        BorderBrush="{StaticResource BorderBrush0}" BorderThickness="1">
+                    <Image Source="/Assets/proton-pass-logo.png" Stretch="Uniform" Margin="6"/>
+                </Border>
+            </Grid>
+
+            <TextBlock x:Name="BodyText" FontSize="15" FontWeight="SemiBold"
+                       Foreground="{StaticResource TextBrush}" TextWrapping="Wrap" TextAlignment="Center"
+                       Margin="8,0,8,18"/>
+
+            <Border Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush0}"
+                    BorderThickness="1" Padding="14" CornerRadius="7" Margin="0,0,0,12">
+                <StackPanel>
+                    <TextBlock Text="WHAT YOU ARE APPROVING" FontSize="10" FontWeight="SemiBold"
+                               Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,6"/>
                     <TextBlock x:Name="DetailText" Style="{StaticResource HintTextStyle}"
-                               TextWrapping="Wrap" Margin="0,0,0,6"/>
-                    <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
-                               Text="If RavensPort did not just ask you for this, choose Not now. Windows Hello should never appear for RavensPort without this window in front of it."/>
+                               TextWrapping="Wrap"/>
                 </StackPanel>
             </Border>
 
+            <Border Background="#272218" BorderBrush="#5A461B" BorderThickness="1" Padding="11,9"
+                    CornerRadius="6" Margin="0,0,0,16">
+                <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
+                           Text="Security check: only continue when you just asked RavensPort to use Windows Hello. Otherwise choose Not now."/>
+            </Border>
+
             <TextBlock x:Name="StatusText" Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
-                       Margin="0,0,0,10" Visibility="Collapsed"/>
+                       TextAlignment="Center" Margin="0,0,0,12" Visibility="Collapsed"/>
 
             <WrapPanel HorizontalAlignment="Right">
-                <Button x:Name="CancelButton" Content="Not now" Margin="0,0,8,0" MinWidth="90"
+                <Button x:Name="CancelButton" Content="Not now" Margin="0,0,8,0" MinWidth="94"
                         Style="{StaticResource GhostButtonStyle}" IsCancel="True"
                         Click="CancelButton_Click"/>
-                <Button x:Name="ConfirmButton" MinWidth="180"
+                <Button x:Name="ConfirmButton" MinWidth="190"
                         IsDefault="True" Click="ConfirmButton_Click"/>
             </WrapPanel>
-        </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
     </Border>
 </Window>
