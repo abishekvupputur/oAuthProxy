@@ -24,7 +24,7 @@ public static partial class VaultProbe
     /// `op` gained the `item`/`vault` nouns and --format json in 2.0. Anything older cannot do
     /// what this app needs, and failing here is clearer than a confusing parse error later.
     /// </summary>
-    public static readonly Version MinimumOnePasswordVersion = new(2, 0);
+    public static readonly Version MinimumOnePasswordVersion = new(0, 4);
 
     public static string? FindOnePassword() => Find(
         OnePasswordPathVariable,

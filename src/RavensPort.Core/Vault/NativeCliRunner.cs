@@ -78,7 +78,7 @@ public sealed class NativeCliRunner : ICliRunner
 
             if (args.Contains("--version"))
             {
-                stdout = "2.99.0";
+                stdout = "0.4.1";
             }
             else if (args.Count >= 2 && args[0] == "vault" && args[1] == "list")
             {
