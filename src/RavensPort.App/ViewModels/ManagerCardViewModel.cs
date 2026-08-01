@@ -130,6 +130,23 @@ public sealed partial class ManagerCardViewModel(VaultStatus status) : Observabl
 
     public bool ShowInAppInstall => ShowInstall && SupportsInAppSignIn;
     public bool ShowInAppSignIn => ShowSignIn && SupportsInAppSignIn;
+    
+    public bool IsOnePassword => Kind == VaultBackendKind.OnePassword;
+    public bool ShowOnePasswordSettings => IsOnePassword && (Availability == VaultAvailability.NotSignedIn || Availability == VaultAvailability.Faulted);
+
+    public string OnePasswordAccountName
+    {
+        get => LocalSettings.Current.OnePasswordAccountName;
+        set
+        {
+            if (LocalSettings.Current.OnePasswordAccountName != value)
+            {
+                LocalSettings.Current.OnePasswordAccountName = value;
+                LocalSettings.Save();
+                OnPropertyChanged(nameof(OnePasswordAccountName));
+            }
+        }
+    }
 
     /// <summary>
     /// Picking a vault and creating one are offered together, in every state where either is

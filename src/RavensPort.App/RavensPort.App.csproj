@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -16,6 +16,13 @@
     <Resource Include="Assets\logo.png" />
     <Resource Include="Assets\proton-pass-logo.png" />
     <Resource Include="..\RavensPort.Core\Assets\logo.png" Link="Assets\ravensport-mark.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\OnePasswordNative\onepassword.dll">
+      <Link>onepassword.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>

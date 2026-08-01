@@ -23,11 +23,22 @@ REM obj/ it intermittently fails to hand the generated *.g.cs files to the main 
 REM producing bogus errors ("CS2001: MainWindow.g.cs could not be found", or "CS5001: no
 REM static Main"). -m:1 (no parallel MSBuild) makes it much rarer but does NOT eliminate it;
 REM the generated files exist by the second pass, so retry once before declaring failure.
-echo Building...
-dotnet build RavensPort.slnx -c Debug -m:1
+echo Building Go DLL...
+pushd "%~dp0src\OnePasswordNative"
+set CGO_ENABLED=1
+go build -buildmode=c-shared -o onepassword.dll main.go
+if errorlevel 1 (
+    echo Go build FAILED.
+    popd
+    exit /b 1
+)
+popd
+
+echo Building Release Single Exe...
+dotnet publish src\RavensPort.App\RavensPort.App.csproj -c Release -r win-x64 -o "%~dp0publish" -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true --self-contained false
 if errorlevel 1 (
     echo First build pass failed - retrying once ^(WPF markup-compile quirk^)...
-    dotnet build RavensPort.slnx -c Debug -m:1
+    dotnet publish src\RavensPort.App\RavensPort.App.csproj -c Release -r win-x64 -o "%~dp0publish" -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true --self-contained false
     if errorlevel 1 (
         echo Build FAILED.
         exit /b 1
@@ -39,7 +50,7 @@ echo Build succeeded.
 echo Starting RavensPort...
 REM TargetFramework includes the Windows SDK version (see Directory.Build.props), so the
 REM framework output directory is net8.0-windows10.0.19041.0 rather than net8.0-windows.
-set "APP_EXE=%~dp0src\RavensPort.App\bin\Debug\net8.0-windows10.0.19041.0\RavensPort.exe"
+set "APP_EXE=%~dp0publish\RavensPort.exe"
 if not exist "%APP_EXE%" (
     echo Build succeeded, but the application executable was not found:
     echo   %APP_EXE%
