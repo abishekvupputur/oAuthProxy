@@ -14,8 +14,11 @@ public sealed class NativeCliRunner : ICliRunner
     private static bool _initialized = false;
     private static readonly object _initLock = new();
 
-    public NativeCliRunner()
+    private readonly IOnePasswordNativeClient _client;
+
+    public NativeCliRunner(IOnePasswordNativeClient? client = null)
     {
+        _client = client ?? new OnePasswordNativeClientWrapper();
     }
 
     public static void ResetInitialization()
@@ -46,7 +49,7 @@ public sealed class NativeCliRunner : ICliRunner
 
             try 
             {
-                OnePasswordNativeClient.Initialize(accountName);
+                _client.Initialize(accountName);
                 _initialized = true;
             }
             catch (Exception ex)
@@ -79,7 +82,7 @@ public sealed class NativeCliRunner : ICliRunner
             }
             else if (args.Count >= 2 && args[0] == "vault" && args[1] == "list")
             {
-                var vaults = OnePasswordNativeClient.ListVaults();
+                var vaults = _client.ListVaults();
                 stdout = vaults?.ToJsonString() ?? "[]";
             }
             else if (args.Count >= 3 && args[0] == "vault" && args[1] == "create")
@@ -89,14 +92,14 @@ public sealed class NativeCliRunner : ICliRunner
                 var descIdx = args.ToList().IndexOf("--description");
                 if (descIdx != -1 && args.Count > descIdx + 1) desc = args[descIdx + 1];
 
-                var vault = OnePasswordNativeClient.CreateVault(name, desc);
+                var vault = _client.CreateVault(name, desc);
                 stdout = vault?.ToJsonString() ?? "{}";
             }
             else if (args.Count >= 2 && args[0] == "item" && args[1] == "list")
             {
                 var vaultIdx = args.ToList().IndexOf("--vault");
                 string vaultId = vaultIdx != -1 ? args[vaultIdx + 1] : "";
-                var items = OnePasswordNativeClient.ListItems(vaultId);
+                var items = _client.ListItems(vaultId);
                 stdout = items?.ToJsonString() ?? "[]";
             }
             else if (args.Count >= 3 && args[0] == "item" && args[1] == "get")
@@ -105,7 +108,7 @@ public sealed class NativeCliRunner : ICliRunner
                 var vaultIdx = args.ToList().IndexOf("--vault");
                 string vaultId = vaultIdx != -1 ? args[vaultIdx + 1] : "";
 
-                var item = OnePasswordNativeClient.GetItem(vaultId, itemId);
+                var item = _client.GetItem(vaultId, itemId);
                 if (item == null)
                 {
                     exitCode = 1;
@@ -121,7 +124,7 @@ public sealed class NativeCliRunner : ICliRunner
                 var vaultIdx = args.ToList().IndexOf("--vault");
                 string vaultId = vaultIdx != -1 ? args[vaultIdx + 1] : "";
 
-                var item = OnePasswordNativeClient.CreateItem(vaultId, stdin ?? "");
+                var item = _client.CreateItem(vaultId, stdin ?? "");
                 stdout = item?.ToJsonString() ?? "{}";
             }
             else if (args.Count >= 3 && args[0] == "item" && args[1] == "edit")
@@ -130,7 +133,7 @@ public sealed class NativeCliRunner : ICliRunner
                 var vaultIdx = args.ToList().IndexOf("--vault");
                 string vaultId = vaultIdx != -1 ? args[vaultIdx + 1] : "";
 
-                var item = OnePasswordNativeClient.EditItem(vaultId, itemId, stdin ?? "");
+                var item = _client.EditItem(vaultId, itemId, stdin ?? "");
                 stdout = item?.ToJsonString() ?? "{}";
             }
             else if (args.Count >= 3 && args[0] == "item" && args[1] == "delete")
@@ -139,7 +142,7 @@ public sealed class NativeCliRunner : ICliRunner
                 var vaultIdx = args.ToList().IndexOf("--vault");
                 string vaultId = vaultIdx != -1 ? args[vaultIdx + 1] : "";
 
-                OnePasswordNativeClient.DeleteItem(vaultId, itemId);
+                _client.DeleteItem(vaultId, itemId);
             }
             else
             {

@@ -154,19 +154,7 @@ func ItemEdit(vaultID *C.char, itemID *C.char, itemJson *C.char) *C.char {
 	}
 	
 	if patch.Fields != nil {
-		for _, pf := range patch.Fields {
-			found := false
-			for i, ef := range existingItem.Fields {
-				if ef.ID == pf.ID || ef.Title == pf.Title {
-					existingItem.Fields[i].Value = pf.Value
-					found = true
-					break
-				}
-			}
-			if !found {
-				existingItem.Fields = append(existingItem.Fields, pf)
-			}
-		}
+		existingItem.Fields = mergeFields(existingItem.Fields, patch.Fields)
 	}
 	
 	updatedItem, err := opClient.Items().Put(ctx, existingItem)
@@ -190,6 +178,23 @@ func ItemDelete(vaultID *C.char, itemID *C.char) *C.char {
 		return C.CString(`{"error": "` + err.Error() + `"}`)
 	}
 	return nil
+}
+
+func mergeFields(existing []onepassword.ItemField, patch []onepassword.ItemField) []onepassword.ItemField {
+	for _, pf := range patch {
+		found := false
+		for i, ef := range existing {
+			if ef.ID == pf.ID || ef.Title == pf.Title {
+				existing[i].Value = pf.Value
+				found = true
+				break
+			}
+		}
+		if !found {
+			existing = append(existing, pf)
+		}
+	}
+	return existing
 }
 
 //export FreeString

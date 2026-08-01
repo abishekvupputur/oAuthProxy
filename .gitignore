@@ -43,3 +43,7 @@ Thumbs.db
 # Editors / tooling
 .vscode/
 .claude/
+
+# Go generated files
+onepassword.dll
+onepassword.h
