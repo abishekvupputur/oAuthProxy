@@ -71,6 +71,8 @@ public sealed partial class SetupViewModel(
     {
         if (IsBusy || IsSigningIn) return;
 
+        NativeCliRunner.ResetInitialization();
+
         IsBusy = true;
         StatusMessage = "Checking…";
 

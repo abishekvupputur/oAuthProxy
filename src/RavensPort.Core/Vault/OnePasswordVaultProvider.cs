@@ -101,7 +101,7 @@ public sealed class OnePasswordVaultProvider(
     public async Task<VaultStatus> ProbeAsync(CancellationToken ct = default)
     {
         _exePath = exePathOverride ?? VaultProbe.FindOnePassword();
-        if (_exePath is null || !File.Exists(_exePath)) return VaultStatus.NotInstalled(Kind);
+        if (_exePath is null || (!File.Exists(_exePath) && _exePath != "native")) return VaultStatus.NotInstalled(Kind);
 
         Version? version;
         try
@@ -578,7 +578,8 @@ await ReconcileDeletionsAsync(items, secretItems, previousIndex, ct);
             // An archived item is one the user has put away. Reading it would make a vault they
             // had cleared look full and a credential they had removed look present — the same
             // trap Proton Pass's trash sets. Only items with no state at all are live.
-            if (ReadString(node, "state") is { Length: > 0 }) continue;
+            var state = ReadString(node, "state");
+            if (state is { Length: > 0 } && !string.Equals(state, "active", StringComparison.OrdinalIgnoreCase)) continue;
 
             if (id is not null && title is not null) items.Add(new VaultItemSummary(id, title));
         }
@@ -682,7 +683,14 @@ await ReconcileDeletionsAsync(items, secretItems, previousIndex, ct);
             // Keyed by id, which is what the template sets, with the label as a fallback for a
             // field 1Password rewrote or a user added by hand in its UI.
             if (ReadString(field, "id") is { Length: > 0 } id) fields[id] = value;
-            if (ReadString(field, "label") is { Length: > 0 } label) fields.TryAdd(label, value);
+            var label = ReadString(field, "title") ?? ReadString(field, "label");
+            if (label is { Length: > 0 }) fields.TryAdd(label, value);
+        }
+
+        // The Go SDK exposes notes as a top-level property rather than a field.
+        if (ReadString(node, "notes") is { Length: > 0 } notes)
+        {
+            fields[VaultFields.NoteContent] = notes;
         }
 
         return new VaultItemContents(itemId, ReadString(node, "title") ?? "", fields);
@@ -821,18 +829,38 @@ await ReconcileDeletionsAsync(items, secretItems, previousIndex, ct);
             }
         }
 
+        var notes = "";
         if (spec.Caption is { Length: > 0 } caption && !present.Contains(VaultFields.NoteContent))
         {
-            fields.Add(BuildField(VaultFields.NoteContent, caption));
+            notes = caption;
         }
 
-        return new JsonObject
+        var json = new JsonObject
         {
             ["title"] = spec.Title,
             ["category"] = CategoryName(spec.Category),
             ["vault"] = new JsonObject { ["id"] = _vaultId },
             ["fields"] = fields,
         };
+
+        if (notes.Length > 0)
+        {
+            json["notes"] = notes;
+        }
+        else
+        {
+            // If the spec explicitly contains NoteContent field, use that
+            var noteField = spec.Fields.FirstOrDefault(f => f.Name == VaultFields.NoteContent);
+            if (noteField.Name != null)
+            {
+                json["notes"] = noteField.Value;
+                // Remove it from fields array since it's mapped to top-level
+                var fieldNode = fields.FirstOrDefault(n => ReadString(n, "id") == VaultFields.NoteContent);
+                if (fieldNode != null) fields.Remove(fieldNode);
+            }
+        }
+
+        return json;
     }
 
     private static JsonObject BuildField(string name, string value)
@@ -840,23 +868,10 @@ await ReconcileDeletionsAsync(items, secretItems, previousIndex, ct);
         var field = new JsonObject
         {
             ["id"] = name,
-            ["label"] = name,
-            ["type"] = VaultFields.IsConcealed(name) ? "CONCEALED" : "STRING",
+            ["title"] = name,
+            ["fieldType"] = VaultFields.IsConcealed(name) ? "Concealed" : "Text",
             ["value"] = value,
         };
-
-        // Purpose is what makes 1Password treat these as the item's real username, password, and
-        // notes rather than three custom fields that happen to be named that way — it is the
-        // difference between an item the user can actually use and an opaque blob.
-        var purpose = name switch
-        {
-            VaultFields.Username => "USERNAME",
-            VaultFields.Password => "PASSWORD",
-            VaultFields.NoteContent => "NOTES",
-            _ => null,
-        };
-
-        if (purpose is not null) field["purpose"] = purpose;
 
         return field;
     }
@@ -871,10 +886,10 @@ await ReconcileDeletionsAsync(items, secretItems, previousIndex, ct);
     /// </summary>
     private static string CategoryName(VaultItemCategory category) => category switch
     {
-        VaultItemCategory.SecureNote => "SECURE_NOTE",
-        VaultItemCategory.Login => "LOGIN",
-        VaultItemCategory.Password => "PASSWORD",
-        _ => "SECURE_NOTE",
+        VaultItemCategory.SecureNote => "SecureNote",
+        VaultItemCategory.Login => "Login",
+        VaultItemCategory.Password => "Password",
+        _ => "SecureNote",
     };
 
     private async Task<VaultIndex> ReadIndexAsync(
@@ -970,7 +985,8 @@ await ReconcileDeletionsAsync(items, secretItems, previousIndex, ct);
 
         foreach (var node in JsonNode.Parse(vaultListJson) as JsonArray ?? [])
         {
-            if (ReadString(node, "name") is { } name && ReadString(node, "id") is { } id)
+            var name = ReadString(node, "title") ?? ReadString(node, "name");
+            if (name is not null && ReadString(node, "id") is { } id)
             {
                 vaults.Add(new OnePasswordVault(name, id));
             }
@@ -1088,7 +1104,7 @@ await ReconcileDeletionsAsync(items, secretItems, previousIndex, ct);
     {
         _exePath ??= exePathOverride ?? VaultProbe.FindOnePassword();
 
-        if (_exePath is null || !File.Exists(_exePath))
+        if (_exePath is null || (!File.Exists(_exePath) && _exePath != "native"))
         {
             throw new VaultCliException("The 1Password CLI is not installed.");
         }

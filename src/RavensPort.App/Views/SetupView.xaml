@@ -166,6 +166,12 @@
                                         </StackPanel>
                                     </StackPanel>
 
+                                    <StackPanel Visibility="{Binding ShowOnePasswordSettings, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <TextBlock Text="Set your 1Password Account Name:" Style="{StaticResource HintTextStyle}" Margin="0,0,0,6"/>
+                                        <TextBlock Text="Enter the exact account name shown at the top of your 1Password desktop app sidebar (e.g. 'Our Family' or 'Personal')." Style="{StaticResource HintTextStyle}" Margin="0,0,0,8"/>
+                                        <TextBox Text="{Binding OnePasswordAccountName, UpdateSourceTrigger=PropertyChanged}" Width="250" HorizontalAlignment="Left" Margin="0,0,0,16"/>
+                                    </StackPanel>
+
                                     <StackPanel Visibility="{Binding ShowSignIn, Converter={StaticResource BoolToVisibilityConverter}}">
                                         <!-- 1Password's written steps. For Proton Pass the steps
                                              are the controls below, so this carries only the note

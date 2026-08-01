@@ -36,6 +36,10 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+
       # --locked-mode fails the build if a resolved package does not match packages.lock.json,
       # so a dependency (or a transitive one) changing content under a version we already
       # shipped is caught here rather than ending up in a release binary.
@@ -50,6 +54,14 @@ jobs:
       # Publishing RavensPort.App triggers WPF's markup-compile step, which intermittently
       # races on a clean obj/ and fails with spurious CS2001/MC1000 errors (see README).
       # clean-build.bat works around this locally with a single retry; do the same here.
+      - name: Build Go DLL
+        shell: pwsh
+        run: |
+          cd src/OnePasswordNative
+          $env:CGO_ENABLED = "1"
+          go build -buildmode=c-shared -o onepassword.dll main.go
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Publish (self-contained win-x64)
         shell: pwsh
         run: |
