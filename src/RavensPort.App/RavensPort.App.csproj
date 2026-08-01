@@ -13,6 +13,9 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Assets\tray.ico" />
+    <Resource Include="Assets\logo.png" />
+    <Resource Include="Assets\proton-pass-logo.png" />
+    <Resource Include="..\RavensPort.Core\Assets\logo.png" Link="Assets\ravensport-mark.png" />
   </ItemGroup>
 
   <ItemGroup>

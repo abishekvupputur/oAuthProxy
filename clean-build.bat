@@ -37,7 +37,15 @@ if errorlevel 1 (
 echo Build succeeded.
 
 echo Starting RavensPort...
-start "" "%~dp0src\RavensPort.App\bin\Debug\net8.0-windows\RavensPort.exe"
+REM TargetFramework includes the Windows SDK version (see Directory.Build.props), so the
+REM framework output directory is net8.0-windows10.0.19041.0 rather than net8.0-windows.
+set "APP_EXE=%~dp0src\RavensPort.App\bin\Debug\net8.0-windows10.0.19041.0\RavensPort.exe"
+if not exist "%APP_EXE%" (
+    echo Build succeeded, but the application executable was not found:
+    echo   %APP_EXE%
+    exit /b 1
+)
+start "" "%APP_EXE%"
 
 echo Done - app running in tray.
 endlocal

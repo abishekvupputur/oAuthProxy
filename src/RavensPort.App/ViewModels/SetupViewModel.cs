@@ -33,6 +33,11 @@ public sealed partial class SetupViewModel(
     [ObservableProperty] private string _statusMessage = "Checking for a password manager…";
     [ObservableProperty] private bool _isBusy;
 
+    /// <summary>Whether a fresh manager check can run without interrupting another setup flow.</summary>
+    public bool CanCheck => !IsBusy && !IsSigningIn;
+
+    partial void OnIsBusyChanged(bool value) => OnPropertyChanged(nameof(CanCheck));
+
     /// <summary>Set when both managers qualify and neither can be shown to hold the configuration.</summary>
     [ObservableProperty] private bool _needsAChoice;
 
@@ -64,7 +69,7 @@ public sealed partial class SetupViewModel(
     [RelayCommand]
     public async Task CheckAsync()
     {
-        if (IsBusy) return;
+        if (IsBusy || IsSigningIn) return;
 
         IsBusy = true;
         StatusMessage = "Checking…";
@@ -310,6 +315,8 @@ public sealed partial class SetupViewModel(
     public bool HasSignInUrl => SignInUrl is { Length: > 0 };
 
     [ObservableProperty] private bool _isSigningIn;
+
+    partial void OnIsSigningInChanged(bool value) => OnPropertyChanged(nameof(CanCheck));
 
     /// <summary>Cancels an in-flight sign-in, which kills the pass-cli process tree.</summary>
     private CancellationTokenSource? _signInCts;

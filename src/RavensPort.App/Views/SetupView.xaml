@@ -498,7 +498,7 @@
         <Border Grid.Row="1" Style="{StaticResource FooterBarStyle}">
             <DockPanel>
                 <Button Content="Check again" DockPanel.Dock="Right" MinWidth="100"
-                        IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBoolConverter}}"
+                        IsEnabled="{Binding CanCheck}"
                         Command="{Binding CheckCommand}"/>
                 <TextBlock Text="{Binding StatusMessage}" Style="{StaticResource FooterTextStyle}"
                            VerticalAlignment="Center"/>
