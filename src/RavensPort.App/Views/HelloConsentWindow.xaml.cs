@@ -32,6 +32,43 @@ public partial class HelloConsentWindow : Window
         BodyText.Text = body;
         DetailText.Text = detail;
         ConfirmButton.Content = confirmText;
+
+        // Re-anchored on every size change, not just once at load. The window is SizeToContent, so
+        // it grows when Report() reveals the status line — anchored only at startup, the bottom
+        // edge would then push down past the taskbar and take the buttons with it.
+        SizeChanged += (_, _) => AnchorAboveTray();
+    }
+
+    /// <summary>
+    /// Puts the window in the bottom-right corner, above the tray.
+    ///
+    /// Centred, it landed exactly on top of the Windows Hello prompt it exists to explain — which
+    /// defeats the point of showing it at all, since the user cannot read what they are approving
+    /// while approving it. Down here both are visible at once, and it sits beside the tray icon
+    /// that represents the app doing the asking.
+    ///
+    /// <see cref="SystemParameters.WorkArea"/> rather than the screen bounds, so this lands above
+    /// the taskbar wherever the user keeps it — including left or top, where a hard-coded corner
+    /// would be wrong. It is in device-independent units already, so it survives display scaling
+    /// without a manual DPI conversion.
+    /// </summary>
+    private void AnchorAboveTray()
+    {
+        const double margin = 12;
+
+        var work = SystemParameters.WorkArea;
+
+        // ActualWidth is 0 until the first layout pass; Width is fixed in XAML, so it is the
+        // reliable one to subtract before then.
+        var width = ActualWidth > 0 ? ActualWidth : Width;
+        var height = ActualHeight > 0 ? ActualHeight : MinHeight;
+
+        Left = work.Right - width - margin;
+
+        // Clamped to the top of the work area: a window taller than the screen would otherwise be
+        // positioned at a negative Top, hiding its heading off the top edge rather than its
+        // buttons off the bottom.
+        Top = Math.Max(work.Top, work.Bottom - height - margin);
     }
 
     /// <summary>

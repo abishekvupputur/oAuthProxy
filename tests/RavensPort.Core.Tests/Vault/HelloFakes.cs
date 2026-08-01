@@ -63,7 +63,7 @@ internal sealed class FakeHelloSigner : IHelloSigner
     /// <summary>Whether the machine can do Hello at all.</summary>
     public bool Available { get; set; } = true;
 
-    /// <summary>Forced on the next <see cref="CreateAsync"/>, then cleared.</summary>
+    /// <summary>Forced on the next <see cref="EnsureAsync"/>, then cleared.</summary>
     public HelloFailure? NextCreateFailure { get; set; }
 
     /// <summary>Forced on every <see cref="SignAsync"/> until cleared. Not one-shot, because the
@@ -73,6 +73,16 @@ internal sealed class FakeHelloSigner : IHelloSigner
     public int CreateCalls { get; private set; }
     public int SignCalls { get; private set; }
     public int DeleteCalls { get; private set; }
+
+    /// <summary>
+    /// How many times Windows would actually have put a prompt on screen.
+    ///
+    /// Creating a credential prompts and signing prompts, but opening an existing one does not —
+    /// so this counts real creations plus every signature, and it is the only number that matches
+    /// what the user experiences. Call counts alone hid a flow that asked for two gestures to
+    /// complete one sign-in.
+    /// </summary>
+    public int GesturePrompts { get; private set; }
 
     /// <summary>Every credential name this has been asked about, for the test that both halves of
     /// the arrangement are filed under one name.</summary>
@@ -88,10 +98,14 @@ internal sealed class FakeHelloSigner : IHelloSigner
 
     public Task<bool> IsAvailableAsync() => Task.FromResult(Available);
 
-    public Task<HelloResult> CreateAsync(string name)
+    public Task<HelloResult> EnsureAsync(string name)
     {
         CreateCalls++;
         NamesSeen.Add(name);
+
+        // Opening an existing credential does not prompt, so reusing one costs no gesture. This
+        // mirrors KeyCredentialManager.OpenAsync and is what makes the prompt count meaningful.
+        if (_credentials.Contains(name)) return Task.FromResult(HelloResult.Ok());
 
         if (NextCreateFailure is { } failure)
         {
@@ -99,8 +113,9 @@ internal sealed class FakeHelloSigner : IHelloSigner
             return Task.FromResult(HelloResult.Failed(failure));
         }
 
+        GesturePrompts++;
         _credentials.Add(name);
-        return Task.FromResult(HelloResult.Ok());
+        return Task.FromResult(HelloResult.CreatedNew());
     }
 
     public Task<HelloResult> SignAsync(string name, byte[] challenge)
@@ -113,6 +128,9 @@ internal sealed class FakeHelloSigner : IHelloSigner
         // Modelled on the real thing: opening a credential that is not there fails before any
         // prompt, and that failure is the one that makes a stored blob permanently unopenable.
         if (!_credentials.Contains(name)) return Task.FromResult(HelloResult.Failed(HelloFailure.NotFound));
+
+        // Signing always prompts. That is the property the whole scheme rests on.
+        GesturePrompts++;
 
         var message = Encoding.UTF8.GetBytes(name).Concat(challenge).ToArray();
         return Task.FromResult(HelloResult.Ok(HMACSHA256.HashData(_deviceKey, message)));

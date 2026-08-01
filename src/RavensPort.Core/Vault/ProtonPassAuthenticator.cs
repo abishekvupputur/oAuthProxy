@@ -227,7 +227,9 @@ public sealed partial class ProtonPassAuthenticator(
     {
         session.Wipe();
 
-        // Safe from any thread: deleting a credential does not prompt.
+        // Safe from any thread: removing the stored key does not prompt. The Hello credential is
+        // left in place on purpose, so the retry this user is likely about to make asks for one
+        // gesture rather than two.
         await helloKeyProtector.ForgetAsync(session.SessionDirectory).ConfigureAwait(false);
 
         session.Clear();
@@ -255,9 +257,10 @@ public sealed partial class ProtonPassAuthenticator(
             }
         }
 
-        // Both halves of the Hello arrangement: the Credential Manager entry and the Hello
-        // credential that keys it. Neither is inside the session directory any more, so neither
-        // would go with Wipe — and a credential left behind outlives every trace of what it was for.
+        // The stored key, which no longer lives inside the session directory and so would not go
+        // with Wipe. The Hello credential itself deliberately stays — it keys nothing once this
+        // returns, and removing it would cost the user an extra gesture on the next sign-in. See
+        // HelloKeyProtector.ForgetAsync.
         await helloKeyProtector.ForgetAsync(session.SessionDirectory).ConfigureAwait(false);
 
         // Unconditional, and in this order: the files are worthless without the key, but leaving
@@ -283,8 +286,8 @@ public sealed partial class ProtonPassAuthenticator(
     /// </summary>
     public async Task DiscardLocalSessionAsync()
     {
-        // The Hello credential goes too. A user who has lost the key has, by definition, no Hello
-        // key that opens anything — leaving it would be a prompt that can only ever fail.
+        // The stored key goes. The Hello credential stays and is reused by the sign-in this user is
+        // about to do — it is not what failed, and recreating it would ask for a second gesture.
         await helloKeyProtector.ForgetAsync(session.SessionDirectory).ConfigureAwait(false);
 
         session.Wipe();
