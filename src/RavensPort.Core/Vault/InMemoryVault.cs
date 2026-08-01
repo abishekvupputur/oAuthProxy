@@ -251,6 +251,7 @@ public sealed class InMemoryVault : IConfigVault
                 item.Spec.Fields.ToDictionary(f => f.Name, f => f.Value));
 
             index.For(item.Role)[item.RecordId] = itemId;
+            index.Fingerprints[item.RecordId] = item.Fingerprint;
         }
 
         if (stopBeforeTheNote) return;

@@ -466,12 +466,14 @@ public sealed class ProtonPassVaultProvider(
             if (!rewriteEverything && current is not null && IsUnchanged(current, item))
             {
                 index.For(item.Role)[item.RecordId] = current.ItemId;
+                index.Fingerprints[item.RecordId] = item.Fingerprint;
                 continue;
             }
 
             try
             {
                 index.For(item.Role)[item.RecordId] = await CreateItemAsync(item.Spec, ct);
+                index.Fingerprints[item.RecordId] = item.Fingerprint;
                 written++;
             }
             catch (Exception ex) when (ex is VaultCliException or VaultSaveException)

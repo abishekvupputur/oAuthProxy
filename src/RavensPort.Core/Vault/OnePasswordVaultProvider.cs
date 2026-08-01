@@ -441,6 +441,16 @@ public sealed class OnePasswordVaultProvider(
             ct.ThrowIfCancellationRequested();
 
             var existingId = ResolveExistingItem(items, item);
+            var isUnchanged = existingId is not null
+                              && previousIndex.Fingerprints.TryGetValue(item.RecordId, out var previousFingerprint)
+                              && previousFingerprint == item.Fingerprint;
+
+            if (isUnchanged)
+            {
+                index.For(item.Role)[item.RecordId] = existingId!;
+                index.Fingerprints[item.RecordId] = item.Fingerprint;
+                continue;
+            }
 
             try
             {
@@ -449,6 +459,7 @@ public sealed class OnePasswordVaultProvider(
                     : await EditItemAsync(existingId, item.Spec, ct);
 
                 index.For(item.Role)[item.RecordId] = itemId;
+                index.Fingerprints[item.RecordId] = item.Fingerprint;
                 written++;
             }
             catch (Exception ex) when (ex is VaultCliException or VaultSaveException)
