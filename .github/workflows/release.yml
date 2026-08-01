@@ -54,6 +54,13 @@ jobs:
       # Publishing RavensPort.App triggers WPF's markup-compile step, which intermittently
       # races on a clean obj/ and fails with spurious CS2001/MC1000 errors (see README).
       # clean-build.bat works around this locally with a single retry; do the same here.
+      - name: Test Go DLL
+        shell: pwsh
+        run: |
+          cd src/OnePasswordNative
+          go test
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Build Go DLL
         shell: pwsh
         run: |

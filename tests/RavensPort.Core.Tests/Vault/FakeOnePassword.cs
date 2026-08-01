@@ -56,8 +56,9 @@ public sealed class FakeOnePassword
         ItemsIn(vaultId)[id] = new JsonObject
         {
             ["title"] = title,
-            ["category"] = "LOGIN",
+            ["category"] = "Login",
             ["fields"] = new JsonArray(),
+            ["notes"] = "",
             ["state"] = state,
         };
 
@@ -176,6 +177,7 @@ public sealed class FakeOnePassword
                 ["id"] = id,
                 ["title"] = item["title"]?.GetValue<string>(),
                 ["fields"] = item["fields"]?.DeepClone(),
+                ["notes"] = item["notes"]?.GetValue<string>(),
             }.ToJsonString())
             : Fail($"\"{id}\" isn't an item.");
 
@@ -187,7 +189,7 @@ public sealed class FakeOnePassword
     /// single item with `"" is not a recognized item category` — the whole 1Password write path
     /// was broken and green.
     /// </summary>
-    private static readonly string[] Categories = ["SECURE_NOTE", "LOGIN", "PASSWORD"];
+    private static readonly string[] Categories = ["SecureNote", "Login", "Password"];
 
     private CliResult CreateItem(FakeCliRunner runner, string vaultId)
     {
@@ -217,6 +219,7 @@ public sealed class FakeOnePassword
         // 1Password merges an edit rather than replacing the item, which is exactly why the
         // provider has to send empty values for fields that should go away.
         existing["title"] = template["title"]?.DeepClone();
+        existing["notes"] = template["notes"]?.DeepClone();
 
         var merged = new Dictionary<string, JsonNode?>(StringComparer.Ordinal);
 
