@@ -50,6 +50,31 @@ public sealed class ConfigStoreCache
 
     public bool IsInitialized => _initialized;
 
+    /// <summary>
+    /// True while the vault is being read into memory — the first load, or a later
+    /// <see cref="ReloadAsync"/>.
+    ///
+    /// Read by the Settings tab, which must not offer its vault-maintenance actions during this
+    /// window. Those actions are driven by an integrity check that compares memory against the
+    /// vault and reports the difference as orphaned items and missing records. Run mid-load, the
+    /// comparison is against a store that is empty or half-replaced, so real items look orphaned
+    /// and real records look missing — and every button next to that list deletes something.
+    /// </summary>
+    public bool IsLoading => Volatile.Read(ref _loading) != 0;
+
+    /// <summary>
+    /// Loaded, and not currently being reloaded. The one condition under which the vault-maintenance
+    /// actions are answering a question about the real state of the vault.
+    /// </summary>
+    public bool IsSettled => _initialized && !IsLoading;
+
+    /// <summary>
+    /// An int rather than a bool so <see cref="Volatile"/> can be used on it. The load runs on a
+    /// thread-pool thread and the flag is read on the dispatcher, so it needs to be published
+    /// rather than merely written.
+    /// </summary>
+    private int _loading;
+
     /// <summary>True when changes have been made that the vault does not have yet.</summary>
     public bool HasPendingChanges => Interlocked.Read(ref _version) > Interlocked.Read(ref _syncedVersion);
 
@@ -63,6 +88,17 @@ public sealed class ConfigStoreCache
     /// need told.
     /// </summary>
     public string? LastLoadNotice { get; private set; }
+
+    /// <summary>
+    /// Publishes the load flag and tells the UI, on the same event the pending state already uses —
+    /// so a tab that is open while the vault is read re-evaluates rather than staying disabled
+    /// until something else happens to poke it.
+    /// </summary>
+    private void SetLoading(bool loading)
+    {
+        Volatile.Write(ref _loading, loading ? 1 : 0);
+        PendingChanged?.Invoke();
+    }
 
     /// <summary>Clears the notice once the user has read it.</summary>
     public void DismissLoadNotice()
@@ -87,8 +123,19 @@ public sealed class ConfigStoreCache
     {
         if (_initialized) return;
 
-        _current = await _vault.LoadAsync(ct);
-        _initialized = true;
+        SetLoading(true);
+
+        try
+        {
+            _current = await _vault.LoadAsync(ct);
+            _initialized = true;
+        }
+        finally
+        {
+            // In a finally so a failed load does not leave the app believing it is still reading
+            // the vault forever, which would disable vault maintenance with no way back.
+            SetLoading(false);
+        }
 
         LastLoadNotice = _vault.LastLoadWarning;
 
@@ -217,16 +264,28 @@ public sealed class ConfigStoreCache
     /// </summary>
     public async Task ReloadAsync(CancellationToken ct = default)
     {
-        var loaded = await _vault.LoadAsync(ct).ConfigureAwait(false);
+        SetLoading(true);
 
-        await _lock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            RestoreInto(_current, Snapshot(loaded));
+            var loaded = await _vault.LoadAsync(ct).ConfigureAwait(false);
+
+            await _lock.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                RestoreInto(_current, Snapshot(loaded));
+            }
+            finally
+            {
+                _lock.Release();
+            }
         }
         finally
         {
-            _lock.Release();
+            // Covers the read *and* the replacement. RestoreInto empties the existing lists before
+            // refilling them, so a integrity check landing between the two would see a store with
+            // nothing in it and call every item in the vault an orphan.
+            SetLoading(false);
         }
 
         // Memory now matches the vault exactly, so anything that was pending has been deliberately
