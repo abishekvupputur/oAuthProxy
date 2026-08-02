@@ -477,7 +477,7 @@ its own encrypted session for that sign-in. Neither contains any of the above. S
 
 | Manager | Client | Install |
 | --- | --- | --- |
-| 1Password | Native SDK (embedded) | `winget install AgileBits.1Password` (Desktop App required) |
+| 1Password | [Native SDK (embedded)](https://github.com/1Password/onepassword-sdk-go) | `winget install AgileBits.1Password` (Desktop App required) |
 | Proton Pass | `pass-cli` | `winget install Proton.PassCLI`, or let RavensPort fetch it — the setup page offers **Download it for me** |
 
 Open RavensPort and it walks you through the rest: install, sign in, and set up a vault. It only
@@ -487,7 +487,7 @@ ever touches items it created, so the vault stays safe to keep other things in.
 
 
 
-**Signing in — 1Password.** In the 1Password desktop app, navigate to **Settings → Developer** and enable the **1Password SDK**. (The older `op` CLI is no longer supported).
+**Signing in — 1Password.** In the 1Password desktop app, navigate to **Settings → Developer** and enable the **[1Password SDK](https://github.com/1Password/onepassword-sdk-go)**. (The older `op` CLI is no longer supported).
 
 [![Enable 1Password SDK](media/onePasswordEnableSDK.png)](media/onePasswordEnableSDK.png)
 
