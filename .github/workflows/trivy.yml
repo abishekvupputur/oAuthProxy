@@ -1,0 +1,30 @@
+name: Trivy Security Scan
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '30 2 * * 0' # Run weekly
+
+jobs:
+  trivy_scan:
+    name: Run Trivy Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner in repo mode
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'vuln,secret,config'
+          format: 'table'
+          # Ignore unpatched/low severity issues, focus on the actionable ones
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          # By default, don't break the build just yet. Change to '1' to enforce.
+          exit-code: '0'
