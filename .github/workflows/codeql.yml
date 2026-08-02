@@ -48,28 +48,28 @@ jobs:
         # If you wish to specify custom queries, you can do so here or in a config file.
         # queries: security-extended,security-and-quality
 
-    # Autobuild attempts to build any compiled languages.
-    - name: Autobuild
-      uses: github/codeql-action/autobuild@v3
+    # We need to manually build because Autobuild triggers clean-build.bat which launches the app and hangs.
+    - name: Build Go DLL (Required for C#)
+      if: matrix.language == 'csharp'
+      shell: pwsh
+      run: |
+        cd src/OnePasswordNative
+        $env:CGO_ENABLED = "1"
+        go build -buildmode=c-shared -o onepassword.dll main.go
 
-    # -------------------------------------------------------------------------
-    # Note: If the Autobuild step above fails, remove it and use the manual 
-    # build steps below tailored for this repository's structure:
-    # -------------------------------------------------------------------------
-    # - name: Build C#
-    #   if: matrix.language == 'csharp'
-    #   run: |
-    #     dotnet restore RavensPort.slnx --locked-mode
-    #     dotnet build RavensPort.slnx -c Release --no-restore
-    #
-    # - name: Build Go
-    #   if: matrix.language == 'go'
-    #   shell: pwsh
-    #   run: |
-    #     cd src/OnePasswordNative
-    #     $env:CGO_ENABLED = "1"
-    #     go build -buildmode=c-shared -o onepassword.dll main.go
-    # -------------------------------------------------------------------------
+    - name: Build C#
+      if: matrix.language == 'csharp'
+      run: |
+        dotnet restore RavensPort.slnx --locked-mode
+        dotnet build RavensPort.slnx -c Release --no-restore
+
+    - name: Build Go
+      if: matrix.language == 'go'
+      shell: pwsh
+      run: |
+        cd src/OnePasswordNative
+        $env:CGO_ENABLED = "1"
+        go build -buildmode=c-shared -o onepassword.dll main.go
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
