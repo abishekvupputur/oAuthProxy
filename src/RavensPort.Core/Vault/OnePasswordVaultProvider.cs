@@ -851,7 +851,7 @@ await ReconcileDeletionsAsync(items, secretItems, previousIndex, ct);
         {
             // If the spec explicitly contains NoteContent field, use that
             var noteField = spec.Fields.FirstOrDefault(f => f.Name == VaultFields.NoteContent);
-            if (noteField.Name != null)
+            if (noteField?.Name != null)
             {
                 json["notes"] = noteField.Value;
                 // Remove it from fields array since it's mapped to top-level

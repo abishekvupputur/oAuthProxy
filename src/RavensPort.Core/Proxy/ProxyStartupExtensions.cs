@@ -24,7 +24,7 @@ public static class ProxyStartupExtensions
         services.AddSingleton<ICliRunner, CliRunner>();
 
         services.AddSingleton(sp => new OnePasswordVaultProvider(
-            new NativeCliRunner(),
+            new NativeCliRunner(sp.GetRequiredService<ActivityLog>()),
             sp.GetRequiredService<ActivityLog>(),
             exePathOverride: "native"));
         services.AddSingleton<ProtonPassSession>();

@@ -15,7 +15,7 @@ namespace RavensPort.App.ViewModels;
 
 public sealed partial class SettingsViewModel : ObservableObject
 {
-    private const int VisibleLogLines = 20;
+    private const int VisibleLogLines = 150;
 
     private readonly ConfigStoreCache _configStoreCache;
     private readonly AutostartService _autostartService;

@@ -12,7 +12,7 @@ public class NativeCliRunnerTests
     public NativeCliRunnerTests()
     {
         _mockClient = new Mock<IOnePasswordNativeClient>();
-        _runner = new NativeCliRunner(_mockClient.Object);
+        _runner = new NativeCliRunner(client: _mockClient.Object);
         Environment.SetEnvironmentVariable("OP_ACCOUNT", "TestAccount");
         NativeCliRunner.ResetInitialization();
     }

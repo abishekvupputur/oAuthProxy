@@ -81,7 +81,12 @@ public partial class App : Application
         // DispatcherUnhandledException above.
         TaskScheduler.UnobservedTaskException += (_, args) =>
         {
-            LogError("Unobserved background error", args.Exception);
+            if (args.Exception is not null && args.Exception.ToString().Contains("The transport was closed."))
+            {
+                args.SetObserved();
+                return;
+            }
+            LogError("Unobserved background error", args.Exception!);
             args.SetObserved();
         };
 

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -14,10 +15,12 @@ public sealed class NativeCliRunner : ICliRunner
     private static bool _initialized = false;
     private static readonly object _initLock = new();
 
+    private readonly ActivityLog? _activityLog;
     private readonly IOnePasswordNativeClient _client;
 
-    public NativeCliRunner(IOnePasswordNativeClient? client = null)
+    public NativeCliRunner(ActivityLog? activityLog = null, IOnePasswordNativeClient? client = null)
     {
+        _activityLog = activityLog;
         _client = client ?? new OnePasswordNativeClientWrapper();
     }
 
@@ -70,6 +73,8 @@ public sealed class NativeCliRunner : ICliRunner
         try
         {
             EnsureInitialized();
+            
+            var stopwatch = Stopwatch.StartNew();
 
             var cmd = string.Join(" ", args);
             string stdout = "";
@@ -150,16 +155,34 @@ public sealed class NativeCliRunner : ICliRunner
                 stderr = "Command not supported by NativeCliRunner: " + cmd;
             }
 
-            return Task.FromResult(new CliResult(exitCode, stdout, stderr));
+            var result = new CliResult(exitCode, stdout, stderr);
+            Log(args, result, stopwatch.ElapsedMilliseconds);
+            return Task.FromResult(result);
         }
         catch (VaultCliException ex)
         {
-            return Task.FromResult(new CliResult(1, "", ex.Message));
+            var result = new CliResult(1, "", ex.Message);
+            Log(args, result, 0);
+            return Task.FromResult(result);
         }
         catch (Exception ex)
         {
-            return Task.FromResult(new CliResult(1, "", ex.ToString()));
+            var result = new CliResult(1, "", ex.ToString());
+            Log(args, result, 0);
+            return Task.FromResult(result);
         }
+    }
+
+    private void Log(IReadOnlyList<string> args, CliResult result, long elapsedMs)
+    {
+        var message = $"VAULT op {string.Join(' ', args).TrimEnd()} -> exit {result.ExitCode} in {elapsedMs}ms";
+
+        if (!result.Succeeded && result.FirstErrorLine() is { Length: > 0 } error)
+        {
+            message += $" ({error})";
+        }
+
+        _activityLog?.Log(message);
     }
 
     public Task<CliResult> RunStreamingAsync(

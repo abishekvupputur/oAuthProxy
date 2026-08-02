@@ -109,7 +109,7 @@ public class DeferredSyncTests : IDisposable
 
         var queue = NewQueue(cache, vault);
 
-        vault.BeforeSave = () => cache.MutateAsync(store => store.Settings.ListenPort = 7777).Wait();
+        vault.BeforeSave = () => cache.MutateAsync(store => store.Settings.ListenPort = 7777);
 
         await cache.MutateAsync(store => store.Settings.McpFunnelEnabled = true);
         await queue.TrySyncAsync();
@@ -336,7 +336,7 @@ public class DeferredSyncTests : IDisposable
         public int SaveCount { get; private set; }
 
         /// <summary>Runs inside SaveAsync, to land an edit while a write is in flight.</summary>
-        public Action? BeforeSave { get; set; }
+        public Func<Task>? BeforeSave { get; set; }
 
         public VaultBackendKind Kind => VaultBackendKind.ProtonPass;
 
@@ -370,14 +370,17 @@ public class DeferredSyncTests : IDisposable
         public Task<ConfigStore> LoadAsync(CancellationToken ct = default) =>
             IsLocked ? throw new VaultLockedException(Kind) : _inner.LoadAsync(ct);
 
-        public Task SaveAsync(ConfigStore store, CancellationToken ct = default)
+        public async Task SaveAsync(ConfigStore store, CancellationToken ct = default)
         {
             if (IsLocked) throw new VaultLockedException(Kind);
 
-            BeforeSave?.Invoke();
+            if (BeforeSave != null)
+            {
+                await BeforeSave();
+            }
             SaveCount++;
 
-            return _inner.SaveAsync(store, ct);
+            await _inner.SaveAsync(store, ct);
         }
     }
 }
