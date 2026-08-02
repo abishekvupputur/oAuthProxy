@@ -10,7 +10,7 @@ using RavensPort.App.Tray;
 using RavensPort.App.ViewModels;
 using RavensPort.App.Views;
 using RavensPort.Core.Mcp;
-using RavensPort.Core.Platform;
+
 using RavensPort.Core.Proxy;
 using RavensPort.Core.Storage;
 using RavensPort.Core.Vault;
@@ -124,8 +124,6 @@ public partial class App : Application
 
         builder.Services.AddRavensPort();
 
-        builder.Services.AddSingleton<AutostartService>();
-
         builder.Services.AddSingleton<MainWindowViewModel>();
         builder.Services.AddSingleton<VaultStatusViewModel>();
         builder.Services.AddSingleton<SetupViewModel>();
@@ -150,7 +148,6 @@ public partial class App : Application
         _trayIconManager = _webApp.Services.GetRequiredService<TrayIconManager>();
         _trayIconManager.Initialize(
             mainWindow,
-            onAutostartChanged: () => Dispatcher.Invoke(settingsViewModel.Reload),
             confirmExit: ConfirmExitWithUnsavedChanges);
         _trayIconManager.SetState(TrayState.Starting);
         mainWindow.HiddenWhileGated += () => _trayIconManager.NotifyIdleWhileGated();

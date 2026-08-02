@@ -238,9 +238,6 @@
                 </StackPanel>
             </Border>
 
-            <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14">
-                <CheckBox Content="Start with Windows" IsChecked="{Binding StartWithWindows}"/>
-            </Border>
 
             <Border Style="{StaticResource SectionCardStyle}">
                 <StackPanel>

@@ -3,7 +3,6 @@ namespace RavensPort.Core.Models;
 public sealed class AppSettings
 {
     public int ListenPort { get; set; } = 5559;
-    public bool StartWithWindows { get; set; }
 
     /// <summary>
     /// Master switch for the MCP funnel endpoints under /mcp. Off by default: the funnel lets a

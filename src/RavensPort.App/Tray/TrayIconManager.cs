@@ -2,7 +2,7 @@ using System.Drawing;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Forms;
-using RavensPort.Core.Platform;
+
 using Application = System.Windows.Application;
 
 namespace RavensPort.App.Tray;
@@ -25,18 +25,13 @@ public enum TrayState
 /// WPF-specific tray libraries (Hardcodet.NotifyIcon.Wpf, H.NotifyIcon.Wpf) have proven
 /// flaky across .NET versions; System.Windows.Forms.NotifyIcon is the reliable baseline.
 /// </summary>
-public sealed class TrayIconManager(AutostartService autostartService) : IDisposable
+public sealed class TrayIconManager() : IDisposable
 {
     private NotifyIcon? _notifyIcon;
     private MainWindow? _mainWindow;
-    private Action? _onAutostartChanged;
     private ToolStripItem? _openItem;
     private TrayState _state = TrayState.Starting;
 
-    /// <param name="onAutostartChanged">
-    /// Invoked after the tray menu changes the autostart setting, so the Settings tab can
-    /// re-read it rather than keep showing a stale checkbox.
-    /// </param>
     /// <param name="confirmExit">
     /// Asked before shutting down, and may refuse. Exit is the moment an unsaved change stops
     /// existing, so it is the one thing here that needs a way to say no — and it has to happen
@@ -44,11 +39,9 @@ public sealed class TrayIconManager(AutostartService autostartService) : IDispos
     /// </param>
     public void Initialize(
         MainWindow mainWindow,
-        Action? onAutostartChanged = null,
         Func<bool>? confirmExit = null)
     {
         _mainWindow = mainWindow;
-        _onAutostartChanged = onAutostartChanged;
 
         var contextMenu = new ContextMenuStrip
         {
@@ -57,23 +50,6 @@ public sealed class TrayIconManager(AutostartService autostartService) : IDispos
             ForeColor = Color.FromArgb(0xEB, 0xEB, 0xEB),
         };
         _openItem = contextMenu.Items.Add("Open Settings", null, (_, _) => ShowMainWindow());
-
-        var startupItem = new ToolStripMenuItem("Start with Windows") { CheckOnClick = true, Checked = autostartService.IsEnabled() };
-        startupItem.Click += (_, _) =>
-        {
-            if (startupItem.Checked) autostartService.Enable();
-            else autostartService.Disable();
-
-            // This used to write the registry only, so the Settings tab's checkbox — read once
-            // at construction — kept showing the opposite until the app restarted. Notifying
-            // the view model keeps the two views of one setting in agreement.
-            _onAutostartChanged?.Invoke();
-        };
-
-        // Re-read on open, so a change made in the Settings tab is reflected here too.
-        contextMenu.Opening += (_, _) => startupItem.Checked = autostartService.IsEnabled();
-
-        contextMenu.Items.Add(startupItem);
 
         contextMenu.Items.Add(new ToolStripSeparator());
         contextMenu.Items.Add("Exit", null, (_, _) =>

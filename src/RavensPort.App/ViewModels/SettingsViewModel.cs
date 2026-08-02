@@ -5,7 +5,7 @@ using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using RavensPort.Core.Diagnostics;
-using RavensPort.Core.Platform;
+
 using RavensPort.Core.Proxy;
 using RavensPort.Core.Storage;
 using RavensPort.Core.Vault;
@@ -18,7 +18,6 @@ public sealed partial class SettingsViewModel : ObservableObject
     private const int VisibleLogLines = 150;
 
     private readonly ConfigStoreCache _configStoreCache;
-    private readonly AutostartService _autostartService;
     private readonly ActivityLog _activityLog;
     private readonly VaultGateService _gate;
     private readonly VaultSyncQueue _syncQueue;
@@ -29,7 +28,6 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly DispatcherTimer _logTimer;
 
     [ObservableProperty] private int _listenPort;
-    [ObservableProperty] private bool _startWithWindows;
     [ObservableProperty] private string _recentActivity = "";
     [ObservableProperty] private string _statusMessage = "Ready.";
 
@@ -111,7 +109,6 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     public SettingsViewModel(
         ConfigStoreCache configStoreCache,
-        AutostartService autostartService,
         ActivityLog activityLog,
         VaultGateService gate,
         VaultSyncQueue syncQueue,
@@ -122,7 +119,6 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         _protonAuthenticator = protonAuthenticator;
         _configStoreCache = configStoreCache;
-        _autostartService = autostartService;
         _activityLog = activityLog;
         _gate = gate;
         _syncQueue = syncQueue;
@@ -133,10 +129,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         var settings = _configStoreCache.Current.Settings;
         _listenPort = settings.ListenPort;
 
-        // The registry is the single source of truth for autostart — it is what Windows
-        // actually reads. The persisted Settings.StartWithWindows is kept only so the value
-        // survives in the config export; it is never the thing consulted.
-        _startWithWindows = _autostartService.IsEnabled();
+
 
         RefreshActivity();
         RefreshVaultStatus();
@@ -215,7 +208,6 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         var settings = _configStoreCache.Current.Settings;
         ListenPort = settings.ListenPort;
-        StartWithWindows = _autostartService.IsEnabled();
 
         // Routes and funnels can have been added on another tab since this one was last shown.
         OnPropertyChanged(nameof(KeyLocationSummary));
@@ -766,35 +758,6 @@ public sealed partial class SettingsViewModel : ObservableObject
             : string.Join(Environment.NewLine, lines);
     }
 
-    partial void OnStartWithWindowsChanged(bool value)
-    {
-        // Reload() also assigns this property; skip the write when the registry already agrees,
-        // so refreshing the tab doesn't rewrite the Run key.
-        if (_autostartService.IsEnabled() == value)
-        {
-            _configStoreCache.Current.Settings.StartWithWindows = value;
-            return;
-        }
-
-        if (value) _autostartService.Enable();
-        else _autostartService.Disable();
-
-        _ = PersistAutostartAsync(value);
-    }
-
-    private async Task PersistAutostartAsync(bool value)
-    {
-        try
-        {
-            await _configStoreCache.MutateAsync(store => store.Settings.StartWithWindows = value);
-        }
-        catch (Exception ex)
-        {
-            // The registry write already succeeded, so autostart works either way; only the
-            // recorded copy of the setting failed. Say so rather than dropping it silently.
-            StatusMessage = $"Autostart changed, but saving the setting failed: {ex.Message}";
-        }
-    }
 
     [RelayCommand]
     private async Task SavePortAsync()

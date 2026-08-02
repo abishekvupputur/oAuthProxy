@@ -383,7 +383,6 @@ public sealed class ConfigStoreCache
         List<McpSourceRecord> McpSources,
         List<McpFunnelRecord> McpFunnels,
         int ListenPort,
-        bool StartWithWindows,
         bool McpFunnelEnabled);
 
     private static StoreSnapshot Snapshot(ConfigStore store) => new(
@@ -393,7 +392,6 @@ public sealed class ConfigStoreCache
         [.. store.McpSources],
         [.. store.McpFunnels],
         store.Settings.ListenPort,
-        store.Settings.StartWithWindows,
         store.Settings.McpFunnelEnabled);
 
     private static void RestoreInto(ConfigStore store, StoreSnapshot snapshot)
@@ -405,7 +403,6 @@ public sealed class ConfigStoreCache
         ReplaceAll(store.McpFunnels, snapshot.McpFunnels);
 
         store.Settings.ListenPort = snapshot.ListenPort;
-        store.Settings.StartWithWindows = snapshot.StartWithWindows;
         store.Settings.McpFunnelEnabled = snapshot.McpFunnelEnabled;
     }
 

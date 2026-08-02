@@ -217,7 +217,7 @@ public class VaultRoundTripTests
 
         var store = new ConfigStore
         {
-            Settings = { ListenPort = 5610, StartWithWindows = true, McpFunnelEnabled = true },
+            Settings = { ListenPort = 5610, McpFunnelEnabled = true },
         };
 
         store.Credentials.AddRange([oauth, apiKey]);
@@ -232,7 +232,7 @@ public class VaultRoundTripTests
     private static void AssertSameStore(ConfigStore expected, ConfigStore actual)
     {
         Assert.Equal(expected.Settings.ListenPort, actual.Settings.ListenPort);
-        Assert.Equal(expected.Settings.StartWithWindows, actual.Settings.StartWithWindows);
+
         Assert.Equal(expected.Settings.McpFunnelEnabled, actual.Settings.McpFunnelEnabled);
 
         Assert.Equal(expected.Credentials.Count, actual.Credentials.Count);
