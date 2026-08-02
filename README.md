@@ -165,6 +165,8 @@ Both kinds attach to routes identically, and both share two fields:
 Every Google authorization forces the consent screen (`prompt=consent`) so a refresh token is
 issued every time — otherwise the credential silently cannot auto-refresh later.
 
+[![OAuth Login Success](media/oAuthLoginSuccess.png)](media/oAuthLoginSuccess.png)
+
 ### Nextcloud or custom OAuth2
 
 1. Create an OAuth2 client under **Nextcloud Settings → Security → OAuth2**, or your provider's
@@ -481,37 +483,18 @@ its own encrypted session for that sign-in. Neither contains any of the above. S
 Open RavensPort and it walks you through the rest: install, sign in, and set up a vault. It only
 ever touches items it created, so the vault stays safe to keep other things in.
 
-**Naming the vault.** `RavensPort` is only the name RavensPort looks for first — the setup page
-lets you create a vault with any name you like, and one vault per profile is what keeps their
-credentials, routes and funnels apart. A vault created this way is stamped with the `RavensPort
-Config` item straight away: that item is how the vault is recognised next launch, since the name you
-chose is deliberately not stored on this PC.
+[![Setup Page](media/setupPage.png)](media/setupPage.png)
 
-**Using a vault you already have.** Pick it from the list on the setup page instead. Only two kinds
-are accepted: an **empty** vault, or one **RavensPort has already written to**. Anything else has
-your own entries in it, and this app's housekeeping deletes items it no longer needs, so it will not
-take that vault over. Both controls stay available once a vault is connected — that is how you
-switch profiles.
 
-**Signing in — Proton Pass.** Done in the app, on the setup page. RavensPort will fetch `pass-cli`
-for you if you do not have it, generate a session key, and show you a link to open in your browser
-to finish signing in. There is a **Sign out** to match.
 
-That session is RavensPort's own — its own session directory, encrypted with a key held only in
-memory. Two consequences worth knowing: signing in with `pass-cli` in a *terminal* does not sign in
-RavensPort, and `pass-cli logout` in a terminal will not interrupt the proxy. After RavensPort
-restarts you paste the session key again to resume. Save that key in Proton Pass itself when it is
-generated — it is shown once. Losing it costs the session only; everything RavensPort stores is in
-Proton Pass and survives.
+**Signing in — 1Password.** In the 1Password desktop app, navigate to **Settings → Developer** and enable the **1Password SDK**. (The older `op` CLI is no longer supported).
 
-**Signing in — 1Password.** Turn on **Settings → Developer → Integrate with 1Password CLI** in the
-desktop app. Alternatively, use a Service Account token (see below).
+[![Enable 1Password SDK](media/onePasswordEnableSDK.png)](media/onePasswordEnableSDK.png)
 
-**Either manager** can instead use a token — `OP_SERVICE_ACCOUNT_TOKEN` or
-`PROTON_PASS_PERSONAL_ACCESS_TOKEN` — which is the better option for a machine that should never
-show an unlock prompt or ask for a session key. A 1Password service account must be granted access
-to `RavensPort` explicitly; it cannot use your Private vault, and without the grant it sees no
-vaults at all.
+When RavensPort first tries to access your vault, 1Password will show a consent screen:
+
+[![1Password Consent](media/onePasswordConsentScreen.png)](media/onePasswordConsentScreen.png)
+
 
 **If both are installed** and neither vault clearly holds the configuration, RavensPort asks which
 to use — **every launch**. The choice is the one thing that cannot live in the vault, and this app
