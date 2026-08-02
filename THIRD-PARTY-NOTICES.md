@@ -40,6 +40,7 @@ tools](#optional-external-tools-not-bundled) below.
 | Microsoft.Win32.SystemEvents | MIT |
 | System.CodeDom | MIT |
 | System.Management | MIT |
+| 1Password SDK (onepassword-sdk-go) | 0.4.1 | MIT |
 
 ## Build/test-only dependencies (not shipped in the executable)
 
@@ -51,14 +52,13 @@ tools](#optional-external-tools-not-bundled) below.
 
 ## Optional external tools (not bundled)
 
-RavensPort stores its configuration in a password manager and reaches it by running that
-manager's command-line tool as a separate child process. Those tools are **not** part of
-`RavensPort.exe` and are **not** redistributed with it.
+RavensPort stores its configuration in a password manager. For Proton Pass, it reaches it by running the
+`pass-cli` command-line tool as a separate child process. This tool is **not** part of
+`RavensPort.exe` and is **not** redistributed with it.
 
 | Component | License | How it is obtained |
 |---|---|---|
 | Proton Pass CLI (`pass-cli`) | **GPL-3.0-or-later** | Installed by you, or downloaded from Proton's official release on your explicit request |
-| 1Password CLI (`op`) | Proprietary (1Password) | Installed by you only. RavensPort never downloads or ships it — 1Password's API and SDK Terms of Service do not permit redistribution |
 
 ### Proton Pass CLI and the GPL
 
