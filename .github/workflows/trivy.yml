@@ -25,8 +25,8 @@ jobs:
           scan-ref: '.'
           scanners: 'vuln,secret,config'
           format: 'table'
-          # Display all severities to confirm it is scanning correctly
-          severity: 'UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL'
-          ignore-unfixed: false
-          # By default, don't break the build just yet. Change to '1' to enforce.
-          exit-code: '0'
+          # Focus on actionable, severe vulnerabilities
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          # Fail the build if severe vulnerabilities are found
+          exit-code: '1'
