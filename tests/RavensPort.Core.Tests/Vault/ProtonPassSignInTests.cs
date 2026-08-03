@@ -1,4 +1,6 @@
 using System.IO.Compression;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using RavensPort.Core.Diagnostics;
 using RavensPort.Core.Vault;
 
@@ -50,6 +52,32 @@ public class ProtonPassSignInTests : IDisposable
         // data it encrypts.
         Assert.Equal("env", env["PROTON_PASS_KEY_PROVIDER"]);
         Assert.Equal(Key, env["PROTON_PASS_ENCRYPTION_KEY"]);
+    }
+
+    [Fact]
+    public void BuildEnvironment_TightensASessionDirectoryItDidNotCreate()
+    {
+        // The owner-only ACL is applied when the app creates the directory, which means it was
+        // never applied to one that was already there — planted ahead of first run, left by a build
+        // that predates the ACL, or widened by hand since. The encrypted session lives here, so
+        // what matters is what the ACL says now.
+        var everyone = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+
+        Directory.CreateDirectory(SessionDir);
+
+        var planted = new DirectoryInfo(SessionDir);
+        var opened = planted.GetAccessControl();
+        opened.AddAccessRule(new FileSystemAccessRule(everyone, FileSystemRights.FullControl, AccessControlType.Allow));
+        planted.SetAccessControl(opened);
+
+        NewSession().BuildEnvironment();
+
+        var after = new DirectoryInfo(SessionDir).GetAccessControl();
+
+        Assert.True(after.AreAccessRulesProtected, "inheritance should be broken");
+        Assert.DoesNotContain(
+            after.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>(),
+            rule => everyone.Equals(rule.IdentityReference));
     }
 
     [Fact]
