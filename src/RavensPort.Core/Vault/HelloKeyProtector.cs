@@ -91,9 +91,28 @@ public sealed class HelloKeyProtector
     /// <summary>
     /// Where the blob used to live, before it moved into the Credential Manager. Read once by
     /// <see cref="MigrateLegacyBlob"/> and then deleted; nothing writes it any more.
+    ///
+    /// The result is canonicalised and asserted to be a direct child of the session directory. The
+    /// file name is a constant, so nothing can escape today — but this path is handed to
+    /// <c>File.Delete</c>, and the whole point of checking here is that the assertion survives
+    /// whatever a later change does to how the directory or the name is chosen.
     /// </summary>
-    internal static string LegacyBlobPath(string sessionDirectory) =>
-        Path.Combine(sessionDirectory, "hello.bin");
+    internal static string LegacyBlobPath(string sessionDirectory)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sessionDirectory));
+        var path = Path.GetFullPath(Path.Combine(root, LegacyBlobFileName));
+
+        if (Path.GetDirectoryName(path) is not { } parent
+            || !string.Equals(Path.TrimEndingDirectorySeparator(parent), root, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "The legacy session blob path escaped the session directory.");
+        }
+
+        return path;
+    }
+
+    private const string LegacyBlobFileName = "hello.bin";
 
     /// <summary>
     /// The credential name for a given session directory.
@@ -311,10 +330,12 @@ public sealed class HelloKeyProtector
     /// </summary>
     private void MigrateLegacyBlob(string sessionDirectory, string name)
     {
-        var path = LegacyBlobPath(sessionDirectory);
-
         try
         {
+            // Inside the try, not above it: resolving the path can now fail on a malformed session
+            // directory, and this method's contract is to stay silent on every failure.
+            var path = LegacyBlobPath(sessionDirectory);
+
             if (!File.Exists(path)) return;
 
             if (!_store.Exists(name))

@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using RavensPort.App.Views;
 using RavensPort.Core.Diagnostics;
+using RavensPort.Core.Models;
 using RavensPort.Core.Vault;
 
 namespace RavensPort.App.ViewModels;
@@ -668,6 +669,16 @@ public sealed partial class SetupViewModel(
     private void OpenUrl(string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return;
+
+        // UseShellExecute hands the string to Windows to resolve, and Windows will happily run a
+        // registered protocol handler, a UNC path, or an executable — a browser is only one of the
+        // things it might pick. Today every caller passes a compile-time constant, so this changes
+        // nothing; it is here so that stays true if a URL ever arrives from config or a vault item.
+        if (!UrlValidation.IsSafeToOpenInBrowser(url))
+        {
+            StatusMessage = "Could not open the browser: that link is not an http/https address.";
+            return;
+        }
 
         try
         {
