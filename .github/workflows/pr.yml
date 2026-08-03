@@ -61,3 +61,19 @@ jobs:
             & dotnet @publishArgs
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
+
+      # Proves the installer script still compiles. Without this, a broken .iss stays invisible
+      # until a tag is pushed — by which point the release is already half cut, and the Store
+      # submission is the thing waiting on it.
+      #
+      # Compression none, and the ordinary compressed publish as the payload: this build exists to
+      # be thrown away, so it should not spend 80 seconds on LZMA2 or need a second publish. The
+      # size check in build.ps1 is skipped for the same reason, and only a real release build can
+      # answer that question anyway.
+      - name: Validate installer script
+        shell: pwsh
+        run: |
+          ./installer/build.ps1 `
+            -Version '0.0.0' `
+            -SourceExe 'src/RavensPort.App/bin/Release/net8.0-windows/publish/win-x64/RavensPort.exe' `
+            -CompressionMode none

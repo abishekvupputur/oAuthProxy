@@ -34,7 +34,7 @@ https://raw.githubusercontent.com/abishekvupputur/ravensPort/main/dist/RavensPor
 
 Commit the new installer to `dist/` and delete the superseded one in the same commit. Note that
 `dist/RavensPort-v3.0.2.exe` is currently three minor versions behind `Directory.Build.props`
-(4.1.3) — whatever is submitted must be the version the listing claims.
+(4.1.4) — whatever is submitted must be the version the listing claims.
 
 ## Partner Center answers
 
@@ -74,11 +74,23 @@ The release workflow publishes twice, and the difference matters:
 | `RavensPort-<tag>.exe` (release asset) | `EnableCompressionInSingleFile=true` | 99 MB |
 | Installer payload | `EnableCompressionInSingleFile=false` | 243 MB raw → **67.9 MB** installed in the setup |
 
-The bare exe is downloaded directly, so it wants single-file's own compression. The installer
-compresses its own payload, and LZMA2 cannot improve on an already-deflated blob — compressing the
-compressed exe produced a **101.6 MB** installer, over GitHub's 100 MB file limit, which would have
-made the `dist/` blob unpushable and the redirect-free URL impossible. Handing LZMA2 the raw
-payload gives 67.9 MB, with 32 MB of headroom, and drops the runtime self-extraction step.
+The bare exe is downloaded directly, so it wants single-file's own compression. The installer wants
+the opposite, because it compresses its own payload and LZMA2 has far more to work with when the
+input has not already been deflated. Measured, all three combinations:
+
+| Payload | Installer compression | Result |
+|---|---|---|
+| Compressed (99 MB) | `none` | **101.6 MB** — over GitHub's limit, unpushable |
+| Compressed (99 MB) | `lzma2/max` | 94.0 MB — under, but only 6 MB of headroom |
+| Raw (243 MB) | `lzma2/max` | **67.9 MB** — 32 MB of headroom |
+
+The first was the original bug: the payload was already deflated, so `Compression=none` made the
+installer the payload plus overhead, and the `dist/` blob could not be committed at all. The second
+works but leaves almost no room for the app to grow. The third is what is configured, and it drops
+the runtime self-extraction step as well.
+
+`build.ps1` fails the build if a release installer exceeds 100 MB, so this is caught at build time
+rather than at `git push`, when the release has already been cut.
 
 ## Architecture
 
@@ -100,7 +112,7 @@ dotnet publish src/RavensPort.App/RavensPort.App.csproj -p:PublishProfile=win-x6
   -c Release -p:EnableCompressionInSingleFile=false `
   -p:PublishDir="bin\Release\net8.0-windows\publish\win-x64-raw\"
 
-& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\RavensPort.iss /DAppVersion=4.1.3 `
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\RavensPort.iss /DAppVersion=4.1.4 `
   /DSourceExe=..\src\RavensPort.App\bin\Release\net8.0-windows\publish\win-x64-raw\RavensPort.exe
 ```
 

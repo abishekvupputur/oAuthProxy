@@ -142,26 +142,10 @@ jobs:
           # The tag carries a leading "v"; Inno's AppVersion and VersionInfoVersion want digits.
           $version = "${{ steps.version.outputs.version }}" -replace '^v', ''
 
-          $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-          if (-not $iscc) {
-            $candidates = @(
-              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-              "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
-            )
-            $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-            if (-not $found) { throw "Inno Setup (ISCC.exe) was not found on this runner." }
-            $iscc = $found
-          } else {
-            $iscc = $iscc.Source
-          }
-
-          $payload = "..\src\RavensPort.App\bin\Release\net8.0-windows\publish\win-x64-raw\RavensPort.exe"
-
-          & $iscc "installer\RavensPort.iss" "/DAppVersion=$version" "/DSourceExe=$payload"
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-
-          $setup = "dist/RavensPort-Setup-$version.exe"
-          if (-not (Test-Path $setup)) { throw "ISCC reported success but $setup is missing." }
+          $setup = ./installer/build.ps1 `
+            -Version $version `
+            -SourceExe 'src/RavensPort.App/bin/Release/net8.0-windows/publish/win-x64-raw/RavensPort.exe' `
+            | Select-Object -Last 1
 
           echo "setupPath=$setup" >> $env:GITHUB_OUTPUT
 
