@@ -144,7 +144,11 @@ public sealed class ProtonPassSession(ActivityLog activityLog, string? directory
     /// </summary>
     private void EnsureDirectory()
     {
-        if (Directory.Exists(SessionDirectory)) return;
+        if (Directory.Exists(SessionDirectory))
+        {
+            EnsureOwnerOnlyAccess();
+            return;
+        }
 
         try
         {
@@ -154,14 +158,10 @@ public sealed class ProtonPassSession(ActivityLog activityLog, string? directory
             {
                 var security = new DirectorySecurity();
                 security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-                security.AddAccessRule(new FileSystemAccessRule(
-                    user,
-                    FileSystemRights.FullControl,
-                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-                    PropagationFlags.None,
-                    AccessControlType.Allow));
+                security.AddAccessRule(OwnerRule(user));
 
                 info.Create(security);
+                _permissionsChecked = true;
                 return;
             }
 
@@ -173,4 +173,75 @@ public sealed class ProtonPassSession(ActivityLog activityLog, string? directory
             Directory.CreateDirectory(SessionDirectory);
         }
     }
+
+    /// <summary>
+    /// Whether the existing directory's ACL has already been looked at in this process.
+    /// <see cref="BuildEnvironment"/> runs before every single CLI call and reading a security
+    /// descriptor is a filesystem round trip, so this is a once-per-run check, not a per-call one.
+    /// </summary>
+    private bool _permissionsChecked;
+
+    /// <summary>
+    /// Reasserts owner-only access on a directory that was already there.
+    ///
+    /// <see cref="EnsureDirectory"/> applies its ACL at creation time, which quietly means it was
+    /// never applied to a directory this app did not create: one planted ahead of first run, one
+    /// left by a build that predates the ACL, or one widened by hand afterwards. What lives here is
+    /// the encrypted pass-cli session, so "was created correctly" is the wrong thing to rely on —
+    /// what matters is what the ACL says now.
+    ///
+    /// Best-effort, like everything else on this path. A directory whose owner has been changed out
+    /// from under the app cannot be re-secured by it either, and failing sign-in over that would
+    /// trade a hardening measure for an outage.
+    /// </summary>
+    private void EnsureOwnerOnlyAccess()
+    {
+        if (_permissionsChecked) return;
+        _permissionsChecked = true;
+
+        if (!OperatingSystem.IsWindows()) return;
+
+        try
+        {
+            if (WindowsIdentity.GetCurrent().User is not { } user) return;
+
+            var info = new DirectoryInfo(SessionDirectory);
+            var security = info.GetAccessControl();
+
+            // Protected plus nothing but the current user is the state EnsureDirectory creates.
+            // Anything else — an inherited ACE from a widened parent, an extra principal — is a
+            // grant this app never made.
+            var existing = security.GetAccessRules(true, true, typeof(SecurityIdentifier));
+            if (security.AreAccessRulesProtected
+                && existing.Cast<FileSystemAccessRule>().All(rule => user.Equals(rule.IdentityReference)))
+            {
+                return;
+            }
+
+            // Drops every inherited ACE from the in-memory descriptor, so the re-read below sees
+            // only explicit ones — which are the only kind that can be removed individually.
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+
+            foreach (FileSystemAccessRule rule in security.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+            {
+                if (!user.Equals(rule.IdentityReference)) security.RemoveAccessRuleSpecific(rule);
+            }
+
+            security.AddAccessRule(OwnerRule(user));
+            info.SetAccessControl(security);
+
+            activityLog.Log("VAULT tightened the pass-cli session directory to the current user only");
+        }
+        catch (Exception ex)
+        {
+            activityLog.Log($"VAULT could not verify permissions on the session directory: {ex.Message}");
+        }
+    }
+
+    private static FileSystemAccessRule OwnerRule(SecurityIdentifier user) => new(
+        user,
+        FileSystemRights.FullControl,
+        InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+        PropagationFlags.None,
+        AccessControlType.Allow);
 }
