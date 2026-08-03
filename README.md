@@ -80,15 +80,16 @@ reach on its own.
 
 ### From a release
 
-Download `RavensPort-<version>.exe` from the [Releases page](../../releases) and run it. No .NET
-install, no extraction.
+Download `RavensPort-Setup-<version>.exe` from the [Releases page](../../releases) and run it. It
+installs per-user — no elevation prompt, no .NET install, no extraction — and leaves a Start menu
+shortcut and an Add or Remove Programs entry behind.
 
-Windows will warn about an unknown publisher — the binary is not Authenticode-signed. Instead
+Windows will warn about an unknown publisher — the installer is not Authenticode-signed. Instead
 every release carries a **build provenance attestation** recording the workflow, commit, and
 runner that produced it. Verify with the [GitHub CLI](https://cli.github.com/):
 
 ```bash
-gh attestation verify RavensPort-v3.0.2.exe --repo abishekvupputur/ravensPort
+gh attestation verify RavensPort-Setup-<version>.exe --repo abishekvupputur/ravensPort
 ```
 
 A pass means the file is byte-for-byte what CI built from this repository.
@@ -692,6 +693,10 @@ icon. The proxy and the UI share one DI container.
 
 Pushing a version tag (`v*`) runs the test suite and, only on success, builds and publishes a
 release with a provenance attestation. Nothing is released off a failing build.
+
+The installer is the only asset. The bare self-contained exe used to ship beside it, but running it
+installed nothing — no Start menu entry, no way back in after the tray menu's Exit — which is what
+Microsoft Store certification rejected. Building from source still produces that exe if you want it.
 
 ---
 

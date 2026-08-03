@@ -188,7 +188,7 @@ download against the build that claims to have produced it, using the
 [GitHub CLI](https://cli.github.com/):
 
 ```bash
-gh attestation verify RavensPort-v3.0.2.exe --repo abishekvupputur/ravensPort
+gh attestation verify RavensPort-Setup-<version>.exe --repo abishekvupputur/ravensPort
 ```
 
 A pass means the file is byte-for-byte what CI built from this repository — so what you run is what
