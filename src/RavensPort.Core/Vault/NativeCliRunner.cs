@@ -15,6 +15,16 @@ public sealed class NativeCliRunner : ICliRunner
     private static bool _initialized = false;
     private static readonly object _initLock = new();
 
+    /// <summary>
+    /// One call into the DLL at a time. <c>InitializeOP</c> leaves a client in a package-level
+    /// variable on the Go side, so every exported function reads shared state — and the callers
+    /// here do fan out: <c>FindAdoptableVaultsAsync</c> lists every candidate vault concurrently.
+    /// That was harmless only because the calls used to run inline on one thread; moving them to
+    /// the pool would make the concurrency real, so this puts back the serialisation that was
+    /// previously an accident of the threading.
+    /// </summary>
+    private static readonly SemaphoreSlim _callGate = new(1, 1);
+
     private readonly ActivityLog? _activityLog;
     private readonly IOnePasswordNativeClient _client;
 
@@ -62,7 +72,24 @@ public sealed class NativeCliRunner : ICliRunner
         }
     }
 
-    public Task<CliResult> RunAsync(
+    /// <summary>
+    /// Every call here is a blocking P/Invoke into onepassword.dll, so unlike <see cref="CliRunner"/>
+    /// — which awaits real process I/O — there is nothing in the body that yields. Returning
+    /// <c>Task.FromResult</c> from a synchronous body meant the work ran inline on whichever thread
+    /// awaited it, and for anything driven by a button that thread is the WPF dispatcher: Disconnect
+    /// flushes pending changes before it asks for confirmation, so the window froze for as long as
+    /// the 1Password SDK took to write every changed item. Proton Pass never showed it because its
+    /// runner yields at the first await.
+    ///
+    /// <c>Task.Run</c> rather than making the DLL calls asynchronous, because they cannot be: the
+    /// exported functions are synchronous and there is no overlapped variant to await. The blocking
+    /// has to happen on some thread, and a pool thread is the right one.
+    ///
+    /// <paramref name="timeout"/> is still not honoured. A P/Invoke in progress cannot be abandoned,
+    /// and returning early while the DLL keeps writing would be worse than waiting — the caller
+    /// would report a failure for a save that is about to succeed. The SDK's own timeouts apply.
+    /// </summary>
+    public async Task<CliResult> RunAsync(
         string exePath,
         IReadOnlyList<string> args,
         string? stdin = null,
@@ -70,10 +97,26 @@ public sealed class NativeCliRunner : ICliRunner
         TimeSpan? timeout = null,
         CancellationToken ct = default)
     {
+        await _callGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            // ConfigureAwait(false) all the way out, so the continuation does not queue back onto
+            // the dispatcher — that would put the JSON parsing this returns into back on the UI
+            // thread for every vault read.
+            return await Task.Run(() => Execute(args, stdin), ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _callGate.Release();
+        }
+    }
+
+    private CliResult Execute(IReadOnlyList<string> args, string? stdin)
+    {
         try
         {
             EnsureInitialized();
-            
+
             var stopwatch = Stopwatch.StartNew();
 
             var cmd = string.Join(" ", args);
@@ -157,19 +200,19 @@ public sealed class NativeCliRunner : ICliRunner
 
             var result = new CliResult(exitCode, stdout, stderr);
             Log(args, result, stopwatch.ElapsedMilliseconds);
-            return Task.FromResult(result);
+            return result;
         }
         catch (VaultCliException ex)
         {
             var result = new CliResult(1, "", ex.Message);
             Log(args, result, 0);
-            return Task.FromResult(result);
+            return result;
         }
         catch (Exception ex)
         {
             var result = new CliResult(1, "", ex.ToString());
             Log(args, result, 0);
-            return Task.FromResult(result);
+            return result;
         }
     }
 
