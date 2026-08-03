@@ -14,7 +14,7 @@
   certificate subject would not match the publisher Partner Center has on file.
 
   The Inno installer in installer/ is untouched and still ships on the GitHub release. This is the
-  Store artifact only, built by the MSIX-v* tag workflow.
+  Store artifact only; both are built from the same v* tag by release.yml.
 
   IDENTITY VALUES BELOW MUST MATCH PARTNER CENTER EXACTLY - they are case-sensitive, and spaces
   and punctuation have to match as well.

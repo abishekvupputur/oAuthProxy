@@ -5,10 +5,10 @@ name: Test, build, and release
 # named after the tag. Windows-only runner because this is a net8.0-windows WPF app; it cannot
 # build on Linux/macOS runners.
 #
-# The installer is the only release asset. The bare self-contained exe used to ship beside it, but
-# running it installed nothing — no Add or Remove Programs entry, no Start menu shortcut — which is
-# exactly what failed Store certification, so offering it as a download only invited people back
-# into that state. Nothing builds it now, which also takes a whole publish off this job.
+# Two release assets: the installer, and the MSIX package uploaded to the Microsoft Store. The bare
+# self-contained exe used to ship beside them, but running it installed nothing — no Add or Remove
+# Programs entry, no Start menu shortcut — which is exactly what failed Store certification, so
+# offering it as a download only invited people back into that state. Nothing builds it now.
 #
 # Ordinary pushes to main no longer trigger this — cutting a release is now a deliberate
 # action (push a tag), not a side effect of every commit.
@@ -125,6 +125,47 @@ jobs:
 
           echo "setupPath=$setup" >> $env:GITHUB_OUTPUT
 
+      # --- Microsoft Store package -------------------------------------------------------------
+      # The Store submission is this MSIX, not the installer above. Policy 10.2.9 requires every PE
+      # in an EXE/MSI submission to be signed by a CA in the Microsoft Trusted Root Program, and the
+      # installer is not — that is what the 4.1.5 submission was rejected for. Microsoft signs MSIX
+      # packages itself during ingestion, at no cost, so the package this builds is deliberately
+      # left unsigned; signing it here would get the upload rejected instead, because the
+      # certificate subject would not match the publisher Partner Center has on file.
+      #
+      # A third publish, because this one wants the opposite of the other two: loose files rather
+      # than a single file, so MSIX can compress and block-dedupe the payload itself and a Store
+      # update sends only the blocks that changed. See the win-x64-msix profile.
+      - name: Publish (payload for the Store package)
+        shell: pwsh
+        run: |
+          $publishArgs = @(
+            'publish', 'src/RavensPort.App/RavensPort.App.csproj',
+            '-p:PublishProfile=win-x64-msix',
+            '-c', 'Release'
+          )
+          & dotnet @publishArgs
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "First publish attempt failed - retrying once (WPF markup-compile race)"
+            & dotnet @publishArgs
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+      - name: Build Store package (MSIX)
+        id: msix
+        shell: pwsh
+        run: |
+          # Same de-v as the installer. build-msix.ps1 pads to the four parts MSIX requires and
+          # keeps the fourth at 0, which the Store reserves.
+          $version = "${{ steps.version.outputs.version }}" -replace '^v', ''
+
+          $package = ./packaging/build-msix.ps1 `
+            -Version $version `
+            -PublishDir 'src/RavensPort.App/bin/Release/net8.0-windows/publish/win-x64-msix' `
+            | Select-Object -Last 1
+
+          echo "packagePath=$package" >> $env:GITHUB_OUTPUT
+
       # Records which workflow, commit, and runner produced this exact exe, signed via the
       # job's OIDC identity. The free stand-in for Authenticode signing: it does not stop
       # SmartScreen warnings, but it does make the binary tamper-evident, so a downloaded exe
@@ -132,11 +173,17 @@ jobs:
       #
       #   gh attestation verify RavensPort-Setup-<version>.exe --repo ${{ github.repository }}
       #
+      # Both artifacts, so neither can be published unattested. The attestation says nothing about
+      # the copy the Store serves — Microsoft re-signs that during ingestion — it covers the file
+      # downloaded from here.
+      #
       # Placed before the release step so an artifact never gets published unattested.
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: ${{ steps.installer.outputs.setupPath }}
+          subject-path: |
+            ${{ steps.installer.outputs.setupPath }}
+            ${{ steps.msix.outputs.packagePath }}
 
       - name: Create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
@@ -144,4 +191,8 @@ jobs:
           tag_name: ${{ steps.version.outputs.version }}
           name: ${{ steps.version.outputs.version }}
           generate_release_notes: true
-          files: ${{ steps.installer.outputs.setupPath }}
+          # Two assets: the installer for people installing outside the Store, and the MSIX to
+          # upload to Partner Center.
+          files: |
+            ${{ steps.installer.outputs.setupPath }}
+            ${{ steps.msix.outputs.packagePath }}

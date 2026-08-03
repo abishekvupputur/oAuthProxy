@@ -62,30 +62,35 @@ refuses to pack while any placeholder survives.
 
 ## Cutting a release
 
+There is no separate tag and no separate workflow. The Store package is built by the ordinary
+release pipeline, from the same tag as everything else:
+
 ```
-git tag MSIX-v4.1.5
-git push origin MSIX-v4.1.5
+git tag v4.1.5
+git push origin v4.1.5
 ```
 
-Tags are case-sensitive: `MSIX-v4.1.5`, not `msix-v4.1.5`. The workflow runs the test suite first
-and stops on failure, then publishes, packs, attests, and creates a release on that tag in this
-repository with `RavensPort-4.1.5.msix` attached. Download that asset and upload it to Partner
-Center.
+`release.yml` runs the test suite first and stops on failure, then publishes twice — once raw for
+the installer, once loose-file for the package — builds both, attests both, and attaches both to
+the release:
 
-The MSIX release sits alongside the `v*` installer releases rather than replacing them. Both come
-from the same commit, but they answer to different audiences, and a Store resubmission should not
-have to drag an installer release along with it.
+| Asset | For |
+|---|---|
+| `RavensPort-Setup-4.1.5.exe` | installing outside the Store |
+| `RavensPort-4.1.5.msix` | uploading to Partner Center |
 
-The version comes off the tag, so `MSIX-v4.1.5` produces a `4.1.5.0` package. MSIX wants four parts
-and the Store reserves the fourth, so `build-msix.ps1` pads rather than letting you set it.
+Download the `.msix` from the release and upload it in Partner Center.
 
-Separate from the `v*` installer tag on purpose: a Store resubmission no longer needs a new
-installer release, and an ordinary release no longer builds a 100 MB package nobody asked for.
+The version comes off the tag, so `v4.1.5` produces a `4.1.5.0` package. MSIX wants four parts and
+the Store reserves the fourth, so `build-msix.ps1` pads it rather than letting you set it.
+
+Because both artifacts come off one tag, a Store resubmission means cutting a release — there is no
+way to rebuild only the package. That is the trade for having one pipeline and one version number
+that cannot drift.
 
 ### Provenance
 
-The attestation is recorded against **this** repository even though the asset lives in the release
-repository, so verification names this one:
+Both assets are attested, so either can be checked against the build that produced it:
 
 ```bash
 gh attestation verify RavensPort-4.1.5.msix --repo abishekvupputur/ravensPort
