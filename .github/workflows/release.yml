@@ -35,20 +35,23 @@ jobs:
       attestations: write # publish that attestation to the repo
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           # The release is published through the GitHub API by the steps below, not by a
           # git push, so nothing needs credentials in .git/config — and this job holds
           # contents:write, which makes a token left lying there the worst one to leak.
           persist-credentials: false
 
-      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: "8.0.x"
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.22.x"
+          # The module lives under src/, so the default repository-root lookup finds no
+          # go.sum and the module cache is silently skipped.
+          cache-dependency-path: src/OnePasswordNative/go.sum
 
       # --locked-mode fails the build if a resolved package does not match packages.lock.json,
       # so a dependency (or a transitive one) changing content under a version we already
