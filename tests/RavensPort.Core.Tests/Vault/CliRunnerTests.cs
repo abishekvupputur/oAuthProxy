@@ -91,6 +91,29 @@ public class CliRunnerTests : IDisposable
         Assert.DoesNotContain(activityLog.GetRecent(100), line => line.Contains(Secret));
     }
 
+    [Fact]
+    public async Task TheBinaryThatActuallyRanIsRecorded_OncePerPath()
+    {
+        // VaultProbe takes the first match on PATH, and PATH routinely includes directories an
+        // unprivileged process can write to. Nothing here stops a swapped binary — this pins that
+        // the swap leaves a record. Describe() writes only the file name, which cannot tell the
+        // real op.exe from an impostor sitting earlier on PATH.
+        var activityLog = new ActivityLog(_logPath);
+        var runner = new CliRunner(activityLog);
+
+        // Deliberately non-canonical: what is recorded has to be the file that ran, not whatever
+        // string the caller happened to be holding.
+        var indirect = Path.Combine(Path.GetDirectoryName(_comSpec)!, ".", Path.GetFileName(_comSpec));
+
+        await runner.RunAsync(indirect, ["/c", "exit", "0"]);
+        await runner.RunAsync(_comSpec, ["/c", "exit", "0"]);
+
+        var launches = activityLog.GetRecent(100).Where(line => line.Contains("launching CLI from")).ToList();
+
+        Assert.Single(launches);
+        Assert.Contains(_comSpec, launches[0], StringComparison.OrdinalIgnoreCase);
+    }
+
     public void Dispose()
     {
         try { Directory.Delete(_logPath, recursive: true); } catch { /* best effort */ }
