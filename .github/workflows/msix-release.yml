@@ -49,6 +49,10 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.22.x"
+          # The Go module lives in a subdirectory, so setup-go's default lookup for go.sum at the
+          # repository root finds nothing and logs "Restore cache failed" on every run. Pointing it
+          # at the real file silences that and actually caches the module downloads.
+          cache-dependency-path: src/OnePasswordNative/go.sum
 
       - name: Restore
         run: dotnet restore RavensPort.slnx --locked-mode
