@@ -8,16 +8,27 @@ on:
   schedule:
     - cron: '30 2 * * 0' # Run weekly
 
+# Third-party actions are pinned to commit SHAs, not tags. A tag — and `master` most of all —
+# is mutable: whoever controls the action's repo can repoint it at new code that then runs
+# inside this job with the repo checked out. The trailing comment records which version each
+# SHA was, since the SHA alone is unreadable.
+permissions:
+  contents: read
+
 jobs:
   trivy_scan:
     name: Run Trivy Scan
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Nothing here pushes back to the repo, so don't leave GITHUB_TOKEN sitting in
+          # .git/config where any later step or action could read it.
+          persist-credentials: false
 
       - name: Run Trivy Vulnerability Scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -29,7 +40,7 @@ jobs:
 
       - name: Run Trivy Secret Scanner
         if: always()
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -40,7 +51,7 @@ jobs:
 
       - name: Run Trivy Misconfiguration Scanner
         if: always()
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: 'fs'
           scan-ref: '.'

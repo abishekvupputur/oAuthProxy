@@ -31,12 +31,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The release is published through the GitHub API by the steps below, not by a
+          # git push, so nothing needs credentials in .git/config — and this job holds
+          # contents:write, which makes a token left lying there the worst one to leak.
+          persist-credentials: false
 
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: "8.0.x"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.22.x"
 
