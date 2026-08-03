@@ -24,7 +24,11 @@
 #define AppPublisher "Abishek Narasimhan"
 #define AppUrl "https://github.com/abishekvupputur/ravensPort"
 #define AppExeName "RavensPort.exe"
-#define SourceExe "..\src\RavensPort.App\bin\Release\net8.0-windows\publish\win-x64\RavensPort.exe"
+
+; Overridable so the payload location can be pointed elsewhere without editing this file.
+#ifndef SourceExe
+  #define SourceExe "..\src\RavensPort.App\bin\Release\net8.0-windows\publish\win-x64\RavensPort.exe"
+#endif
 
 [Setup]
 ; Never change AppId. It is what lets a later version recognise, and replace, an existing
@@ -46,10 +50,21 @@ UninstallDisplayIcon={app}\{#AppExeName}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 PrivilegesRequired=lowest
-; Spelled the pre-6.3 way on purpose. "x64compatible" is the modern name but is a hard error on
-; Inno 6.2, which is still what some build images carry; "x64" merely warns on newer versions.
+; "x64compatible" and not "x64": the latter is deprecated and now resolves to "x64os", meaning
+; x64 hardware only, which refuses to install on an ARM64 Windows device even though the payload
+; runs there perfectly well under emulation. Recent Surface Laptops are ARM64 -- and a Surface
+; Laptop is the machine Store certification tested on -- so that distinction is the difference
+; between passing and failing 10.3.4 again.
+;
+; Guarded because "x64compatible" is a hard error before Inno 6.3, which some build images still
+; carry. The fallback narrows the audience rather than failing the build.
+#if VER >= EncodeVer(6,3,0)
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+#else
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
+#endif
 
 ; Matches SupportedOSPlatformVersion in Directory.Build.props: Windows 10 1809.
 MinVersion=10.0.17763
@@ -59,10 +74,13 @@ OutputBaseFilename={#AppName}-Setup-{#AppVersion}
 SetupIconFile=..\src\RavensPort.App\Assets\tray.ico
 LicenseFile=..\LICENSE
 
-; The payload is one already-compressed self-extracting binary, so asking LZMA to squeeze it
-; again costs minutes of build time to save almost nothing.
-Compression=none
-SolidCompression=no
+; The payload must be published with EnableCompressionInSingleFile=false and compressed here
+; instead. Single-file's own deflate produced a 99 MB exe that LZMA could not improve on, and the
+; resulting 101.6 MB installer was over GitHub's 100 MB blob limit -- which the Store submission
+; depends on, since it needs a redirect-free raw.githubusercontent.com URL. LZMA2 on the raw
+; payload gets there comfortably, and drops the runtime self-extraction step as a bonus.
+Compression=lzma2/max
+SolidCompression=yes
 
 WizardStyle=modern
 DisableProgramGroupPage=yes
