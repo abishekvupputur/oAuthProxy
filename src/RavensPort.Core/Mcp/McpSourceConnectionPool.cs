@@ -298,12 +298,49 @@ public sealed class McpSourceConnectionPool : IAsyncDisposable
 
     public Task InvalidateAllAsync() => InvalidateWhereAsync(_ => true);
 
-    private async Task InvalidateWhereAsync(Func<ConnectionKey, bool> predicate)
+    /// <summary>
+    /// Removes every matching edge and closes it, without waiting on any handshake that has not
+    /// landed yet.
+    ///
+    /// Both halves of that matter, and both were learned from Disconnect. It runs this before it
+    /// can finish, and it used to walk the edges one after another, awaiting each session's
+    /// *connect* before starting on the next — so an unreachable source made the whole app sit on
+    /// its confirmation screen for as long as that upstream took to give up, multiplied by the
+    /// number of edges. Waiting for a connection that is being thrown away is never useful: what
+    /// the caller needs is for the entry to be gone from the dictionary, and that has already
+    /// happened by the time <see cref="DetachAsync"/> decides whether to block.
+    ///
+    /// The close itself still happens — a session left open holds an Mcp-Session-Id the upstream
+    /// is counting, so dropping it silently would leak one per disconnect. It just happens on its
+    /// own once the handshake resolves, rather than in front of the user.
+    /// </summary>
+    private Task InvalidateWhereAsync(Func<ConnectionKey, bool> predicate)
     {
-        foreach (var key in _connections.Keys.Where(predicate).ToList())
+        var closing = _connections.Keys
+            .Where(predicate)
+            .Select(key => _connections.TryRemove(key, out var entry) ? DetachAsync(entry) : Task.CompletedTask);
+
+        // Concurrently: these are independent upstreams, and a dispose is a network round trip of
+        // its own — the session-termination DELETE — so serialising them only adds up.
+        return Task.WhenAll(closing);
+    }
+
+    /// <summary>
+    /// Closes a session, awaiting the close only when there is nothing left to wait for.
+    ///
+    /// A handshake still in flight cannot be disposed until it produces a client, so that case is
+    /// left to finish on its own. Everything else — connected, or faulted, both of which complete
+    /// immediately — is awaited, so the common path still reports when it is done.
+    /// </summary>
+    private static Task DetachAsync(ConnectionEntry entry)
+    {
+        if (!entry.Client.IsCompleted)
         {
-            await InvalidateAsync(key).ConfigureAwait(false);
+            _ = InvalidateAsync(entry);
+            return Task.CompletedTask;
         }
+
+        return InvalidateAsync(entry);
     }
 
     private static async Task InvalidateAsync(ConnectionEntry entry)

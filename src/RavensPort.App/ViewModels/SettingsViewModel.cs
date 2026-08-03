@@ -174,8 +174,15 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// </summary>
     public bool CanMaintainVault => _configStoreCache.IsSettled;
 
-    /// <summary>The inverse, for the explanation shown in the section's place.</summary>
-    public bool IsWaitingForVaultLoad => !CanMaintainVault;
+    /// <summary>
+    /// The inverse, for the explanation shown in the section's place — but only while there is a
+    /// vault to be waiting on.
+    ///
+    /// Disconnecting empties the store and clears the loaded flag, which satisfies "not settled"
+    /// just as a load in flight does. Without the connection test, the moment Disconnect was
+    /// confirmed the tab announced "Still reading your vault" about a vault it had just let go of.
+    /// </summary>
+    public bool IsWaitingForVaultLoad => IsConnected && !CanMaintainVault;
 
     /// <summary>
     /// Polled from the same timer as the rest of this tab rather than driven by an event. The load
