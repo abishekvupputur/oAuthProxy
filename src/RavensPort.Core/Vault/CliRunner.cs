@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using RavensPort.Core.Diagnostics;
@@ -18,9 +19,15 @@ namespace RavensPort.Core.Vault;
 /// **No captured stdout is ever logged.** The output of any get/list is item contents. Logging
 /// records the command, the exit code, and how long it took; on failure it adds the first line of
 /// stderr, which these CLIs use for diagnostics rather than data.
+///
+/// **Nothing runs unless it is the binary it claims to be.** Every launch in the app comes through
+/// here, which makes this the one place that can ask the question — see
+/// <see cref="AuthenticodeTrustPolicy"/> for what is being defended and why the check lives at the
+/// launch rather than at the search.
 /// </summary>
-public sealed class CliRunner(ActivityLog activityLog) : ICliRunner
+public sealed class CliRunner(ActivityLog activityLog, IExecutableTrustPolicy? trustPolicy = null) : ICliRunner
 {
+    private readonly IExecutableTrustPolicy _trustPolicy = trustPolicy ?? AuthenticodeTrustPolicy.Default;
     /// <summary>Reads are quick. A hung one means something is badly wrong, not slow.</summary>
     public static readonly TimeSpan ReadTimeout = TimeSpan.FromSeconds(20);
 
@@ -35,6 +42,20 @@ public sealed class CliRunner(ActivityLog activityLog) : ICliRunner
     /// here would cancel people mid-login.
     /// </summary>
     public static readonly TimeSpan InteractiveTimeout = TimeSpan.FromMinutes(5);
+
+    /// <summary>Which resolved binaries have already been written down. See <see cref="GuardExecutable"/>.</summary>
+    private readonly ConcurrentDictionary<string, byte> _announced = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Trust decisions, keyed by path *and* the file's size and last-write time, so replacing the
+    /// binary while the app is running invalidates the entry rather than inheriting its verdict.
+    ///
+    /// Both of those are attacker-settable via SetFileTime, so this is a cache key and not a
+    /// security boundary — it narrows the window rather than closing it. Verifying on every single
+    /// call instead would put a certificate chain build in front of every vault read, which is the
+    /// wrong trade for a process that is already only as trustworthy as the first launch it made.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, TrustDecision> _trusted = new(StringComparer.OrdinalIgnoreCase);
 
     public async Task<CliResult> RunAsync(
         string exePath,
@@ -179,7 +200,7 @@ public sealed class CliRunner(ActivityLog activityLog) : ICliRunner
     {
         var startInfo = new ProcessStartInfo
         {
-            FileName = exePath,
+            FileName = ResolveExecutable(exePath),
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardInput = true,
@@ -208,8 +229,85 @@ public sealed class CliRunner(ActivityLog activityLog) : ICliRunner
         return startInfo;
     }
 
+    /// <summary>
+    /// Fully qualifies the executable before it reaches CreateProcess.
+    ///
+    /// With UseShellExecute false there is no shell and no command line to inject into — the
+    /// arguments go over as an array — so the remaining question is only *which file* runs. A bare
+    /// or relative name would be resolved against the current directory and PATH, letting whatever
+    /// sits earliest there answer to "op.exe". <see cref="VaultProbe"/> already hands over an
+    /// absolute path; doing this here makes that a property of the launcher rather than something
+    /// every caller has to remember.
+    /// </summary>
+    private static string ResolveExecutable(string exePath)
+    {
+        if (string.IsNullOrWhiteSpace(exePath))
+        {
+            throw new VaultCliException("No password-manager CLI has been located to run.");
+        }
+
+        try
+        {
+            return Path.GetFullPath(exePath);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new VaultCliException($"'{exePath}' is not a usable path to a CLI executable.", ex);
+        }
+    }
+
+    /// <summary>
+    /// Asks the trust policy about the binary, and writes down which file actually ran.
+    ///
+    /// The record matters independently of the verdict. <see cref="Describe"/> logs only the file
+    /// name, so without this a substituted binary would leave nothing behind to find — and the
+    /// policy deliberately waves through anything it does not recognise, which is precisely the
+    /// case where a human reading the log later is the only remaining check. Logged once per
+    /// binary rather than per call: the interesting event is *which* file ran, and repeating it on
+    /// every `vault list` would bury it.
+    /// </summary>
+    private void GuardExecutable(string resolvedPath)
+    {
+        var decision = _trusted.GetOrAdd(CacheKey(resolvedPath), _ => _trustPolicy.Decide(resolvedPath));
+
+        if (!decision.Allowed)
+        {
+            // Every time, not just the first: this is the reason the user is about to see on the
+            // setup page, and a refusal that only logged once would leave later attempts silent.
+            activityLog.Log($"VAULT refused to launch {resolvedPath} — {decision.Summary}");
+            throw new VaultCliException(decision.Summary);
+        }
+
+        if (_announced.TryAdd(resolvedPath, 0))
+        {
+            activityLog.Log($"VAULT launching CLI from {resolvedPath} ({decision.Summary})");
+        }
+    }
+
+    private static string CacheKey(string resolvedPath)
+    {
+        try
+        {
+            // Measured on the link's target, not the link. WinGet installs op.exe as a symlink
+            // whose own length is zero and whose timestamp is when the link was made — neither
+            // moves when the binary behind it is upgraded, so keying on the link would keep
+            // answering for the version that was there when the app started. The path stays in the
+            // key so that replanting a different file under the same name is still a new question.
+            var info = new FileInfo(ExecutableSignature.ResolveFinalTarget(resolvedPath));
+            return $"{resolvedPath}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            // Unreadable metadata means no caching, which is the safe direction: the policy gets
+            // asked again next time rather than a stale allow being remembered.
+            return $"{resolvedPath}|{Guid.NewGuid()}";
+        }
+    }
+
     private Process Start(ProcessStartInfo startInfo, string exePath, IReadOnlyList<string> args)
     {
+        GuardExecutable(startInfo.FileName);
+
         var process = new Process { StartInfo = startInfo };
 
         try
