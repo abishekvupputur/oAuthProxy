@@ -24,10 +24,19 @@ namespace RavensPort.App;
 /// </summary>
 public partial class App : Application
 {
+    private const string SingleInstanceMutexName = "RavensPort_SingleInstance";
+
+    /// <summary>
+    /// How a second launch asks the running instance to come to the front. Named, because the two
+    /// processes have nothing else in common — and the whole point is that the second one exits.
+    /// </summary>
+    private const string ShowWindowEventName = "RavensPort_ShowWindow";
+
     private static Mutex? _singleInstanceMutex;
 
     private WebApplication? _webApp;
     private TrayIconManager? _trayIconManager;
+    private EventWaitHandle? _showWindowSignal;
 
     /// <summary>
     /// Kestrel can only be started once. The setup page can raise its ready event more than once —
@@ -45,15 +54,23 @@ public partial class App : Application
         // Only one instance may run. A second one would fight the first over the fixed
         // ports — the proxy port and, more subtly, the fixed OAuth loopback ports, where
         // the loser fails with "conflicts with an existing registration on the machine".
-        var mutex = new Mutex(initiallyOwned: true, "RavensPort_SingleInstance", out var isNewInstance);
+        var mutex = new Mutex(initiallyOwned: true, SingleInstanceMutexName, out var isNewInstance);
         if (!isNewInstance)
         {
             // Not the owner, so it must never be released here — only disposed. The field is
             // left null so OnExit can tell "we own it" from "we're the duplicate".
             mutex.Dispose();
-            MessageBox.Show(
-                "RavensPort is already running — look for the padlock icon in the system tray.",
-                "RavensPort", MessageBoxButton.OK, MessageBoxImage.Information);
+
+            // Launching an app that is already running should show it, not explain itself. This is
+            // what makes the Start menu shortcut a real way back into a window the user closed —
+            // the previous message box told them to go hunting in the tray instead.
+            if (!TryShowRunningInstance())
+            {
+                MessageBox.Show(
+                    "RavensPort is already running — look for the padlock icon in the system tray.",
+                    "RavensPort", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+
             Shutdown();
             return;
         }
@@ -203,11 +220,88 @@ public partial class App : Application
             _ = setupViewModel.CheckAsync();
         };
 
+        ListenForSecondLaunch(mainWindow);
+
+        // Shown, not left hidden. The app used to start straight to the tray with no window at all,
+        // which meant a launch produced no visible response — and once the tray menu's Exit had been
+        // used there was no way back in short of finding the exe on disk. That is also what the
+        // Microsoft Store rejected under 10.1.2.10. Autostart no longer exists, so every launch is
+        // now something a person deliberately did, and answering it with a window is simply correct.
+        ShowWindow(mainWindow);
+
         // Fire and forget on the Dispatcher rather than blocking it. The original deadlock hazard
         // was blocking this thread while a continuation tried to post back onto it; this never
         // blocks, and every piece of work below is still wrapped in Task.Run so nothing captures
         // the Dispatcher's SynchronizationContext.
         _ = OfferHelloThenCheckAsync(setupViewModel);
+    }
+
+    /// <summary>
+    /// Watches for a second launch and brings this instance's window up when one happens.
+    ///
+    /// The waiting thread is a background one and is never joined: it is parked in WaitOne for the
+    /// life of the process, and shutdown is not going to wait politely for a wait that only ends
+    /// when someone launches the app again.
+    /// </summary>
+    private void ListenForSecondLaunch(MainWindow mainWindow)
+    {
+        try
+        {
+            _showWindowSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ShowWindowEventName);
+        }
+        catch (Exception ex)
+        {
+            // Losing this costs the second-launch-shows-the-window nicety and nothing else, so it
+            // must not stop the app starting. The duplicate falls back to its message box.
+            LogError("Could not listen for a second launch", ex);
+            return;
+        }
+
+        var listener = new Thread(() =>
+        {
+            try
+            {
+                while (_showWindowSignal.WaitOne())
+                {
+                    mainWindow.Dispatcher.BeginInvoke(() => ShowWindow(mainWindow));
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // Shutdown closed the handle out from under the wait. Expected; nothing to do.
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "RavensPort second-launch listener",
+        };
+
+        listener.Start();
+    }
+
+    /// <summary>
+    /// Asks an already-running instance to show itself. False when there is nothing listening —
+    /// an instance older than this change, or one whose listener failed to start.
+    /// </summary>
+    private static bool TryShowRunningInstance()
+    {
+        try
+        {
+            if (!EventWaitHandle.TryOpenExisting(ShowWindowEventName, out var handle)) return false;
+
+            using (handle) return handle.Set();
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or WaitHandleCannotBeOpenedException)
+        {
+            return false;
+        }
+    }
+
+    private static void ShowWindow(Window window)
+    {
+        window.Show();
+        window.WindowState = WindowState.Normal;
+        window.Activate();
     }
 
     /// <summary>
@@ -487,6 +581,7 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         _trayIconManager?.Dispose();
+        _showWindowSignal?.Dispose();
 
         // Same reasoning as the Task.Run in OnStartup: StopAsync/DisposeAsync run on the
         // WPF Dispatcher thread here. If anything in Kestrel/hosted-service shutdown awaits
