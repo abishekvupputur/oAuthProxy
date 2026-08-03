@@ -2,7 +2,11 @@
 bin/
 obj/
 publish/
+dist/
 [Tt]est[Rr]esults/
+
+# Compiled binaries — never tracked, they belong on the release page
+*.exe
 
 # Visual Studio / Rider
 .vs/
