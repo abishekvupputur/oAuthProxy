@@ -60,8 +60,9 @@ not to this repository.
 
 ### 3. Package identity
 
-Open **Product management -> Product identity** in Partner Center and copy three values into
-[../packaging/AppxManifest.xml](../packaging/AppxManifest.xml), replacing the `FILLMEIN` ones:
+Open **Product management -> "View app identity details"** in Partner Center and copy three values
+into [../packaging/AppxManifest.xml](../packaging/AppxManifest.xml), replacing the `FILLMEIN` ones.
+The values are case-sensitive, and spaces and punctuation must match too:
 
 | Partner Center | Manifest |
 |---|---|

@@ -16,8 +16,9 @@
   The Inno installer in installer/ is untouched and still ships on the GitHub release. This is the
   Store artifact only, built by the MSIX-v* tag workflow.
 
-  IDENTITY VALUES BELOW MUST MATCH PARTNER CENTER EXACTLY.
-  Copy them from Partner Center -> your app -> Product management -> Product identity:
+  IDENTITY VALUES BELOW MUST MATCH PARTNER CENTER EXACTLY - they are case-sensitive, and spaces
+  and punctuation have to match as well.
+  Copy them from Partner Center -> your app -> Product management -> "View app identity details":
     Identity/Name                   <- "Package/Identity/Name"
     Identity/Publisher              <- "Package/Identity/Publisher"  (the CN=... string)
     Properties/PublisherDisplayName <- "Package/Properties/PublisherDisplayName"
@@ -35,14 +36,14 @@
   IgnorableNamespaces="uap rescap">
 
   <Identity
-    Name="FILLMEIN.PartnerCenterPackageIdentityName"
-    Publisher="CN=FILLMEIN-PARTNER-CENTER-PUBLISHER-ID"
+    Name="AbishekNarasimhan.ravensPort"
+    Publisher="CN=1B113C89-A7A0-4B67-984B-1B1B4B790B7F"
     Version="0.0.0.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
     <DisplayName>RavensPort</DisplayName>
-    <PublisherDisplayName>FILLMEIN Publisher Display Name</PublisherDisplayName>
+    <PublisherDisplayName>Abishek Narasimhan</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 

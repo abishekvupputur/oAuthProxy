@@ -28,6 +28,21 @@ param(
     [Parameter(Mandatory)]
     [string] $PublishDir,
 
+    # Identity overrides, for local sideload builds only.
+    #
+    # The committed manifest carries FILLMEIN placeholders until Partner Center issues the real
+    # values, and packing refuses to proceed while they survive -- so a local build needs some
+    # identity to use, and editing the committed file to get one invites that edit being committed
+    # by accident. These write into the layout's copy instead; the file in packaging/ is never
+    # modified.
+    #
+    # A sideload package must also be signed, and the signing certificate's subject has to match
+    # -Publisher exactly or signtool refuses. Never pass these for a Store build: the Store package
+    # must carry the identity Partner Center issued, and nothing else.
+    [string] $IdentityName,
+    [string] $Publisher,
+    [string] $PublisherDisplayName,
+
     # Where the .msix lands. Under packaging/obj by default, which .gitignore's blanket obj/ rule
     # already covers, so a local build never drops a 100 MB untracked blob into a tracked directory.
     # Unlike the installer, this artifact is never committed: it goes to Partner Center, and to the
@@ -164,13 +179,27 @@ $manifestSource = Join-Path $PSScriptRoot 'AppxManifest.xml'
 # UTF-8 here, which is what the XML declaration says it is.
 $manifestText = [System.IO.File]::ReadAllText($manifestSource)
 
-# Only the Version attribute of <Identity> is rewritten. Matching the attribute rather than the
-# bare string keeps the 0.0.0.0 in the file's comments from being rewritten along with it.
-$manifestText = [regex]::Replace(
-    $manifestText,
-    '(<Identity\b[^>]*?\bVersion=")[^"]*(")',
-    { param($m) $m.Groups[1].Value + $packageVersion + $m.Groups[2].Value },
-    [System.Text.RegularExpressions.RegexOptions]::Singleline)
+# Attribute-scoped substitutions, all of them. Matching the attribute rather than the bare value
+# keeps the 0.0.0.0 and the FILLMEIN strings in the file's comments from being rewritten too.
+function Set-ManifestValue([string] $text, [string] $pattern, [string] $value) {
+    [regex]::Replace(
+        $text,
+        $pattern,
+        { param($m) $m.Groups[1].Value + $value + $m.Groups[2].Value },
+        [System.Text.RegularExpressions.RegexOptions]::Singleline)
+}
+
+$manifestText = Set-ManifestValue $manifestText '(<Identity\b[^>]*?\bVersion=")[^"]*(")' $packageVersion
+
+if ($IdentityName) {
+    $manifestText = Set-ManifestValue $manifestText '(<Identity\b[^>]*?\bName=")[^"]*(")' $IdentityName
+}
+if ($Publisher) {
+    $manifestText = Set-ManifestValue $manifestText '(<Identity\b[^>]*?\bPublisher=")[^"]*(")' $Publisher
+}
+if ($PublisherDisplayName) {
+    $manifestText = Set-ManifestValue $manifestText '(<PublisherDisplayName>)[^<]*(</PublisherDisplayName>)' $PublisherDisplayName
+}
 
 # UTF-8 without a BOM: makeappx reads the manifest as XML and a BOM ahead of the declaration is one
 # of the ways it fails with an unhelpful message.
@@ -193,8 +222,9 @@ packaging/AppxManifest.xml still has placeholder identity values:
   $($placeholders -join "`n  ")
 
 Fill in Name, Publisher and PublisherDisplayName from Partner Center -> your app ->
-Product management -> Product identity. Ingestion rejects the upload if they disagree, and the
-identity cannot be changed after the first accepted submission. See docs/STORE-MSIX.md.
+Product management -> "View app identity details". The values are case-sensitive, and spaces and
+punctuation must match too. Ingestion rejects the upload if they disagree, and the identity cannot
+be changed after the first accepted submission. See docs/STORE-MSIX.md.
 "@
     # Fatal only when a real package would come out the other end. -SkipPack exists to check that
     # the layout, the assets and the manifest still hold together, which is worth doing long before
@@ -208,16 +238,31 @@ Write-Host "Identity:    $($written.Package.Identity.Name) / $($written.Package.
 # Not strictly required for a package with no MRT-qualified resources, but VS emits one and
 # ingestion is happier with a package that looks like the ones it usually sees. Best effort: a
 # missing PRI is not worth failing a release over.
+#
+# Indexed from a staging directory holding only the manifest and Assets, never from the layout.
+# Pointed at the layout, makepri treats the .NET satellite assembly folders (cs, de, ja, ...) as
+# language qualifiers and emits a resources.language-*.pri for each, none of which the app uses:
+# those satellites are loaded by the CLR from disk, not through MRT. The Store's package
+# requirements warn that language codes the app does not really support "may cause delays or
+# failures in certification", so the stray indexes are worth not shipping. The manifest declares
+# en-us and the package now contains exactly that.
 if ($makepri) {
     $priConfig = Join-Path $PSScriptRoot 'obj\priconfig.xml'
+    $priStage = Join-Path $PSScriptRoot 'obj\pri'
+    if (Test-Path $priStage) { Remove-Item $priStage -Recurse -Force }
+    New-Item -ItemType Directory -Path $priStage -Force | Out-Null
+    Copy-Item $layoutManifest $priStage -Force
+    Copy-Item $assetsDir $priStage -Recurse -Force
+
     & $makepri createconfig /cf $priConfig /dq en-US /o | Out-Null
     if ($LASTEXITCODE -eq 0) {
-        & $makepri new /pr $layout /cf $priConfig /of (Join-Path $layout 'resources.pri') /o | Out-Null
+        & $makepri new /pr $priStage /cf $priConfig /of (Join-Path $layout 'resources.pri') /o | Out-Null
         if ($LASTEXITCODE -ne 0) { Write-Warning "makepri new failed ($LASTEXITCODE); packaging without resources.pri." }
     }
     else {
         Write-Warning "makepri createconfig failed ($LASTEXITCODE); packaging without resources.pri."
     }
+    Remove-Item $priStage -Recurse -Force -ErrorAction SilentlyContinue
     # priconfig.xml lives in obj/, never in the layout: makeappx rejects a package containing a
     # file the manifest does not account for being there by accident.
     Remove-Item $priConfig -Force -ErrorAction SilentlyContinue
