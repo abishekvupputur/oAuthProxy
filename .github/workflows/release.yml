@@ -105,6 +105,38 @@ jobs:
           Copy-Item "$publishDir/RavensPort.exe" $exeName
           echo "exePath=$exeName" >> $env:GITHUB_OUTPUT
 
+      # The Microsoft Store submission needs an installer, not the application: it runs this
+      # unattended and then looks for the product on the machine. The bare exe installed nothing,
+      # which is what failed certification under 10.1.2.10, 10.2.7 and 10.3.4 — see
+      # docs/STORE-SUBMISSION.md. Inno Setup ships on the windows runner images.
+      - name: Build installer
+        id: installer
+        shell: pwsh
+        run: |
+          # The tag carries a leading "v"; Inno's AppVersion and VersionInfoVersion want digits.
+          $version = "${{ steps.version.outputs.version }}" -replace '^v', ''
+
+          $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+          if (-not $iscc) {
+            $candidates = @(
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+            )
+            $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $found) { throw "Inno Setup (ISCC.exe) was not found on this runner." }
+            $iscc = $found
+          } else {
+            $iscc = $iscc.Source
+          }
+
+          & $iscc "installer\RavensPort.iss" "/DAppVersion=$version"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+          $setup = "dist/RavensPort-Setup-$version.exe"
+          if (-not (Test-Path $setup)) { throw "ISCC reported success but $setup is missing." }
+
+          echo "setupPath=$setup" >> $env:GITHUB_OUTPUT
+
       # Records which workflow, commit, and runner produced this exact exe, signed via the
       # job's OIDC identity. The free stand-in for Authenticode signing: it does not stop
       # SmartScreen warnings, but it does make the binary tamper-evident, so a downloaded exe
@@ -116,12 +148,18 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: ${{ steps.package.outputs.exePath }}
+          subject-path: |
+            ${{ steps.package.outputs.exePath }}
+            ${{ steps.installer.outputs.setupPath }}
 
+      # Both artifacts: the installer is what the Store submits and what most people should run,
+      # and the bare exe stays for anyone who wants to run it without installing anything.
       - name: Create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
           name: ${{ steps.version.outputs.version }}
           generate_release_notes: true
-          files: ${{ steps.package.outputs.exePath }}
+          files: |
+            ${{ steps.package.outputs.exePath }}
+            ${{ steps.installer.outputs.setupPath }}

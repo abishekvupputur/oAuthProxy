@@ -96,7 +96,7 @@ A separate proxy key per route and per funnel, each with its own expiry
 Keeps working while your password manager is locked, then syncs when it unlocks
 Activity log with redaction and rotation, readable in the app
 Vault integrity check that accounts for every item and changes nothing without your say-so
-Tray-resident: starts hidden, survives provider and network errors, single-instance guard
+Tray-resident: keeps running when you close the window, survives provider and network errors
 No telemetry, no analytics, no update checks — open source under the MIT License
 ```
 
