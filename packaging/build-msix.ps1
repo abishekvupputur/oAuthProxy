@@ -45,8 +45,8 @@ param(
 
     # Where the .msix lands. Under packaging/obj by default, which .gitignore's blanket obj/ rule
     # already covers, so a local build never drops a 100 MB untracked blob into a tracked directory.
-    # Unlike the installer, this artifact is never committed: it goes to Partner Center, and to the
-    # release repository, both of which host it themselves.
+    # Unlike the installer, this artifact is never committed: it is attached to a GitHub release
+    # and uploaded to Partner Center, both of which host it themselves.
     [string] $OutputDir = 'packaging/obj',
 
     # Builds the layout and stops. Enough to catch a broken manifest or a missing payload.

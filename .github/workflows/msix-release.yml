@@ -1,8 +1,8 @@
 name: Build and publish the Store MSIX
 
 # Runs when an MSIX tag is pushed (e.g. `git tag MSIX-v4.1.5 && git push origin MSIX-v4.1.5`):
-# test -> (if tests pass) publish -> pack the MSIX -> publish it as a release in
-# abishekvupputur/ravensPort-release.
+# test -> (if tests pass) publish -> pack the MSIX -> attach it to a release on that tag, here.
+# Download the asset and upload it to Partner Center.
 #
 # Separate from release.yml on purpose, and it touches nothing that workflow owns. The installer
 # release and the Store package now move independently: a Store resubmission does not need a new
@@ -21,7 +21,10 @@ on:
 
 # Third-party actions are pinned to commit SHAs, not tags, for the reason release.yml gives: a tag
 # is mutable, and whoever controls the action's repo could repoint it at new code that then runs in
-# a job holding a cross-repository write token.
+# a job holding contents:write and producing the binary users install.
+#
+# Read-only by default; the one job that needs to publish opts in below, so any job added later
+# starts with no write access rather than inheriting it.
 permissions:
   contents: read
 
@@ -29,17 +32,16 @@ jobs:
   build-msix:
     runs-on: windows-latest
     permissions:
-      contents: read # nothing is written back to *this* repository
+      contents: write # create the release and upload the package
       id-token: write # OIDC token used to sign the build provenance attestation
       attestations: write # publish that attestation to this repo
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # The release is created through the GitHub API with a token passed explicitly to the
-          # step that needs it, not by a git push, so nothing needs credentials in .git/config --
-          # and the token here can write to another repository, which makes one left lying around
-          # worse than usual.
+          # The release is published through the GitHub API by the step below, not by a git push,
+          # so nothing needs credentials in .git/config -- and this job holds contents:write, which
+          # makes a token left lying there the worst one to leak.
           persist-credentials: false
 
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
@@ -125,8 +127,8 @@ jobs:
           echo "packagePath=$package" >> $env:GITHUB_OUTPUT
 
       # Records which workflow, commit, and runner produced this exact package, signed via the job's
-      # OIDC identity. The attestation is stored against *this* repository even though the asset is
-      # published to the release repository, so verification names this one:
+      # OIDC identity. It does nothing about the Store copy -- Microsoft re-signs that during
+      # ingestion -- but it makes the release asset tamper-evident:
       #
       #   gh attestation verify RavensPort-<version>.msix --repo ${{ github.repository }}
       #
@@ -136,24 +138,21 @@ jobs:
         with:
           subject-path: ${{ steps.msix.outputs.packagePath }}
 
-      # Publishes into abishekvupputur/ravensPort-release rather than this repository. GITHUB_TOKEN
-      # is scoped to the repository the workflow runs in and cannot write to another one, so this
-      # needs a separate credential: create a fine-grained PAT with Contents: read and write on
-      # ravensPort-release only, and store it here as the RELEASE_REPO_TOKEN secret.
+      # A release in this repository, on the MSIX-v* tag that triggered the run, with the package
+      # attached. GITHUB_TOKEN is enough because nothing crosses a repository boundary -- no PAT,
+      # and no separate release repository to keep in step with this one.
       #
-      # target_commitish is the release repository's branch, not a SHA from this one -- that repo
-      # has no commit matching this build, so the tag is created on its default branch instead. It
-      # must therefore have at least one commit on `main` before the first run.
+      # The MSIX-v* release sits alongside the v* installer releases rather than replacing them:
+      # the two artifacts are built from the same commit but answer to different audiences, and a
+      # Store resubmission should not have to drag an installer release along with it.
       #
-      # generate_release_notes is off for the same reason: there is no commit history over there to
-      # generate notes from.
-      - name: Publish to the release repository
+      # generate_release_notes is off deliberately. It diffs against the previous tag, which for an
+      # MSIX-v* tag is usually a v* installer tag, so the generated notes would describe the wrong
+      # span of commits. The body below says what the artifact actually is instead.
+      - name: Publish the release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          repository: abishekvupputur/ravensPort-release
-          token: ${{ secrets.RELEASE_REPO_TOKEN }}
           tag_name: ${{ steps.version.outputs.tag }}
-          target_commitish: main
           name: RavensPort ${{ steps.version.outputs.version }} (MSIX)
           generate_release_notes: false
           files: ${{ steps.msix.outputs.packagePath }}

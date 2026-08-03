@@ -33,7 +33,8 @@ Center has on file.
 
 ## One-time setup
 
-Three things, in this order. The third is effectively irreversible.
+Two things, in this order. The second is effectively irreversible. No tokens or secrets are
+involved: the workflow publishes into this repository with the built-in `GITHUB_TOKEN`.
 
 ### 1. Partner Center
 
@@ -43,22 +44,7 @@ MSIX and EXE/MSI are different app types and cannot share a reserved name.
    explicitly: the name cannot be reserved twice.
 2. Create a new app of the MSIX type and reserve `RavensPort` for it.
 
-### 2. The release repository
-
-The workflow publishes to [`abishekvupputur/ravensPort-release`](https://github.com/abishekvupputur/ravensPort-release),
-not to this repository.
-
-- That repository needs **at least one commit on `main`**. A GitHub release must point at a
-  commitish, and no commit from this repository exists over there, so the workflow creates the tag
-  on the release repository's default branch instead. A repository with no commits has no branch to
-  create it on and the step fails.
-- `GITHUB_TOKEN` is scoped to the repository a workflow runs in and cannot write to another one.
-  Create a **fine-grained personal access token** with `Contents: read and write`, scoped to
-  `ravensPort-release` **only**, and add it to this repository as the secret
-  **`RELEASE_REPO_TOKEN`**. Nothing else in this repository reads that secret, and no other workflow
-  needs it.
-
-### 3. Package identity
+### 2. Package identity
 
 Open **Product management -> "View app identity details"** in Partner Center and copy three values
 into [../packaging/AppxManifest.xml](../packaging/AppxManifest.xml), replacing the `FILLMEIN` ones.
@@ -82,9 +68,13 @@ git push origin MSIX-v4.1.5
 ```
 
 Tags are case-sensitive: `MSIX-v4.1.5`, not `msix-v4.1.5`. The workflow runs the test suite first
-and stops on failure, then publishes, packs, attests, and creates the release in
-`ravensPort-release` with `RavensPort-4.1.5.msix` attached. Download that asset and upload it to
-Partner Center.
+and stops on failure, then publishes, packs, attests, and creates a release on that tag in this
+repository with `RavensPort-4.1.5.msix` attached. Download that asset and upload it to Partner
+Center.
+
+The MSIX release sits alongside the `v*` installer releases rather than replacing them. Both come
+from the same commit, but they answer to different audiences, and a Store resubmission should not
+have to drag an installer release along with it.
 
 The version comes off the tag, so `MSIX-v4.1.5` produces a `4.1.5.0` package. MSIX wants four parts
 and the Store reserves the fourth, so `build-msix.ps1` pads rather than letting you set it.
