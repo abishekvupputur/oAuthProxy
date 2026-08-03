@@ -32,9 +32,17 @@ and served from `raw.githubusercontent.com`, exactly as `dist/RavensPort-v3.0.2.
 https://raw.githubusercontent.com/abishekvupputur/ravensPort/main/dist/RavensPort-Setup-<version>.exe
 ```
 
-Commit the new installer to `dist/` and delete the superseded one in the same commit. Note that
-`dist/RavensPort-v3.0.2.exe` is currently three minor versions behind `Directory.Build.props`
-(4.1.4) — whatever is submitted must be the version the listing claims.
+Commit the new installer to `dist/` and delete the superseded one in the same commit. `dist/` now
+holds `RavensPort-Setup-4.1.4.exe`, which is what the current submission points at; the bare
+`RavensPort-v3.0.2.exe` it replaced is gone. Whatever is submitted must be the version the listing
+claims, so a bump in `Directory.Build.props` means a new blob before the next submission.
+
+Prefer a commit-pinned URL over `/main/`. The bytes at a SHA can never change, which is the
+property a store listing wants:
+
+```
+https://raw.githubusercontent.com/abishekvupputur/ravensPort/<commit-sha>/dist/RavensPort-Setup-<version>.exe
+```
 
 ## Partner Center answers
 
@@ -65,18 +73,16 @@ already bound to the Windows account.
 5. Tray → Exit quits. Launching from the Start menu again brings it straight back.
 6. Launching while it is already running brings the existing window forward.
 
-## Two payloads, on purpose
+## Why the payload is published uncompressed
 
-The release workflow publishes twice, and the difference matters:
+The release workflow publishes with `EnableCompressionInSingleFile=false`, giving a 243 MB payload
+that the installer compresses down to **67.9 MB**. That looks backwards until you measure it.
 
-| Artifact | Publish | Size |
-|---|---|---|
-| `RavensPort-<tag>.exe` (release asset) | `EnableCompressionInSingleFile=true` | 99 MB |
-| Installer payload | `EnableCompressionInSingleFile=false` | 243 MB raw → **67.9 MB** installed in the setup |
-
-The bare exe is downloaded directly, so it wants single-file's own compression. The installer wants
-the opposite, because it compresses its own payload and LZMA2 has far more to work with when the
-input has not already been deflated. Measured, all three combinations:
+Single-file's own compression is what you want for an exe that is downloaded and run directly — it
+was 99 MB that way, and that is what the release asset used to be, before the installer became the
+only asset. The installer wants the opposite, because it compresses its payload itself and LZMA2 has
+far more to work with when the input has not already been deflated. Measured, all three
+combinations:
 
 | Payload | Installer compression | Result |
 |---|---|---|
@@ -112,7 +118,7 @@ dotnet publish src/RavensPort.App/RavensPort.App.csproj -p:PublishProfile=win-x6
   -c Release -p:EnableCompressionInSingleFile=false `
   -p:PublishDir="bin\Release\net8.0-windows\publish\win-x64-raw\"
 
-& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\RavensPort.iss /DAppVersion=4.1.4 `
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\RavensPort.iss /DAppVersion=4.1.5 `
   /DSourceExe=..\src\RavensPort.App\bin\Release\net8.0-windows\publish\win-x64-raw\RavensPort.exe
 ```
 

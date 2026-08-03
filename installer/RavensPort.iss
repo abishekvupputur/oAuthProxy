@@ -13,7 +13,7 @@
 ; scope: its configuration lives in the user's password manager, and its session key is already
 ; bound to the Windows account.
 ;
-; Build:  ISCC.exe installer\RavensPort.iss /DAppVersion=4.1.4
+; Build:  ISCC.exe installer\RavensPort.iss /DAppVersion=4.1.5
 ; The publish step must have run first — see SourceExe below.
 
 #ifndef AppVersion
