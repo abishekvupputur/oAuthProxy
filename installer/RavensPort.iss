@@ -13,7 +13,7 @@
 ; scope: its configuration lives in the user's password manager, and its session key is already
 ; bound to the Windows account.
 ;
-; Build:  ISCC.exe installer\RavensPort.iss /DAppVersion=4.1.3
+; Build:  ISCC.exe installer\RavensPort.iss /DAppVersion=4.1.4
 ; The publish step must have run first — see SourceExe below.
 
 #ifndef AppVersion
@@ -28,6 +28,13 @@
 ; Overridable so the payload location can be pointed elsewhere without editing this file.
 #ifndef SourceExe
   #define SourceExe "..\src\RavensPort.App\bin\Release\net8.0-windows\publish\win-x64\RavensPort.exe"
+#endif
+
+; Also overridable, so the PR build can prove this script still compiles in seconds rather than
+; spending 80 of them on LZMA2 to produce an installer nobody will ever run. Releases must use the
+; default -- see the Compression note below for why the size matters.
+#ifndef CompressionMode
+  #define CompressionMode "lzma2/max"
 #endif
 
 [Setup]
@@ -75,11 +82,12 @@ SetupIconFile=..\src\RavensPort.App\Assets\tray.ico
 LicenseFile=..\LICENSE
 
 ; The payload must be published with EnableCompressionInSingleFile=false and compressed here
-; instead. Single-file's own deflate produced a 99 MB exe that LZMA could not improve on, and the
-; resulting 101.6 MB installer was over GitHub's 100 MB blob limit -- which the Store submission
-; depends on, since it needs a redirect-free raw.githubusercontent.com URL. LZMA2 on the raw
-; payload gets there comfortably, and drops the runtime self-extraction step as a bonus.
-Compression=lzma2/max
+; instead. Measured: the already-deflated 99 MB exe gives 101.6 MB at Compression=none and 94 MB
+; at lzma2/max, while the raw 243 MB payload gives 67.9 MB. The limit that matters is GitHub's
+; 100 MB per file -- the Store submission is served from a blob in dist/, because it needs a
+; redirect-free raw.githubusercontent.com URL -- so the first is unusable and the second leaves
+; no room to grow. Compressing the raw payload also drops the runtime self-extraction step.
+Compression={#CompressionMode}
 SolidCompression=yes
 
 WizardStyle=modern
