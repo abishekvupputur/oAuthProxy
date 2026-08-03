@@ -24,7 +24,10 @@ jobs:
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.22.x"
+          # go.mod is the only place the Go version is written down. Pinning it here as
+          # well drifts: setup-go v5 hid that by letting the toolchain download whatever
+          # go.mod asked for, and v6 runs GOTOOLCHAIN=local, so a stale pin now fails.
+          go-version-file: src/OnePasswordNative/go.mod
           # The module lives under src/, so the default repository-root lookup finds no
           # go.sum and the module cache is silently skipped.
           cache-dependency-path: src/OnePasswordNative/go.sum
