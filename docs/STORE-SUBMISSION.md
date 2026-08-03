@@ -65,18 +65,50 @@ already bound to the Windows account.
 5. Tray → Exit quits. Launching from the Start menu again brings it straight back.
 6. Launching while it is already running brings the existing window forward.
 
+## Two payloads, on purpose
+
+The release workflow publishes twice, and the difference matters:
+
+| Artifact | Publish | Size |
+|---|---|---|
+| `RavensPort-<tag>.exe` (release asset) | `EnableCompressionInSingleFile=true` | 99 MB |
+| Installer payload | `EnableCompressionInSingleFile=false` | 243 MB raw → **67.9 MB** installed in the setup |
+
+The bare exe is downloaded directly, so it wants single-file's own compression. The installer
+compresses its own payload, and LZMA2 cannot improve on an already-deflated blob — compressing the
+compressed exe produced a **101.6 MB** installer, over GitHub's 100 MB file limit, which would have
+made the `dist/` blob unpushable and the redirect-free URL impossible. Handing LZMA2 the raw
+payload gives 67.9 MB, with 32 MB of headroom, and drops the runtime self-extraction step.
+
+## Architecture
+
+`ArchitecturesAllowed=x64compatible`, not `x64`. The latter is deprecated and now resolves to
+`x64os` — x64 hardware only — which **refuses to install on an ARM64 Windows device**, even though
+the payload runs there fine under emulation. Recent Surface Laptops are ARM64, and a Surface Laptop
+is what certification tested on, so this alone could have reproduced 10.3.4.
+
+The script falls back to `x64` when compiled by Inno older than 6.3, where `x64compatible` is a
+hard error. That narrows the audience rather than breaking the build, so check the CI log if the
+installer ever stops working on ARM64.
+
 ## Re-verifying before resubmission
 
-The installer is compiled in CI, so the first tag push after this change is what proves the script
-compiles. To check locally, install Inno Setup 6 and run:
+Verified locally against Inno Setup 6.7.3: compiles clean, exit code 0, 67.9 MB output. To repeat:
 
 ```powershell
-dotnet publish src/RavensPort.App/RavensPort.App.csproj -p:PublishProfile=win-x64-selfcontained -c Release
-& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\RavensPort.iss /DAppVersion=4.1.3
+dotnet publish src/RavensPort.App/RavensPort.App.csproj -p:PublishProfile=win-x64-selfcontained `
+  -c Release -p:EnableCompressionInSingleFile=false `
+  -p:PublishDir="bin\Release\net8.0-windows\publish\win-x64-raw\"
+
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\RavensPort.iss /DAppVersion=4.1.3 `
+  /DSourceExe=..\src\RavensPort.App\bin\Release\net8.0-windows\publish\win-x64-raw\RavensPort.exe
 ```
 
-Then walk points 1–6 above on a machine that has never had RavensPort installed. Point 1 in
-particular cannot be checked by running the installer interactively — use the silent switches.
+Compilation takes about 80 seconds — LZMA2 on a 243 MB payload, not a hang.
+
+Then walk points 1–6 above on a machine that has never had RavensPort installed, **including an
+ARM64 one if you can get hold of it**. Point 1 in particular cannot be checked by running the
+installer interactively — use the silent switches.
 
 ## Not addressed here
 

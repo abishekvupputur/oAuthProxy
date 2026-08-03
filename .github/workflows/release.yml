@@ -86,6 +86,32 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
 
+      # A second, uncompressed publish, used only as the installer's payload.
+      #
+      # The two artifacts want opposite things. The bare exe is downloaded directly, so it wants
+      # single-file's own compression (99 MB rather than 243 MB). The installer compresses its
+      # payload itself, and LZMA2 cannot improve on an already-deflated blob: compressing the
+      # compressed exe produced a 101.6 MB installer, over the 100 MB limit GitHub enforces on
+      # files in a repository -- which the Store submission depends on, because it needs a
+      # redirect-free raw.githubusercontent.com URL. Handing LZMA2 the raw payload instead gives
+      # 67.9 MB, and skips the runtime self-extraction step as well.
+      - name: Publish (uncompressed payload for the installer)
+        shell: pwsh
+        run: |
+          $publishArgs = @(
+            'publish', 'src/RavensPort.App/RavensPort.App.csproj',
+            '-p:PublishProfile=win-x64-selfcontained',
+            '-c', 'Release',
+            '-p:EnableCompressionInSingleFile=false',
+            '-p:PublishDir=bin\Release\net8.0-windows\publish\win-x64-raw\'
+          )
+          & dotnet @publishArgs
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "First publish attempt failed - retrying once (WPF markup-compile race)"
+            & dotnet @publishArgs
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
       - name: Determine version
         id: version
         shell: pwsh
@@ -129,7 +155,9 @@ jobs:
             $iscc = $iscc.Source
           }
 
-          & $iscc "installer\RavensPort.iss" "/DAppVersion=$version"
+          $payload = "..\src\RavensPort.App\bin\Release\net8.0-windows\publish\win-x64-raw\RavensPort.exe"
+
+          & $iscc "installer\RavensPort.iss" "/DAppVersion=$version" "/DSourceExe=$payload"
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
           $setup = "dist/RavensPort-Setup-$version.exe"
