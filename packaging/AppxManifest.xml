@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSIX package manifest for the Microsoft Store submission.
+
+  ASCII only in this file, following the same rule installer/build.ps1 states for itself: it is read
+  and rewritten by a PowerShell script, and Windows PowerShell 5.1 turns a UTF-8 em dash into three
+  bytes of mojibake on the way through.
+
+  Why this exists: Store policy 10.2.9 requires every PE file in an EXE/MSI submission to be
+  Authenticode-signed by a CA in the Microsoft Trusted Root Program. The Inno installer and its
+  payload are not, and a code-signing certificate is a recurring cost. Packages submitted as MSIX
+  are signed by Microsoft during ingestion instead, at no cost - so the package uploaded to Partner
+  Center is deliberately *unsigned*. Signing it locally would break ingestion, because the
+  certificate subject would not match the publisher Partner Center has on file.
+
+  The Inno installer in installer/ is untouched and still ships on the GitHub release. This is the
+  Store artifact only, built by the MSIX-v* tag workflow.
+
+  IDENTITY VALUES BELOW MUST MATCH PARTNER CENTER EXACTLY.
+  Copy them from Partner Center -> your app -> Product management -> Product identity:
+    Identity/Name                   <- "Package/Identity/Name"
+    Identity/Publisher              <- "Package/Identity/Publisher"  (the CN=... string)
+    Properties/PublisherDisplayName <- "Package/Properties/PublisherDisplayName"
+  Ingestion rejects the upload if any of the three disagrees, and the identity cannot be changed
+  after the first accepted submission. build-msix.ps1 refuses to pack while any of those three
+  fields still starts with the placeholder marker.
+
+  Version is the one field the build injects: packaging/build-msix.ps1 rewrites the 0.0.0.0 below
+  from -Version. The Store reserves the fourth part, which must stay 0.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <Identity
+    Name="FILLMEIN.PartnerCenterPackageIdentityName"
+    Publisher="CN=FILLMEIN-PARTNER-CENTER-PUBLISHER-ID"
+    Version="0.0.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>RavensPort</DisplayName>
+    <PublisherDisplayName>FILLMEIN Publisher Display Name</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <!--
+      Matches SupportedOSPlatformVersion in Directory.Build.props and MinVersion in
+      RavensPort.iss: Windows 10 1809. MaxVersionTested only records what the package was built
+      against; it does not cap the versions it installs on.
+    -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <!--
+      EntryPoint="Windows.FullTrustApplication" is what makes this a packaged desktop app rather
+      than a UWP one: it runs outside AppContainer, with the same rights as the user. That is what
+      keeps the parts of RavensPort that would otherwise be blocked working unchanged - the
+      HttpListener/Kestrel loopback sockets on 127.0.0.1, launching pass-cli as a child process,
+      and P/Invoking the bundled Go DLL.
+    -->
+    <Application Id="RavensPort" Executable="RavensPort.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="RavensPort"
+        Description="A local OAuth proxy that keeps API credentials in your password manager instead of in config files."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          ShortName="RavensPort"
+          Square71x71Logo="Assets\Square71x71Logo.png"
+          Square310x310Logo="Assets\Square310x310Logo.png"
+          Wide310x150Logo="Assets\Wide310x150Logo.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!--
+      The only capability a full-trust packaged desktop app needs. Capabilities are not enforced
+      outside AppContainer, so declaring internetClient and the rest would add permission lines to
+      the Store listing without changing what the app can do.
+    -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>
