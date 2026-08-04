@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 
 PackageIdentifier: AbishekNarasimhan.RavensPort
-PackageVersion: 4.1.5
+PackageVersion: 4.1.6
 Platform:
 - Windows.Desktop
 # Matches MinVersion in installer/RavensPort.iss and SupportedOSPlatformVersion in
@@ -24,12 +24,12 @@ ProductCode: '{C47DF74F-150F-4AD3-9B12-46A8BF02BE9C}_is1'
 ExpectedReturnCodes:
 - InstallerReturnCode: 7
   ReturnResponse: packageInUse
-ReleaseDate: 2026-08-03
+ReleaseDate: 2026-08-04
 Installers:
 # ArchitecturesAllowed=x64compatible, so this also installs and runs on ARM64 Windows under
 # emulation; winget treats x64 as applicable there.
 - Architecture: x64
-  InstallerUrl: https://github.com/abishekvupputur/ravensPort/releases/download/v4.1.5/RavensPort-Setup-4.1.5.exe
-  InstallerSha256: BC5B21F91B5DCDFC5C1F91333F5C0EA25C449FB497EAA77AB727F4EAF501CEFA
+  InstallerUrl: https://github.com/abishekvupputur/ravensPort/releases/download/v4.1.6/RavensPort-Setup-4.1.6.exe
+  InstallerSha256: 5265CA98C8CAD9ABFBEFAFDC463746BD9BA5CC9FEE7BE57645193EEACE2B73CA
 ManifestType: installer
 ManifestVersion: 1.12.0

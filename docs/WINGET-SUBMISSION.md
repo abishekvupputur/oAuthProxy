@@ -119,10 +119,10 @@ implies a relationship with Microsoft.
   | silent uninstall | no | 0 |
 
   An interactive run is turned away by `InitializeSetup` with a Retry/Cancel box instead, so the
-  user is not made to click through the whole wizard first. **This landed after 4.1.5**, whose
-  installer still returns 1, so the mapping only does anything from the next release onward —
-  submit that one rather than 4.1.5, and refresh `PackageVersion`, `InstallerUrl`,
-  `InstallerSha256`, `ReleaseDate` and `ReleaseNotesUrl` for it.
+  user is not made to click through the whole wizard first. **This shipped in 4.1.6**, which is why
+  that is the first version submitted; 4.1.5's installer still returns 1, and the published
+  `RavensPort-Setup-4.1.6.exe` was re-checked against a held mutex before the manifest claimed
+  otherwise.
 
 - *Do not submit prerelease tags.* `v4.1.4 - beta` and anything like it stays out; winget has no
   prerelease channel, so a beta would need its own identifier.
