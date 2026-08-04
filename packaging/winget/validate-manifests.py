@@ -1,0 +1,108 @@
+"""Validate the winget manifests against the published JSON schemas.
+
+`winget validate` would be the obvious tool, but winget.exe is not present on GitHub's Windows
+runner images -- App Installer is not provisioned in the Server SKUs -- so this checks the same
+thing the only other way available: fetch the schema each manifest declares and validate against
+it. That catches a malformed manifest at commit time instead of on a winget-pkgs pull request,
+where the round trip costs a resubmission.
+
+It deliberately does not reimplement winget's semantic rules (identifier casing against the
+directory path, hash matching the installer). Those live in the pipeline, and guessing at them
+here would produce a check that disagrees with the real one.
+
+Usage:  python packaging/winget/validate-manifests.py [manifest-dir]
+"""
+
+import json
+import pathlib
+import sys
+import urllib.request
+
+import yaml
+from jsonschema import Draft7Validator
+
+# ManifestType as written in each file -> the name that type carries in the schema URL.
+SCHEMA_NAMES = {
+    "version": "version",
+    "installer": "installer",
+    "defaultLocale": "defaultLocale",
+    "locale": "locale",
+}
+
+SCHEMA_URL = (
+    "https://raw.githubusercontent.com/microsoft/winget-cli/master"
+    "/schemas/JSON/manifests/v{version}/manifest.{name}.{version}.json"
+)
+
+_schema_cache = {}
+
+
+class ManifestLoader(yaml.SafeLoader):
+    """SafeLoader that leaves dates as the strings the schema expects.
+
+    YAML resolves an unquoted 2026-08-04 to a datetime.date, and jsonschema then rejects
+    ReleaseDate for not being a string -- on a manifest winget itself accepts. The manifests are
+    correct; the default loader is what is wrong for this job.
+    """
+
+
+ManifestLoader.add_constructor(
+    "tag:yaml.org,2002:timestamp", lambda loader, node: loader.construct_scalar(node)
+)
+
+
+def read_manifest(path):
+    return yaml.load(path.read_text(encoding="utf-8"), Loader=ManifestLoader)
+
+
+def load_schema(name, version):
+    key = (name, version)
+    if key not in _schema_cache:
+        url = SCHEMA_URL.format(name=name, version=version)
+        with urllib.request.urlopen(url, timeout=30) as response:
+            _schema_cache[key] = json.load(response)
+    return _schema_cache[key]
+
+
+def main(directory):
+    manifests = sorted(pathlib.Path(directory).glob("*.yaml"))
+    if not manifests:
+        sys.exit(f"No .yaml manifests found in {directory}")
+
+    documents = {path: read_manifest(path) for path in manifests}
+
+    failures = 0
+    for path, document in documents.items():
+        manifest_type = document.get("ManifestType")
+        manifest_version = document.get("ManifestVersion")
+        if manifest_type not in SCHEMA_NAMES:
+            print(f"FAIL {path.name}: unknown ManifestType {manifest_type!r}")
+            failures += 1
+            continue
+
+        schema = load_schema(SCHEMA_NAMES[manifest_type], manifest_version)
+        errors = sorted(Draft7Validator(schema).iter_errors(document), key=lambda e: e.path)
+        if errors:
+            failures += 1
+            print(f"FAIL {path.name}  (schema {manifest_type} {manifest_version})")
+            for error in errors:
+                location = "/".join(str(part) for part in error.path) or "(root)"
+                print(f"       {location}: {error.message}")
+        else:
+            print(f"ok   {path.name}  (schema {manifest_type} {manifest_version})")
+
+    # Every submission is a set: winget-pkgs rejects a version manifest without the installer and
+    # locale manifests beside it, so a directory that validates file by file can still be wrong.
+    types = {document.get("ManifestType") for document in documents.values()}
+    for required in ("version", "installer", "defaultLocale"):
+        if required not in types:
+            print(f"FAIL missing a {required} manifest; a submission needs all three")
+            failures += 1
+
+    if failures:
+        sys.exit(f"\n{failures} problem(s) found.")
+    print(f"\nAll {len(manifests)} manifests validate.")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1] if len(sys.argv) > 1 else "packaging/winget")

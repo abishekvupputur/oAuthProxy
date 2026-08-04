@@ -84,6 +84,46 @@ It downloads the installer, computes the SHA256, and opens the PR. The same comm
 unattended from `release.yml` via the `microsoft/winget-create` action if this is ever worth
 automating; it needs a PAT with `public_repo` on the fork.
 
+## Failing here instead of over there
+
+`installer-scan.yml` runs the two checks that decide a winget submission, on every pull request and
+every version tag, and `release.yml` runs the same two scripts again as a gate so nothing reaches a
+release without them:
+
+| Script | Stands in for |
+|---|---|
+| `installer/scan-installer.ps1` | The pipeline's Defender scan — `Binary-Validation-Error`, `Validation-Defender-Error` |
+| `installer/test-install.ps1` | The clean-machine install test — `Validation-Unattended-Failed`, `Validation-Executable-Error`, `Validation-Uninstall-Error`, `Version-Parameter-Mismatch` |
+
+A GitHub runner is thrown away after every job, so it is already the clean machine that test wants.
+Windows Sandbox, which winget's own `SandboxTest.ps1` uses, needs nested virtualisation and is not
+available on hosted runners.
+
+`test-install.ps1` asserts what the pipeline asserts: silent install exits 0, the exe and the Start
+menu shortcut exist, the Add or Remove Programs entry is written, its `DisplayVersion` matches
+`PackageVersion` — that last comparison is the whole of `Version-Parameter-Mismatch` — the
+application stays up for 15 seconds rather than exiting, and the uninstall removes all three.
+
+Two things worth knowing before running these by hand:
+
+- **`scan-installer.ps1` needs Defender enabled and an elevated shell.** With a third-party
+  antivirus installed, Defender is switched off and `MpCmdRun` returns exit 2 with
+  `Product/Feature disabled`. Exit 2 also means "threat found", so the script separates the two by
+  reading the output rather than trusting the code — a scan that could not run is reported as
+  unscanned, never as clean, and either way the build fails.
+- **`test-install.ps1` installs RavensPort.** It is written for a runner that gets discarded. It
+  refuses to start if RavensPort is already installed, because a pre-existing install would make
+  every assertion pass for the wrong reason.
+
+The manifests are checked separately, on Linux, by `packaging/winget/validate-manifests.py`.
+`winget validate` is not an option in CI — winget.exe is not on GitHub's Windows runner images,
+since App Installer is not provisioned in the Server SKUs — so it validates against the same
+published JSON schemas the tool would use. Run it locally with:
+
+```powershell
+python packaging/winget/validate-manifests.py packaging/winget
+```
+
 ## Where this package stands against the policies
 
 Checked against the [Windows Package Manager policies][policies]. Nothing below is a blocker, but

@@ -131,6 +131,27 @@ jobs:
 
           echo "setupPath=$setup" >> $env:GITHUB_OUTPUT
 
+      # --- Gate: nothing ships unscanned --------------------------------------------------------
+      # installer-scan.yml runs these same two scripts on every pull request and on this tag, so in
+      # the ordinary course of events they have already passed by the time this job starts. They
+      # run again here because that workflow is a separate run: it can be skipped, cancelled, or
+      # simply not have finished, and none of those should be able to put an installer in front of
+      # a user. A failure here stops the job, so no release is created and no asset is attached.
+      #
+      # They are also the two checks winget's validation pipeline applies -- a Defender scan of the
+      # installer, then an unattended install, launch, and uninstall on a clean machine -- which
+      # makes a green release a package already known to survive submission. See
+      # docs/WINGET-SUBMISSION.md.
+      - name: Scan the installer with Microsoft Defender
+        shell: pwsh
+        run: ./installer/scan-installer.ps1 -Path '${{ steps.installer.outputs.setupPath }}'
+
+      - name: Install, launch, and uninstall the installer
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}" -replace '^v', ''
+          ./installer/test-install.ps1 -SetupExe '${{ steps.installer.outputs.setupPath }}' -Version $version
+
       # --- Microsoft Store package -------------------------------------------------------------
       # The Store submission is this MSIX, not the installer above. Policy 10.2.9 requires every PE
       # in an EXE/MSI submission to be signed by a CA in the Microsoft Trusted Root Program, and the

@@ -1,0 +1,136 @@
+name: Installer scan
+
+# The checks the winget validation pipeline runs, run here first.
+#
+# CodeQL and Trivy already cover the source and its dependencies. Neither looks at the artifact
+# people actually download, which is what winget attacks: it scans the installer with Defender,
+# then installs it on a clean machine, launches the application, and uninstalls it. A failure over
+# there costs a resubmission and, for a Defender hit, a false-positive report to Microsoft. The
+# same failure here costs one build.
+#
+# Runs on pull requests and on version tags. release.yml runs the same two scripts again before it
+# publishes anything, so a tag that somehow reaches release without passing here still cannot ship
+# an unscanned installer -- see the note on that job.
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    tags: ["v*"]
+
+# Third-party actions are pinned to commit SHAs, not tags, for the reason spelled out in
+# release.yml: a tag is mutable and whoever controls the action's repo can repoint it.
+#
+# Nothing here writes anywhere. The job installs software on its own runner and throws the runner
+# away; it needs no more than the ability to read the code it is building.
+permissions:
+  contents: read
+
+jobs:
+  # Cheap, no build, and the failure it catches is the most embarrassing one: a manifest that is
+  # simply malformed. Kept separate from the Windows job so it reports in seconds rather than
+  # waiting on an eight-minute build it has nothing to do with.
+  manifests:
+    name: Validate winget manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      # Deliberately not actions/setup-python: the runner image already has a Python new enough
+      # for this, and skipping the action is one fewer third-party dependency in a security check.
+      - name: Install validator dependencies
+        run: python3 -m pip install --quiet pyyaml jsonschema
+
+      # winget.exe is not on GitHub's Windows runner images -- App Installer is not provisioned in
+      # the Server SKUs -- so `winget validate` cannot run in CI at all. This validates against the
+      # same published schemas instead.
+      - name: Validate manifests against the published schemas
+        run: python3 packaging/winget/validate-manifests.py packaging/winget
+
+  installer:
+    name: Scan and test the installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: "8.0.x"
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: src/OnePasswordNative/go.mod
+          cache-dependency-path: src/OnePasswordNative/go.sum
+
+      - name: Restore
+        run: dotnet restore RavensPort.slnx --locked-mode
+
+      - name: Build Go DLL
+        shell: pwsh
+        run: |
+          cd src/OnePasswordNative
+          $env:CGO_ENABLED = "1"
+          go build -buildmode=c-shared -o onepassword.dll main.go
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Publish (payload for the installer)
+        shell: pwsh
+        run: |
+          $publishArgs = @(
+            'publish', 'src/RavensPort.App/RavensPort.App.csproj',
+            '-p:PublishProfile=win-x64-selfcontained',
+            '-c', 'Release',
+            '-p:EnableCompressionInSingleFile=false',
+            '-p:PublishDir=bin\Release\net8.0-windows\publish\win-x64-raw\'
+          )
+          & dotnet @publishArgs
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "First publish attempt failed - retrying once (WPF markup-compile race)"
+            & dotnet @publishArgs
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          # On a tag the tag wins; on a pull request there is no tag, so fall back to the number
+          # the binary will actually carry. Both feed the ARP DisplayVersion assertion below, and
+          # a wrong guess there would fail the test for the wrong reason.
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          } else {
+            $version = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version
+          }
+          Write-Host "version=$version"
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+
+      # The release compression, not the fast one the PR script check uses. Defender scans what is
+      # inside the installer, so a differently-compressed build is a different scan -- and this has
+      # to be the artifact that would actually be published.
+      - name: Build installer
+        id: installer
+        shell: pwsh
+        run: |
+          $setup = ./installer/build.ps1 `
+            -Version "${{ steps.version.outputs.version }}" `
+            -SourceExe 'src/RavensPort.App/bin/Release/net8.0-windows/publish/win-x64-raw/RavensPort.exe' `
+            | Select-Object -Last 1
+
+          echo "setupPath=$setup" >> $env:GITHUB_OUTPUT
+
+      - name: Scan with Microsoft Defender
+        shell: pwsh
+        run: ./installer/scan-installer.ps1 -Path '${{ steps.installer.outputs.setupPath }}'
+
+      # Last, because it leaves the runner dirty on the way through, and because a Defender
+      # detection should stop things before the installer is executed rather than after.
+      - name: Install, launch, and uninstall
+        shell: pwsh
+        run: |
+          ./installer/test-install.ps1 `
+            -SetupExe '${{ steps.installer.outputs.setupPath }}' `
+            -Version "${{ steps.version.outputs.version }}"
