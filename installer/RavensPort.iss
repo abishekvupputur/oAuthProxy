@@ -98,10 +98,15 @@ DisableDirPage=auto
 RestartIfNeededByRun=no
 CloseApplications=no
 
-; Lets Setup notice a running copy and say so, rather than failing to overwrite a locked exe.
+; A running copy is detected in [Code] rather than by AppMutex here. Both notice the same mutex and
+; both refuse to overwrite a locked exe; the difference is the exit code. AppMutex checks before
+; Setup has properly started and aborts with 1, "Setup failed to initialize" -- which is also what a
+; corrupt download or the wrong architecture returns, so it cannot be told apart from those. The
+; PrepareToInstall check below aborts with 7 instead, a code nothing else in Setup produces, so
+; winget can map it to "close the application and try again". See the [Code] section.
+;
 ; Deliberately not CloseApplications=force: exiting RavensPort can prompt about vault changes
 ; that exist only in memory, and a forced kill would discard them silently.
-AppMutex=RavensPort_SingleInstance
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -124,3 +129,58 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 ; desktop — and so the install step ends when the installer does, rather than when the app is
 ; closed. nowait for the same reason.
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// Pascal Script, so comments here are // and not the ; used by the sections above.
+//
+// Replaces AppMutex. Same mutex, same refusal, but an exit code that says why -- see the note in
+// [Setup]. The name is App.xaml.cs's SingleInstanceMutexName; the two have to stay in step, because
+// nothing checks them against each other at build time.
+const
+  AppMutexName = 'RavensPort_SingleInstance';
+  RunningMessage =
+    'RavensPort is running. Right-click its tray icon, choose Exit, then run this installer again.';
+
+// Interactive runs are told at once, instead of after clicking through the whole wizard only to be
+// turned away at the last step. Retry loops, so closing the app and clicking Retry carries on.
+//
+// Guarded by WizardSilent because MsgBox ignores /SUPPRESSMSGBOXES -- an unattended install would
+// sit on this dialog forever. Silent runs fall through to PrepareToInstall.
+function InitializeSetup(): Boolean;
+begin
+  Result := True;
+  if WizardSilent then
+    Exit;
+  while CheckForMutexes(AppMutexName) do
+    if MsgBox(RunningMessage, mbError, MB_RETRYCANCEL) = IDCANCEL then
+    begin
+      Result := False;
+      Exit;
+    end;
+end;
+
+// A non-empty result here aborts before any file is touched, with exit code 7. Measured, not
+// assumed: 7 with the mutex held, 0 without, for /VERYSILENT /SUPPRESSMSGBOXES /NORESTART, which is
+// what winget passes. packaging/winget maps 7 to packageInUse so `winget upgrade` prints the reason
+// rather than a bare failure.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  if CheckForMutexes(AppMutexName) then
+    Result := RunningMessage
+  else
+    Result := '';
+end;
+
+// AppMutex covered the uninstaller too, so this keeps that half. Suppressible, because a silent
+// uninstall has no one to answer the box: it is then taken as Cancel and the uninstall stops with
+// the app still installed, rather than deleting an exe that is running.
+function InitializeUninstall(): Boolean;
+begin
+  Result := True;
+  while CheckForMutexes(AppMutexName) do
+    if SuppressibleMsgBox(RunningMessage, mbError, MB_RETRYCANCEL, IDCANCEL) = IDCANCEL then
+    begin
+      Result := False;
+      Exit;
+    end;
+end;
