@@ -113,6 +113,19 @@ public sealed class NativeCliRunner : ICliRunner
 
     private CliResult Execute(IReadOnlyList<string> args, string? stdin)
     {
+        // Answered before EnsureInitialized, and that ordering is the whole point.
+        //
+        // InitializeOP connects to the 1Password desktop app, which is what raises the unlock
+        // prompt — so anything that runs it is an interruption to the user, whether or not it
+        // needed the connection. --version needs nothing: the answer below is a constant, because
+        // there is no CLI here to ask. Initialising first meant merely *looking* for 1Password
+        // demanded that the user unlock it, which is exactly the prompt the setup page's discovery
+        // probe exists to avoid — see VaultProbeDepth.
+        if (args.Contains("--version"))
+        {
+            return new CliResult(0, "0.4.1", "");
+        }
+
         try
         {
             EnsureInitialized();
@@ -124,11 +137,7 @@ public sealed class NativeCliRunner : ICliRunner
             string stderr = "";
             int exitCode = 0;
 
-            if (args.Contains("--version"))
-            {
-                stdout = "0.4.1";
-            }
-            else if (args.Count >= 2 && args[0] == "vault" && args[1] == "list")
+            if (args.Count >= 2 && args[0] == "vault" && args[1] == "list")
             {
                 var vaults = _client.ListVaults();
                 stdout = vaults?.ToJsonString() ?? "[]";
