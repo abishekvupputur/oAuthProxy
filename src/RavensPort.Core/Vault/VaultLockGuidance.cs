@@ -116,6 +116,34 @@ public static class VaultLockGuidance
     };
 
     /// <summary>
+    /// The one thing a 1Password user has to know that nothing on screen would otherwise tell them:
+    /// the desktop app has to stay running, and getting back from a restart has an order to it.
+    ///
+    /// RavensPort reaches 1Password over a connection the SDK opens once and holds for as long as
+    /// the process lives. Closing or restarting the desktop app breaks it, and neither side can
+    /// rebuild it unaided: the connection is over a named pipe, a pipe survives while either end
+    /// still holds it, and the SDK's own way of handing it back is a message down that same pipe —
+    /// so once 1Password has gone there is no longer any channel on which to say goodbye. Only
+    /// RavensPort exiting frees the name for 1Password to claim again.
+    ///
+    /// Hence the sequence, and hence spelling it out rather than hinting: the obvious repair —
+    /// restart 1Password — is the one that does not work.
+    ///
+    /// Empty for Proton Pass, which owns its session outright and has no such dependency.
+    /// </summary>
+    public static string DesktopAppRequirement(VaultBackendKind kind) => kind switch
+    {
+        // One line, because it sits on two screens the user reads past constantly and the long
+        // version was mostly explanation. What survives is the part they cannot guess: restarting
+        // 1Password by itself does not work, and the recovery has an order.
+        VaultBackendKind.OnePassword =>
+            "Keep 1Password running. If it restarts, restarting it alone will not reconnect — "
+            + "quit both, start 1Password, then RavensPort.",
+
+        _ => "",
+    };
+
+    /// <summary>
     /// Why a 1Password service account still cannot see anything by default. Left out of the
     /// generic text because getting this wrong produces an empty vault list and no clue why.
     /// </summary>

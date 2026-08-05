@@ -44,6 +44,17 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string _unattendedTokenSteps = "";
 
     /// <summary>
+    /// 1Password only: the desktop app must stay running, and recovering from a restart has an
+    /// order to it. Shown on this tab as well as the setup page because this is the tab someone is
+    /// on when saves start failing, and the setup page is not reachable from here.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasDesktopAppRequirement))]
+    private string _desktopAppRequirement = "";
+
+    public bool HasDesktopAppRequirement => DesktopAppRequirement.Length > 0;
+
+    /// <summary>
     /// Whether a backend of any kind is in use — including single use, which is why Disconnect
     /// binds to this rather than to <see cref="IsVaultConnected"/>. Leaving single use has to stay
     /// reachable, since it is the only thing that purges the configuration on demand.
@@ -266,6 +277,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         IsVaultConnected = kind is VaultBackendKind.OnePassword or VaultBackendKind.ProtonPass;
         IsConnected = kind != VaultBackendKind.None;
         UnattendedTokenSteps = VaultLockGuidance.UnattendedTokenSteps(kind);
+        DesktopAppRequirement = VaultLockGuidance.DesktopAppRequirement(kind);
 
         // Computed from two things the timer refreshes rather than stored, so it has to be told.
         OnPropertyChanged(nameof(CanSignOutOfProtonPass));
