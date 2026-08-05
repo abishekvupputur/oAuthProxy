@@ -51,12 +51,23 @@ jobs:
         cache-dependency-path: src/OnePasswordNative/go.sum
 
     # Initializes the CodeQL tools for scanning.
+    # SHA-pinned like every other third-party action here. These two were on the mutable @v4 tag,
+    # which the rest of this repository deliberately avoids: whoever controls the action's repo can
+    # repoint a tag at new code, and this job holds security-events: write.
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v4
+      uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
       with:
         languages: ${{ matrix.language }}
         # Autobuild triggers clean-build.bat, which launches the app and hangs, so both
         # languages are built by the explicit steps below.
+        #
+        # This is what produces the "Cannot build an overlay-base database because build-mode is
+        # set to manual instead of none" notice in the log. It is informational, not a failure:
+        # overlay databases are a caching optimisation that only applies to build-mode none, and
+        # CodeQL says itself that it falls back to a normal full database — which is the more
+        # thorough analysis, not a degraded one. Silencing it would mean switching C# to buildless
+        # analysis and giving up the real compilation this project's WPF and P/Invoke code is
+        # actually checked against. Left as it is on purpose.
         build-mode: manual
         # If you wish to specify custom queries, you can do so here or in a config file.
         # queries: security-extended,security-and-quality
@@ -84,6 +95,6 @@ jobs:
         go build -buildmode=c-shared -o onepassword.dll main.go
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v4
+      uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
       with:
         category: "/language:${{matrix.language}}"

@@ -30,6 +30,10 @@ jobs:
       - name: Run Trivy Vulnerability Scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Pinned rather than left to the action's default, for the same reason the action itself
+          # is pinned to a SHA: what a scan reports should change when this file says so, not when
+          # the action ships a new default underneath it.
+          version: 'v0.73.0'
           scan-type: 'fs'
           scan-ref: '.'
           scanners: 'vuln'
@@ -38,24 +42,48 @@ jobs:
           ignore-unfixed: true
           exit-code: '1'
 
+      # No severity filter, deliberately. Trivy grades secrets, but a committed credential is not
+      # less leaked for being graded MEDIUM -- the fix is the same and it is always urgent. Filtering
+      # to CRITICAL,HIGH meant anything below that was found, discarded, and never printed.
       - name: Run Trivy Secret Scanner
         if: always()
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: 'v0.73.0'
           scan-type: 'fs'
           scan-ref: '.'
           scanners: 'secret'
           format: 'table'
-          severity: 'CRITICAL,HIGH'
           exit-code: '1'
 
+      # 'misconfig' is the current name; 'config' is the pre-0.42 spelling. Trivy no longer
+      # recognises it, so this step was enabling no scanner at all -- which is why every target in
+      # the summary reported "-" (not scanned) rather than "0" (clean) under Misconfigurations.
       - name: Run Trivy Misconfiguration Scanner
         if: always()
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: 'v0.73.0'
           scan-type: 'fs'
           scan-ref: '.'
-          scanners: 'config'
+          scanners: 'misconfig'
           format: 'table'
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
+
+      # The same scan again with nothing filtered out, and deliberately unable to fail the build.
+      #
+      # The gate above is the policy: CRITICAL and HIGH stop a merge. But misconfiguration findings
+      # for GitHub Actions workflows are largely MEDIUM and LOW, so a gate-only step prints an empty
+      # table and reads as "nothing to see" when there may be plenty. This makes the rest visible
+      # without turning every advisory finding into a broken build.
+      - name: Report Trivy Misconfigurations (all severities, advisory)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: 'v0.73.0'
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'misconfig'
+          format: 'table'
+          exit-code: '0'
