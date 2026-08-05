@@ -18,6 +18,43 @@ public class NativeCliRunnerTests
     }
 
     [Fact]
+    public async Task Version_DoesNotConnectToTheDesktopApp()
+    {
+        // Initialize() is what raises the 1Password unlock prompt, so a --version that ran it made
+        // merely *looking* for 1Password an interruption — which is what the setup page's discovery
+        // probe exists to avoid. The answer is a constant; there is no CLI here to ask.
+        var result = await _runner.RunAsync("native", ["--version"]);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal("0.4.1", result.StdOut);
+        _mockClient.Verify(c => c.Initialize(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Version_DoesNotConnectEvenWithNoAccountNameConfigured()
+    {
+        // The state a first run is actually in. Initialising would throw "1Password SDK requires
+        // your Account Name", which the setup page would then show as though something were wrong —
+        // on a card whose only honest status is "installed, not connected".
+        Environment.SetEnvironmentVariable("OP_ACCOUNT", null);
+        NativeCliRunner.ResetInitialization();
+
+        try
+        {
+            var result = await _runner.RunAsync("native", ["--version"]);
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Equal("0.4.1", result.StdOut);
+            _mockClient.Verify(c => c.Initialize(It.IsAny<string>()), Times.Never);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("OP_ACCOUNT", "TestAccount");
+            NativeCliRunner.ResetInitialization();
+        }
+    }
+
+    [Fact]
     public async Task VaultList_ParsesArgumentsAndCallsNativeClient()
     {
         _mockClient.Setup(c => c.ListVaults()).Returns(new JsonArray());
