@@ -43,7 +43,27 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// <summary>The token option, kept off the lock banner — see <see cref="VaultLockGuidance"/>.</summary>
     [ObservableProperty] private string _unattendedTokenSteps = "";
 
+    /// <summary>
+    /// Whether a backend of any kind is in use — including single use, which is why Disconnect
+    /// binds to this rather than to <see cref="IsVaultConnected"/>. Leaving single use has to stay
+    /// reachable, since it is the only thing that purges the configuration on demand.
+    /// </summary>
     [ObservableProperty] private bool _isConnected;
+
+    /// <summary>
+    /// Whether the backend is an actual password manager, so there is a vault to sync with, rewrite,
+    /// re-read or check.
+    ///
+    /// Every one of those controls needs a vault behind it, and in single use there is none — the
+    /// store is this process's memory. They are shown disabled rather than hidden: a Settings tab
+    /// whose contents change shape between modes makes the user wonder what else is missing,
+    /// whereas greyed controls beside "Single use" say plainly which mode they are in and what it
+    /// costs them.
+    /// </summary>
+    [ObservableProperty] private bool _isVaultConnected;
+
+    /// <summary>Running on memory alone — see <see cref="VaultBackendKind.SingleUse"/>.</summary>
+    [ObservableProperty] private bool _isSingleUse;
 
     /// <summary>
     /// Set once the user has asked to disconnect. Always asked, not only when something is
@@ -168,11 +188,16 @@ public sealed partial class SettingsViewModel : ObservableObject
     // tab wholesale would take away the recovery surface at exactly the moment it is wanted.
 
     /// <summary>
-    /// Whether the vault-maintenance actions may run: the store has been loaded, and no load is in
-    /// flight. Bound by the section's <c>IsEnabled</c> and enforced again on every command, so the
-    /// guard does not depend on the UI honouring it.
+    /// Whether the vault-maintenance actions may run: there is a vault, the store has been loaded,
+    /// and no load is in flight. Bound by the section's <c>IsEnabled</c> and enforced again on
+    /// every command, so the guard does not depend on the UI honouring it.
+    ///
+    /// The vault test is not redundant with the UI hiding these in single use. Every one of them
+    /// compares memory against a backend, and in single use the backend <em>is</em> memory — so
+    /// "check the vault" would report a clean bill of health about nothing, and "re-initialise"
+    /// would throw the session's configuration away to reload it from itself.
     /// </summary>
-    public bool CanMaintainVault => _configStoreCache.IsSettled;
+    public bool CanMaintainVault => IsVaultConnected && _configStoreCache.IsSettled;
 
     /// <summary>
     /// The inverse, for the explanation shown in the section's place — but only while there is a
@@ -182,7 +207,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// just as a load in flight does. Without the connection test, the moment Disconnect was
     /// confirmed the tab announced "Still reading your vault" about a vault it had just let go of.
     /// </summary>
-    public bool IsWaitingForVaultLoad => IsConnected && !CanMaintainVault;
+    public bool IsWaitingForVaultLoad => IsVaultConnected && !CanMaintainVault;
 
     /// <summary>
     /// Polled from the same timer as the rest of this tab rather than driven by an event. The load
@@ -237,6 +262,8 @@ public sealed partial class SettingsViewModel : ObservableObject
         var manager = VaultLockGuidance.DisplayName(kind);
         var status = _gate.Status.For(kind);
 
+        IsSingleUse = kind == VaultBackendKind.SingleUse;
+        IsVaultConnected = kind is VaultBackendKind.OnePassword or VaultBackendKind.ProtonPass;
         IsConnected = kind != VaultBackendKind.None;
         UnattendedTokenSteps = VaultLockGuidance.UnattendedTokenSteps(kind);
 
@@ -244,6 +271,19 @@ public sealed partial class SettingsViewModel : ObservableObject
         OnPropertyChanged(nameof(CanSignOutOfProtonPass));
 
         RefreshMaintenanceAvailability();
+
+        if (IsSingleUse)
+        {
+            // Named on the tab, not merely implied by everything else being disabled. Someone who
+            // set this up an hour ago needs to be able to tell at a glance that the routes on
+            // screen are held in memory and go when the app does.
+            PasswordManagerSummary = "Single use — no password manager.";
+            PasswordManagerDetail =
+                "This configuration is held in memory only. Disconnecting discards it, and so does "
+                + "closing RavensPort. Connect a password manager from the setup page to keep one.";
+            VaultSyncSummary = "Nothing is being saved anywhere, by design.";
+            return;
+        }
 
         if (!IsConnected)
         {
@@ -621,10 +661,14 @@ public sealed partial class SettingsViewModel : ObservableObject
             return;
         }
 
+        var wasSingleUse = IsSingleUse;
+
         _gate.Disconnect();
         await TearDownAsync(
-            "VAULT disconnected from the Settings tab — the proxy is serving nothing until reconnected",
-            "Disconnected.");
+            wasSingleUse
+                ? "VAULT left single use from the Settings tab — the in-memory configuration has been purged"
+                : "VAULT disconnected from the Settings tab — the proxy is serving nothing until reconnected",
+            wasSingleUse ? "Single-use configuration purged." : "Disconnected.");
     }
 
     [RelayCommand]

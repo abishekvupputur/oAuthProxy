@@ -26,14 +26,32 @@
                     <TextBlock Text="{Binding VaultSyncSummary}" Style="{StaticResource HintTextStyle}"
                                TextWrapping="Wrap" Margin="0,0,0,8"/>
 
+                    <!-- Single use: said plainly, above the controls it disables. The alternative —
+                         a row of greyed buttons and no explanation — reads as a broken tab. -->
+                    <Border Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush0}"
+                            BorderThickness="1" Padding="11,9" CornerRadius="6" Margin="0,0,0,10"
+                            Visibility="{Binding IsSingleUse, Converter={StaticResource BoolToVisibilityConverter}}">
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"><Run
+                            Style="{StaticResource EmphasisRunStyle}">Single use.</Run><Run
+                            xml:space="preserve"> RavensPort is running without a password manager, so there is no vault to sync with, rewrite, re-read or check — those controls are greyed out below. Everything else works exactly as it does normally. Disconnect stays available and purges this configuration from memory; closing RavensPort does the same.</Run></TextBlock>
+                    </Border>
+
                     <WrapPanel Visibility="{Binding IsConnected, Converter={StaticResource BoolToVisibilityConverter}}">
-                        <Button Content="Sync now" Margin="0,0,8,6" Command="{Binding SyncNowCommand}"/>
+                        <!-- Disabled rather than hidden in single use: the tab keeps its shape, and
+                             the greyed control beside the note above says which mode this is. -->
+                        <Button Content="Sync now" Margin="0,0,8,6" Command="{Binding SyncNowCommand}"
+                                IsEnabled="{Binding IsVaultConnected}"/>
                         <Button Content="Rewrite all items to vault" Margin="0,0,8,6"
                                 Style="{StaticResource GhostButtonStyle}"
+                                IsEnabled="{Binding IsVaultConnected}"
                                 Command="{Binding RewriteAllItemsCommand}"/>
                         <Button Content="Re-initialise from vault" Margin="0,0,8,6" Style="{StaticResource GhostButtonStyle}"
+                                IsEnabled="{Binding IsVaultConnected}"
                                 Command="{Binding ReinitialiseCommand}"
                                 Visibility="{Binding IsConfirmingReinitialise, Converter={StaticResource InverseBoolToVisibilityConverter}}"/>
+
+                        <!-- Never disabled by the mode. In single use this is the only thing that
+                             purges the configuration on demand, which is the whole bargain. -->
                         <Button Content="Disconnect" Margin="0,0,8,6" Style="{StaticResource GhostButtonStyle}"
                                 Command="{Binding DisconnectCommand}"
                                 Visibility="{Binding IsConfirmingDisconnect, Converter={StaticResource InverseBoolToVisibilityConverter}}"/>
@@ -59,6 +77,7 @@
                     </Border>
 
                     <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
+                               Visibility="{Binding IsVaultConnected, Converter={StaticResource BoolToVisibilityConverter}}"
                                Text="Rewrite all items to vault makes the vault match what is in memory — the way back from items edited or deleted by hand. It replaces every item, so it is not the cheap option: to restore only what is missing, use the integrity check below."/>
 
                     <!-- Re-initialise is a real interruption, so it is asked rather than done. -->
@@ -78,7 +97,16 @@
                     <StackPanel Visibility="{Binding IsConfirmingDisconnect, Converter={StaticResource BoolToVisibilityConverter}}">
                         <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,4"
                                    Foreground="{StaticResource ErrorBrush}"
+                                   Visibility="{Binding IsSingleUse, Converter={StaticResource InverseBoolToVisibilityConverter}}"
                                    Text="Disconnecting empties the configuration held in memory. Every route and MCP funnel stops answering, so clients mid-request get an error, and the proxy serves nothing until a password manager is connected again. Nothing in the vault is deleted — connect the same vault to get it all back, or a different one to work with a separate set of credentials, routes and funnels."/>
+
+                        <!-- Different consequence, so a different warning. There is no vault behind
+                             a single-use session, so this is not "let go of a copy" — it is the
+                             only copy, and it does not come back. -->
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,4"
+                                   Foreground="{StaticResource ErrorBrush}"
+                                   Visibility="{Binding IsSingleUse, Converter={StaticResource BoolToVisibilityConverter}}"
+                                   Text="This is a single-use session, so there is no vault holding a copy. Disconnecting purges every credential, route, funnel and key you set up here, and none of it can be recovered. Every route and MCP funnel stops answering immediately."/>
                         <TextBlock Text="{Binding DisconnectWarning}" Style="{StaticResource HintTextStyle}"
                                    TextWrapping="Wrap" Margin="0,0,0,8"
                                    Foreground="{StaticResource ErrorBrush}"/>
@@ -103,9 +131,11 @@
                         </WrapPanel>
                     </StackPanel>
 
+                    <!-- IsVaultConnected, not IsConnected: this whole section compares memory
+                         against a vault, and in single use the two are the same object. -->
                     <Expander Header="Vault integrity" Margin="0,8,0,0"
                               Foreground="{StaticResource MutedTextBrush}"
-                              Visibility="{Binding IsConnected, Converter={StaticResource BoolToVisibilityConverter}}">
+                              Visibility="{Binding IsVaultConnected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <StackPanel Margin="0,6,0,0">
                             <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
                                        Text="Compares the vault against the configuration: items nothing refers to any more, and records whose item is gone. Nothing is changed until you choose it."/>
@@ -207,9 +237,11 @@
                         </StackPanel>
                     </Expander>
 
+                    <!-- Both entries here are about keeping a password manager reachable without a
+                         prompt, which is not a problem single use has. -->
                     <Expander Header="Running unattended" Margin="0,8,0,0"
                               Foreground="{StaticResource MutedTextBrush}"
-                              Visibility="{Binding IsConnected, Converter={StaticResource BoolToVisibilityConverter}}">
+                              Visibility="{Binding IsVaultConnected, Converter={StaticResource BoolToVisibilityConverter}}">
                         <TextBlock Text="{Binding UnattendedTokenSteps}" Style="{StaticResource HintTextStyle}"
                                    TextWrapping="Wrap" Margin="0,6,0,0"/>
                     </Expander>
