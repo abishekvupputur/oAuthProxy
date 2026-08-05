@@ -324,6 +324,16 @@ public sealed class ProtonPassVaultProvider(
         activityLog.Log($"VAULT Proton Pass — using the existing '{_vaultName}' vault");
     }
 
+    /// <summary>
+    /// Lets a probe resolve a vault again, for a manager the user is deliberately connecting to.
+    /// See <see cref="OnePasswordVaultProvider.AllowDiscovery"/> — writing stays shut until
+    /// <see cref="AllowWrites"/>, so a probe that fails cannot leave this writable with no vault.
+    /// </summary>
+    public void AllowDiscovery() => _discoveryDisabled = false;
+
+    /// <summary>Re-opens writing, once a probe has actually resolved a vault.</summary>
+    public void AllowWrites() => _writesDisabled = false;
+
     public void Forget()
     {
         _shareId = null;

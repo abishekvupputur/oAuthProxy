@@ -150,6 +150,53 @@ public class DeferredAuthenticationTests : IDisposable
         Assert.Equal(VaultAvailability.NotSignedIn, status.For(VaultBackendKind.ProtonPass)!.Availability);
     }
 
+    [Fact]
+    public async Task ReconnectingAfterADisconnectCanWriteAgain()
+    {
+        // The failure this pins is quiet, which is what made it bad: Disconnect shuts writing on the
+        // provider, and only naming a vault used to re-open it. Connect became a third way to
+        // become the selected backend and cleared nothing -- so the probe still resolved the vault
+        // by name, reads worked, the Settings tab said "1Password - vault 'RavensPort'", and every
+        // save died with "not connected to a 1Password vault. Choose a vault on the setup page
+        // first" about the page the user had just used successfully.
+        var onePassword = new FakeOnePassword();
+        var gate = NewGate(onePassword.AsRunner(), SignedOutProtonPass());
+
+        Assert.True((await gate.EvaluateAsync()).IsReady);
+        await gate.Selected.SaveAsync(StoreWithSomethingInIt());
+
+        gate.Disconnect();
+
+        var reconnected = await gate.ConnectAsync(VaultBackendKind.OnePassword);
+        Assert.True(reconnected.IsReady);
+        Assert.Equal(VaultBackendKind.OnePassword, gate.Selected.Kind);
+
+        // The assertion that matters. Reading proved nothing here -- it worked throughout the bug.
+        await gate.Selected.SaveAsync(StoreWithSomethingInIt());
+    }
+
+    [Fact]
+    public async Task AConnectThatFailsLeavesWritingShut()
+    {
+        // The other half of the rule. Re-opening writes on the way *into* the probe would leave a
+        // provider writable with no vault resolved, which is the state Forget exists to prevent:
+        // a queued save then resolves a vault of its own choosing and writes into it.
+        var lockedOnePassword = new FakeCliRunner()
+            .Respond(["--version"], "2.30.0")
+            .Respond(["vault", "list"], exitCode: 1, stderr: "not signed in");
+
+        var gate = NewGate(new FakeOnePassword().AsRunner(), SignedOutProtonPass());
+        Assert.True((await gate.EvaluateAsync()).IsReady);
+        gate.Disconnect();
+
+        // A provider that has been disconnected and whose reconnect probe fails.
+        var provider = new OnePasswordVaultProvider(lockedOnePassword, Log(), _opStub);
+        provider.Forget();
+        provider.AllowDiscovery();
+
+        await Assert.ThrowsAsync<VaultSaveException>(() => provider.SaveAsync(StoreWithSomethingInIt()));
+    }
+
     // ---- Single use --------------------------------------------------------------------------
 
     [Fact]
@@ -219,6 +266,11 @@ public class DeferredAuthenticationTests : IDisposable
         Assert.False(gate.IsSingleUse);
         Assert.Equal(VaultBackendKind.OnePassword, gate.Selected.Kind);
     }
+
+    private static FakeCliRunner SignedOutProtonPass() =>
+        new FakeCliRunner()
+            .Respond(["--version"], "1.4.0")
+            .Respond(["vault", "list"], exitCode: 1, stderr: "not logged in");
 
     private VaultGateService NewGate(FakeCliRunner onePassword, FakeCliRunner protonPass) =>
         new(new OnePasswordVaultProvider(onePassword, Log(), _opStub),

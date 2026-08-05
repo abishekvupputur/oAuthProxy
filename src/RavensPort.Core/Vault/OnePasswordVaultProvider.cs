@@ -306,6 +306,23 @@ public sealed class OnePasswordVaultProvider(
         activityLog.Log($"VAULT 1Password — using the existing '{_vaultName}' vault");
     }
 
+    /// <summary>
+    /// Lets a probe resolve a vault again, for a manager the user is deliberately connecting to.
+    ///
+    /// Half of undoing <see cref="Forget"/>, and deliberately only half. Discovery is what finds a
+    /// vault adopted under a name other than RavensPort, so without this a reconnect to one could
+    /// only ever report it missing. Writing stays shut until <see cref="AllowWrites"/>, because a
+    /// probe can fail and a provider that is writable with no vault resolved is the exact state
+    /// Forget exists to prevent.
+    /// </summary>
+    public void AllowDiscovery() => _discoveryDisabled = false;
+
+    /// <summary>
+    /// Re-opens writing. Called once a probe has actually resolved a vault, which is the same
+    /// guarantee naming one by hand gives — see the comment in <see cref="Forget"/>.
+    /// </summary>
+    public void AllowWrites() => _writesDisabled = false;
+
     public void Forget()
     {
         _vaultId = null;

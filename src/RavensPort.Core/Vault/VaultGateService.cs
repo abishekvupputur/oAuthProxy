@@ -170,7 +170,20 @@ public sealed class VaultGateService
         _disconnected = false;
         _singleUse = null;
 
+        // Undoes the discovery half of Forget before probing. Pressing Connect *is* the user naming
+        // this manager again, so rediscovering the vault they left is what they asked for — the ban
+        // exists to stop an automatic probe reattaching, and this is not automatic.
+        AllowDiscovery(kind);
+
         var probe = await ProbeSafelyAsync(ProviderFor(kind), VaultProbeDepth.Full, ct);
+
+        // Writing is re-opened only now, and only because the probe resolved a vault. Connecting
+        // was previously a third way to become the selected backend, alongside creating a vault and
+        // naming one — and the only one that never cleared this. The result was an install that
+        // read its configuration perfectly, reported itself connected, and refused every save with
+        // "RavensPort is not connected to a 1Password vault. Choose a vault on the setup page
+        // first", pointing the user at a page they had just successfully used.
+        if (probe.IsReady) AllowWrites(kind);
 
         // Only this manager's entry moves. The other card keeps whatever the last probe said about
         // it — which is the honest answer, since nothing has asked it anything since.
@@ -282,6 +295,29 @@ public sealed class VaultGateService
     /// </summary>
     private Task<VaultGateStatus> ResolveAfterUserChoiceAsync(VaultBackendKind kind, CancellationToken ct) =>
         Task.FromResult(SelectBackend(kind));
+
+    /// <summary>
+    /// The two halves of undoing <see cref="IConfigVault.Forget"/>, kept off the interface: only a
+    /// real password-manager backend can be disconnected in the first place, so neither the
+    /// in-memory store nor the gated forwarder has anything to undo.
+    /// </summary>
+    private void AllowDiscovery(VaultBackendKind kind)
+    {
+        switch (kind)
+        {
+            case VaultBackendKind.OnePassword: _onePassword.AllowDiscovery(); break;
+            case VaultBackendKind.ProtonPass: _protonPass.AllowDiscovery(); break;
+        }
+    }
+
+    private void AllowWrites(VaultBackendKind kind)
+    {
+        switch (kind)
+        {
+            case VaultBackendKind.OnePassword: _onePassword.AllowWrites(); break;
+            case VaultBackendKind.ProtonPass: _protonPass.AllowWrites(); break;
+        }
+    }
 
     public IConfigVault ProviderFor(VaultBackendKind kind) => kind switch
     {
