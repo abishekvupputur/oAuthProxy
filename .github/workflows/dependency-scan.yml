@@ -1,0 +1,126 @@
+name: Dependency Vulnerability Scan
+
+# Two ecosystem-native scanners, kept apart from trivy.yml because they answer a different question.
+#
+# Trivy reads the lock files and reports what is in them. These two ask their own toolchains: the Go
+# team's govulncheck walks the call graph and reports a CVE only when the vulnerable symbol is
+# actually reachable, and `dotnet list package --vulnerable` queries the GitHub Advisory Database
+# through NuGet itself. Between them they see things a generic SCA pass does not, and govulncheck in
+# particular sees *fewer* things -- deliberately, because a vulnerability in a package whose code
+# this project never calls is not a live failure path.
+#
+# OSV-Scanner is not here on purpose. It would be a third pass over the same two lock files, and
+# trivy.yml already gates on exactly that.
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    # Offset from the Trivy and CodeQL schedules so a bad Sunday morning does not arrive as three
+    # simultaneous failures with no clue which one moved.
+    - cron: '30 3 * * 0'
+
+# Third-party actions are pinned to commit SHAs, not tags. A tag is mutable: whoever controls the
+# action's repo can repoint it at new code that then runs inside this job with the repo checked out.
+# The trailing comment records which version each SHA was, since the SHA alone is unreadable.
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          # go.mod is the only place the Go version is written down; setup-go v6 runs
+          # GOTOOLCHAIN=local, so a second pin here would drift and then fail.
+          go-version-file: src/OnePasswordNative/go.mod
+          cache-dependency-path: src/OnePasswordNative/go.sum
+
+      # Pinned rather than @latest. Everything else in these workflows is pinned so that what runs
+      # changes when this file says so; a tool installed at @latest is the one hole in that, and it
+      # is a tool being handed the source tree.
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+      # Exits non-zero when it finds a reachable vulnerability, so no result parsing is needed --
+      # unlike the .NET side below, which reports and then exits 0 regardless.
+      - name: Run govulncheck
+        working-directory: src/OnePasswordNative
+        run: govulncheck ./...
+
+  dotnet-vulnerable:
+    name: dotnet list --vulnerable (NuGet)
+    # windows-latest because the target framework is net8.0-windows10.0.19041.0; a restore on Linux
+    # cannot resolve the Windows SDK targeting packs, and this command needs a completed restore.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: "8.0.x"
+
+      # Not --locked-mode. The lock files are the thing being audited, and a restore that refuses to
+      # run because one has drifted would report a lock-file problem as a security pass.
+      - name: Restore
+        run: dotnet restore RavensPort.slnx
+
+      # --include-transitive is the whole point. Without it this reports only what the csproj files
+      # declare, which is a handful of packages; the vulnerabilities that matter arrive underneath
+      # YARP, IdentityModel.OidcClient and the Google auth libraries, none of which are declared here.
+      - name: Check for vulnerable packages
+        shell: pwsh
+        run: |
+          $raw = dotnet list RavensPort.slnx package --vulnerable --include-transitive --format json | Out-String
+          Write-Host $raw
+
+          # This command reports and then exits 0 whether or not it found anything, so the gate has
+          # to be built by hand. Silently trusting its exit code would make this step decorative.
+          $report = $raw | ConvertFrom-Json
+
+          # A project with nothing vulnerable is emitted as a bare { "path": ... } with no
+          # "frameworks" key at all, so every level here has to tolerate being absent.
+          $findings = foreach ($project in $report.projects) {
+            foreach ($framework in @($project.frameworks)) {
+              foreach ($package in @($framework.topLevelPackages) + @($framework.transitivePackages)) {
+                foreach ($vulnerability in @($package.vulnerabilities)) {
+                  if ($null -eq $package.id) { continue }
+                  [pscustomobject]@{
+                    Project  = [System.IO.Path]::GetFileName($project.path)
+                    Package  = $package.id
+                    Version  = $package.resolvedVersion
+                    Severity = $vulnerability.severity
+                    Advisory = $vulnerability.advisoryurl
+                  }
+                }
+              }
+            }
+          }
+
+          if (-not $findings) {
+            Write-Host 'No vulnerable NuGet packages, transitive included.'
+            exit 0
+          }
+
+          $findings | Format-Table -AutoSize | Out-String | Write-Host
+
+          # Gated on High and Critical, with everything else reported rather than hidden. A Moderate
+          # advisory in a transitive package is worth seeing and is not worth blocking a merge on;
+          # burying it would be, which is what a severity filter on the output would have done.
+          $blocking = @($findings | Where-Object { $_.Severity -in @('High', 'Critical') })
+          if ($blocking.Count -gt 0) {
+            Write-Host "::error::$($blocking.Count) High/Critical vulnerable package(s) found."
+            exit 1
+          }
+
+          Write-Host "$($findings.Count) advisory(ies) found, none High or Critical. Not failing the build."

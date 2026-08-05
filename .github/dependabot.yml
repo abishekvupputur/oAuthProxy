@@ -1,0 +1,47 @@
+version: 2
+
+# Continuous dependency monitoring, as opposed to the periodic inspection the scanners in
+# .github/workflows do. Those answer "is anything vulnerable right now"; this one opens a pull
+# request the day an upstream fix ships, so the answer stays no without anyone remembering to look.
+#
+# Note what this file does NOT control. Dependabot *alerts* and *security updates* are repository
+# settings, not configuration: Settings -> Advanced Security -> Dependency graph, Dependabot alerts,
+# Dependabot security updates. All three have to be on in the UI. This file only configures version
+# updates -- the routine bumps -- and is inert until the dependency graph is enabled.
+updates:
+  # One entry per project directory rather than a single "/" entry. NuGet discovery from the root
+  # depends on Dependabot finding the solution, and RavensPort.slnx is an slnx rather than an sln,
+  # which is new enough not to rely on.
+  - package-ecosystem: "nuget"
+    directories:
+      - "/src/RavensPort.App"
+      - "/src/RavensPort.Core"
+      - "/tests/RavensPort.Core.Tests"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      # One PR for a wave of patch bumps instead of five. Security updates are unaffected -- those
+      # come through the security-updates channel and are never grouped or delayed.
+      nuget-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "gomod"
+    directory: "/src/OnePasswordNative"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"
+
+  # The workflows pin every third-party action to a commit SHA, which is what stops a mutable tag
+  # being repointed at new code inside a job holding contents:write. Dependabot understands that
+  # convention: it bumps the SHA and rewrites the trailing version comment with it, so pinning does
+  # not turn into never updating.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
