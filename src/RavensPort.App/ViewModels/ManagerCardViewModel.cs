@@ -88,6 +88,15 @@ public sealed partial class ManagerCardViewModel(VaultStatus status) : Observabl
     public bool HasTokenCaveat => !string.IsNullOrWhiteSpace(TokenCaveat);
 
     /// <summary>
+    /// Shown in every state this card can be in, not just the broken one. By the time the
+    /// connection has dropped the user is looking at a failure and guessing, and the repair they
+    /// will reach for first — restart 1Password — is the one that does not work.
+    /// </summary>
+    public string DesktopAppRequirement { get; } = VaultLockGuidance.DesktopAppRequirement(status.Kind);
+
+    public bool HasDesktopAppRequirement => DesktopAppRequirement.Length > 0;
+
+    /// <summary>
     /// The vault picked from the list, for "use one I already have".
     ///
     /// A plain selection rather than an editable combo: the dark theme's ComboBox template has no

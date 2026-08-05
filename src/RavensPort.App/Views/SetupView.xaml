@@ -161,6 +161,13 @@
                                                Margin="0,0,0,6"
                                                Visibility="{Binding HasDetail, Converter={StaticResource BoolToVisibilityConverter}}"/>
 
+                                    <!-- 1Password only, and in every state: the desktop app has to
+                                         stay running, and the way back from a restart has an order
+                                         to it that nothing else on screen would reveal. -->
+                                    <TextBlock Text="{Binding DesktopAppRequirement}" Style="{StaticResource HintTextStyle}"
+                                               TextWrapping="Wrap" Margin="0,0,0,8"
+                                               Visibility="{Binding HasDesktopAppRequirement, Converter={StaticResource BoolToVisibilityConverter}}"/>
+
                                     <!-- The button that owns the prompt. Nothing on the startup path
                                          asks this manager anything, so this is where the unlock,
                                          the Hello gesture and the desktop-app approval happen —

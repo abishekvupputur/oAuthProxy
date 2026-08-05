@@ -26,6 +26,13 @@
                     <TextBlock Text="{Binding VaultSyncSummary}" Style="{StaticResource HintTextStyle}"
                                TextWrapping="Wrap" Margin="0,0,0,8"/>
 
+                    <!-- 1Password only. Sits above the buttons because when the connection has gone
+                         this is the tab the user is on, watching saves fail, and the repair they
+                         would try first — restart 1Password — is the one that does not work. -->
+                    <TextBlock Text="{Binding DesktopAppRequirement}" Style="{StaticResource HintTextStyle}"
+                               TextWrapping="Wrap" Margin="0,0,0,8"
+                               Visibility="{Binding HasDesktopAppRequirement, Converter={StaticResource BoolToVisibilityConverter}}"/>
+
                     <!-- Single use: said plainly, above the controls it disables. The alternative —
                          a row of greyed buttons and no explanation — reads as a broken tab. -->
                     <Border Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush0}"
