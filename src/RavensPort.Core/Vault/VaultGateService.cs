@@ -55,10 +55,20 @@ public sealed class VaultGateService
     /// </summary>
     private bool _disconnected;
 
+    /// <summary>
+    /// The store for a single-use session, while one is running. Held here rather than merely
+    /// assigned to <see cref="Selected"/> so that <see cref="Disconnect"/> can drop the instance
+    /// outright: the configuration only ever existed inside it, so letting go of it is the purge.
+    /// </summary>
+    private InMemoryVault? _singleUse;
+
     public VaultGateStatus Status { get; private set; }
 
     /// <summary>True after a disconnect, until a backend is chosen again.</summary>
     public bool IsDisconnected => _disconnected;
+
+    /// <summary>True while the app is running on memory alone — see <see cref="UseSingleUse"/>.</summary>
+    public bool IsSingleUse => _singleUse is not null;
 
     /// <summary>The active backend. Never null so callers do not have to special-case startup.</summary>
     public IConfigVault Selected { get; private set; } = new InMemoryVault();
@@ -85,6 +95,14 @@ public sealed class VaultGateService
         var probes = await Task.WhenAll(
             ProbeSafelyAsync(_onePassword, depth, ct),
             ProbeSafelyAsync(_protonPass, depth, ct));
+
+        // A single-use session outranks whatever the probes found: the user chose memory, and a
+        // manager quietly becoming available is not a reason to move their configuration into it.
+        // The probes still run, so the setup page shows the truth if they disconnect back to it.
+        if (_singleUse is not null)
+        {
+            return Publish(new VaultGateStatus(probes, VaultBackendKind.SingleUse, NeedsAChoice: false));
+        }
 
         var ready = probes.Where(p => p.IsReady).ToList();
 
@@ -136,10 +154,66 @@ public sealed class VaultGateService
         return Publish(new VaultGateStatus(probes, VaultBackendKind.None, NeedsAChoice: true));
     }
 
+    /// <summary>
+    /// Asks one manager, in full, because the user has just pressed a button that says so.
+    ///
+    /// This is the whole of the deferred-authentication design. Startup discovers what is installed
+    /// and stops; the unlock prompt, the desktop-app approval, the Hello gesture all happen here,
+    /// for the one manager named, at the moment the user asked for it. Probing the other one as
+    /// well would put back exactly the second prompt this exists to remove.
+    /// </summary>
+    public async Task<VaultGateStatus> ConnectAsync(VaultBackendKind kind, CancellationToken ct = default)
+    {
+        // The attempt is the un-disconnecting, whether or not it succeeds. Leaving the flag set
+        // would have the next evaluation report the user as still disconnected while they are
+        // plainly in the middle of connecting.
+        _disconnected = false;
+        _singleUse = null;
+
+        var probe = await ProbeSafelyAsync(ProviderFor(kind), VaultProbeDepth.Full, ct);
+
+        // Only this manager's entry moves. The other card keeps whatever the last probe said about
+        // it — which is the honest answer, since nothing has asked it anything since.
+        List<VaultStatus> statuses = Status.Statuses.Any(s => s.Kind == kind)
+            ? [.. Status.Statuses.Select(s => s.Kind == kind ? probe : s)]
+            : [.. Status.Statuses, probe];
+
+        // Ready means this one is the backend, with no tie to break: the user named it. Anything
+        // else leaves the selection alone and lets the card explain what is still missing.
+        return probe.IsReady
+            ? Publish(new VaultGateStatus(statuses, kind, NeedsAChoice: false), kind)
+            : Publish(new VaultGateStatus(statuses, Status.Selected, NeedsAChoice: false));
+    }
+
+    /// <summary>
+    /// Runs on memory alone for this session — full functionality, no password manager, nothing
+    /// written anywhere.
+    ///
+    /// For trying the app out, and for testing it, without first handing it a vault. The trade is
+    /// stated rather than hidden: the configuration lives in one object in this process, so it goes
+    /// when the session does — <see cref="Disconnect"/>, or exit.
+    /// </summary>
+    public VaultGateStatus UseSingleUse()
+    {
+        _disconnected = false;
+
+        // A fresh instance every time, so an earlier single-use session cannot leak into a later
+        // one through a store that was never emptied.
+        _singleUse = InMemoryVault.ForSingleUse();
+        Selected = _singleUse;
+
+        _activityLog.Log(
+            "STARTUP single use — RavensPort is running without a password manager, and this "
+            + "configuration is held in memory only");
+
+        return Publish(new VaultGateStatus(Status.Statuses, VaultBackendKind.SingleUse, NeedsAChoice: false));
+    }
+
     /// <summary>Records the user's answer for this run. Deliberately not persisted anywhere.</summary>
     public VaultGateStatus SelectBackend(VaultBackendKind kind)
     {
         _disconnected = false;
+        _singleUse = null;
 
         var status = Status with { Selected = kind, NeedsAChoice = false };
         return Publish(status, kind);
@@ -184,10 +258,19 @@ public sealed class VaultGateService
         _onePassword.Forget();
         _protonPass.Forget();
 
+        var wasSingleUse = _singleUse is not null;
+
         _disconnected = true;
+
+        // The single-use store is dropped, not emptied. It was the only copy of that configuration
+        // — there is no vault behind it — so releasing the object is what makes the purge complete
+        // rather than a matter of trusting a Clear() to have reached everything.
+        _singleUse = null;
         Selected = new InMemoryVault();
 
-        _activityLog.Log("VAULT disconnected from the password manager — RavensPort is holding no configuration");
+        _activityLog.Log(wasSingleUse
+            ? "VAULT left single use — the configuration held in memory has been discarded"
+            : "VAULT disconnected from the password manager — RavensPort is holding no configuration");
 
         return Publish(new VaultGateStatus([], VaultBackendKind.None, NeedsAChoice: false));
     }
@@ -204,6 +287,7 @@ public sealed class VaultGateService
     {
         VaultBackendKind.OnePassword => _onePassword,
         VaultBackendKind.ProtonPass => _protonPass,
+        VaultBackendKind.SingleUse when _singleUse is not null => _singleUse,
         _ => Selected,
     };
 
