@@ -15,6 +15,11 @@ public static class VaultLockGuidance
     {
         VaultBackendKind.OnePassword => "1Password",
         VaultBackendKind.ProtonPass => "Proton Pass",
+
+        // Reads correctly in the sentences this feeds — "Everything is saved to this session's
+        // memory" — which is exactly the thing a single-use user needs reminding of.
+        VaultBackendKind.SingleUse => "this session's memory",
+
         _ => "your password manager",
     };
 

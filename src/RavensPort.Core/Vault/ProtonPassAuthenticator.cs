@@ -51,7 +51,12 @@ public sealed partial class ProtonPassAuthenticator(
         }
 
         session.Unlock(key);
-        await gate.EvaluateAsync().ConfigureAwait(false);
+
+        // Proton Pass only, deliberately. A full evaluation here probes 1Password too, and on a
+        // machine that has both installed that turned one Hello gesture into a gesture followed by
+        // a stack of 1Password desktop approvals — for a manager the user was not connecting.
+        // The session that just opened is this one, so this is the only one with a new answer.
+        await gate.ConnectAsync(VaultBackendKind.ProtonPass).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -211,9 +216,10 @@ public sealed partial class ProtonPassAuthenticator(
         // ConfigureAwait(false), so by this line execution is on a thread-pool thread, and the
         // Hello prompt needs a foreground window to parent itself to. Without one the credential
         // service does not prompt at all, it returns UserCanceled immediately.
-        // Full depth: the sign-in just happened, so this is the one moment where asking the CLI
-        // everything costs the user nothing — the session is open and no prompt can result.
-        await gate.EvaluateAsync(VaultProbeDepth.Full, ct).ConfigureAwait(false);
+        // This manager only, and in full: the sign-in just happened, so asking pass-cli everything
+        // costs the user nothing. Evaluating both would spend that goodwill on 1Password, which
+        // nobody has signed into and which answers by prompting.
+        await gate.ConnectAsync(VaultBackendKind.ProtonPass, ct).ConfigureAwait(false);
     }
 
     /// <summary>

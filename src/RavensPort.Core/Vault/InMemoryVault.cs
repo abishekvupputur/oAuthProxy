@@ -19,6 +19,13 @@ public sealed class InMemoryVault : IConfigVault
     private readonly VaultAvailability _availability;
     private readonly SaveBehavior _saveBehavior;
 
+    /// <summary>
+    /// What this vault calls itself. <see cref="VaultBackendKind.None"/> for the placeholder the
+    /// gate holds before a backend is chosen, and <see cref="VaultBackendKind.SingleUse"/> when it
+    /// is being used as one — see <see cref="ForSingleUse"/>.
+    /// </summary>
+    private readonly VaultBackendKind _kind;
+
     /// <summary>Item id to contents, standing in for the vault's own storage.</summary>
     private readonly Dictionary<string, VaultItemContents> _items = [];
 
@@ -39,13 +46,26 @@ public sealed class InMemoryVault : IConfigVault
     {
     }
 
-    private InMemoryVault(VaultAvailability availability, SaveBehavior saveBehavior)
+    private InMemoryVault(
+        VaultAvailability availability,
+        SaveBehavior saveBehavior,
+        VaultBackendKind kind = VaultBackendKind.None)
     {
         _availability = availability;
         _saveBehavior = saveBehavior;
+        _kind = kind;
     }
 
-    public VaultBackendKind Kind => VaultBackendKind.None;
+    /// <summary>
+    /// The store for a single-use session: identical behaviour, but it identifies itself as a
+    /// chosen backend so the sync queue drains into it and the tabs treat it as a live vault.
+    /// Nothing it holds ever leaves this object, and the gate drops the whole instance on
+    /// disconnect, which is what makes "purge from memory" true rather than approximately true.
+    /// </summary>
+    public static InMemoryVault ForSingleUse() =>
+        new(VaultAvailability.Ready, SaveBehavior.Succeed, VaultBackendKind.SingleUse);
+
+    public VaultBackendKind Kind => _kind;
 
     public string VaultName { get; private set; } = VaultConstants.VaultName;
 
