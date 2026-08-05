@@ -56,9 +56,17 @@ jobs:
           format: 'table'
           exit-code: '1'
 
-      # 'misconfig' is the current name; 'config' is the pre-0.42 spelling. Trivy no longer
-      # recognises it, so this step was enabling no scanner at all -- which is why every target in
-      # the summary reported "-" (not scanned) rather than "0" (clean) under Misconfigurations.
+      # 'misconfig' is the current name; 'config' is the old spelling, which Trivy still accepts
+      # while logging a deprecation warning. Renaming it silences that warning and nothing else.
+      #
+      # This step reports "-" (not scanned) against every target, and that is correct rather than
+      # broken: Trivy's misconfiguration scanner covers Terraform, CloudFormation, Kubernetes,
+      # Dockerfile, Helm and Azure ARM, and this repository contains none of them -- the log says
+      # "Detected config files num=0". GitHub Actions workflows are not in that set, so nothing here
+      # lints them; that would want a dedicated tool such as actionlint or zizmor.
+      #
+      # Kept anyway. It costs seconds, and the day a Dockerfile or a Helm chart lands in this repo
+      # is the day it starts earning its place, with nobody having to remember to add it.
       - name: Run Trivy Misconfiguration Scanner
         if: always()
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -70,20 +78,3 @@ jobs:
           format: 'table'
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
-
-      # The same scan again with nothing filtered out, and deliberately unable to fail the build.
-      #
-      # The gate above is the policy: CRITICAL and HIGH stop a merge. But misconfiguration findings
-      # for GitHub Actions workflows are largely MEDIUM and LOW, so a gate-only step prints an empty
-      # table and reads as "nothing to see" when there may be plenty. This makes the rest visible
-      # without turning every advisory finding into a broken build.
-      - name: Report Trivy Misconfigurations (all severities, advisory)
-        if: always()
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          version: 'v0.73.0'
-          scan-type: 'fs'
-          scan-ref: '.'
-          scanners: 'misconfig'
-          format: 'table'
-          exit-code: '0'
