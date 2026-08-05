@@ -183,6 +183,9 @@ public class VaultSwitchIsolationTests
         }
 
         public Task<VaultStatus> ProbeAsync(CancellationToken ct = default) => _inner.ProbeAsync(ct);
+
+        public Task<VaultStatus> ProbeAsync(VaultProbeDepth depth, CancellationToken ct = default) =>
+            _inner.ProbeAsync(depth, ct);
         public Task CreateVaultAsync(string vaultName, CancellationToken ct = default) => _inner.CreateVaultAsync(vaultName, ct);
         public Task UseExistingVaultAsync(string vaultName, CancellationToken ct = default) => _inner.UseExistingVaultAsync(vaultName, ct);
         public void Forget() => _inner.Forget();

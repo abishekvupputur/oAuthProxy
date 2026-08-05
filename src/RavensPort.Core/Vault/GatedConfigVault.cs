@@ -26,6 +26,9 @@ public sealed class GatedConfigVault(VaultGateService gate) : IConfigVault
 
     public Task<VaultStatus> ProbeAsync(CancellationToken ct = default) => Current.ProbeAsync(ct);
 
+    public Task<VaultStatus> ProbeAsync(VaultProbeDepth depth, CancellationToken ct = default) =>
+        Current.ProbeAsync(depth, ct);
+
     public Task CreateVaultAsync(string vaultName, CancellationToken ct = default) =>
         Current.CreateVaultAsync(vaultName, ct);
 

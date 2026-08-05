@@ -113,7 +113,10 @@ public sealed class ProtonPassVaultProvider(
     /// </summary>
     public string? PersonalAccessToken { get; set; }
 
-    public async Task<VaultStatus> ProbeAsync(CancellationToken ct = default)
+    public Task<VaultStatus> ProbeAsync(CancellationToken ct = default) =>
+        ProbeAsync(VaultProbeDepth.Full, ct);
+
+    public async Task<VaultStatus> ProbeAsync(VaultProbeDepth depth, CancellationToken ct = default)
     {
         _exePath = exePathOverride ?? VaultProbe.FindProtonPass();
         if (_exePath is null || !File.Exists(_exePath)) return VaultStatus.NotInstalled(Kind);
@@ -142,6 +145,15 @@ public sealed class ProtonPassVaultProvider(
         {
             var versionResult = await RunAsync(["--version"], ct: ct);
             version = versionResult.Succeeded ? VaultProbe.ParseVersion(versionResult.StdOut)?.ToString() : null;
+
+            // A discovery probe stops here: `vault list` is a network round trip against the user's
+            // account, and the vault and item listings after it are several more. The check above
+            // has already reported the states that can be known for free, so what is left is
+            // genuinely "RavensPort has not asked yet".
+            if (depth == VaultProbeDepth.Discovery)
+            {
+                return VaultStatus.NotConnected(Kind, _exePath, version);
+            }
 
             vaultList = await RunAsync(["vault", "list", "--output", "json"], ct: ct);
         }

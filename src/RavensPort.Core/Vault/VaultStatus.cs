@@ -9,6 +9,17 @@ public enum VaultAvailability
     /// <summary>The CLI binary could not be found. The user needs to install it.</summary>
     NotInstalled,
 
+    /// <summary>
+    /// Installed, and nothing beyond that has been asked. The state a
+    /// <see cref="VaultProbeDepth.Discovery"/> probe reports for a manager that is present on the
+    /// machine: finding out whether it is signed in means running a command that can raise an
+    /// unlock prompt, and that is the user's to trigger — see <see cref="VaultProbeDepth"/>.
+    ///
+    /// Distinct from <see cref="NotSignedIn"/> on purpose. "You need to authenticate" is a claim
+    /// about the manager; this is a statement about RavensPort not having looked.
+    /// </summary>
+    NotConnected,
+
     /// <summary>The binary runs but has no usable session — locked, signed out, or the desktop-app
     /// integration is off.</summary>
     NotSignedIn,
@@ -76,6 +87,13 @@ public sealed record VaultStatus(
 
     public static VaultStatus NotInstalled(VaultBackendKind kind) =>
         new(kind, VaultAvailability.NotInstalled);
+
+    /// <summary>
+    /// Found on this machine, and deliberately not questioned any further. What a
+    /// <see cref="VaultProbeDepth.Discovery"/> probe reports.
+    /// </summary>
+    public static VaultStatus NotConnected(VaultBackendKind kind, string? exePath, string? version) =>
+        new(kind, VaultAvailability.NotConnected, exePath, version);
 
     public static VaultStatus Faulted(VaultBackendKind kind, string detail, string? exePath = null) =>
         new(kind, VaultAvailability.Faulted, ExePath: exePath, Detail: detail);

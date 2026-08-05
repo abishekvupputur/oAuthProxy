@@ -350,6 +350,10 @@ public class DeferredSyncTests : IDisposable
             Task.FromResult(new VaultStatus(Kind,
                 IsLocked ? VaultAvailability.NotSignedIn : VaultAvailability.Ready, VaultId: "switchable"));
 
+        /// <summary>Depth is irrelevant here: nothing about this fake can prompt anyone.</summary>
+        public Task<VaultStatus> ProbeAsync(VaultProbeDepth depth, CancellationToken ct = default) =>
+            ProbeAsync(ct);
+
         public Task CreateVaultAsync(string vaultName, CancellationToken ct = default) =>
             _inner.CreateVaultAsync(vaultName, ct);
 

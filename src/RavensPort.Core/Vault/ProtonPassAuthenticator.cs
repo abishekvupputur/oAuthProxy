@@ -211,7 +211,9 @@ public sealed partial class ProtonPassAuthenticator(
         // ConfigureAwait(false), so by this line execution is on a thread-pool thread, and the
         // Hello prompt needs a foreground window to parent itself to. Without one the credential
         // service does not prompt at all, it returns UserCanceled immediately.
-        await gate.EvaluateAsync(ct).ConfigureAwait(false);
+        // Full depth: the sign-in just happened, so this is the one moment where asking the CLI
+        // everything costs the user nothing — the session is open and no prompt can result.
+        await gate.EvaluateAsync(VaultProbeDepth.Full, ct).ConfigureAwait(false);
     }
 
     /// <summary>
