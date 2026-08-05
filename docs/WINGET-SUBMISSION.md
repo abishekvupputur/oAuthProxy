@@ -75,8 +75,8 @@ Values that were not invented for the manifest, and where they came from:
 ```powershell
 winget install Microsoft.WingetCreate
 wingetcreate update AbishekNarasimhan.RavensPort `
-  --version 4.1.6 `
-  --urls https://github.com/abishekvupputur/ravensPort/releases/download/v4.1.6/RavensPort-Setup-4.1.6.exe `
+  --version 4.1.7 `
+  --urls https://github.com/abishekvupputur/ravensPort/releases/download/v4.1.7/RavensPort-Setup-4.1.7.exe `
   --submit
 ```
 
