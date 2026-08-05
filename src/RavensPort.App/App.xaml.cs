@@ -233,7 +233,7 @@ public partial class App : Application
         // was blocking this thread while a continuation tried to post back onto it; this never
         // blocks, and every piece of work below is still wrapped in Task.Run so nothing captures
         // the Dispatcher's SynchronizationContext.
-        _ = OfferHelloThenCheckAsync(setupViewModel);
+        _ = CheckForManagersAsync(setupViewModel);
     }
 
     /// <summary>
@@ -305,34 +305,26 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Offers to unlock with Windows Hello before falling through to the ordinary startup check.
+    /// Finds out what is installed, and nothing more.
     ///
-    /// This is what lets a machine that has done this once come up without anyone visiting the
-    /// setup page: consent, gesture, vault open, proxy started. Declining is not a failure — the
-    /// check below then finds a locked session, and the setup page offers the same gesture again on
-    /// a button the user presses when they are ready.
+    /// This used to raise a Windows Hello prompt on the way past and then probe both managers in
+    /// full, which meant launching RavensPort produced a queue of authentication prompts — a
+    /// gesture, then a desktop-app approval per 1Password command — before the user had said which
+    /// manager they wanted or whether they wanted one at all. Both now belong to the Connect button
+    /// on the setup page, so a launch costs nothing and asks nobody for anything.
     /// </summary>
-    private async Task OfferHelloThenCheckAsync(SetupViewModel setupViewModel)
+    private async Task CheckForManagersAsync(SetupViewModel setupViewModel)
     {
         try
         {
-            var authenticator = _webApp!.Services.GetRequiredService<ProtonPassAuthenticator>();
-
-            if (authenticator.HasHelloKey && await authenticator.IsHelloAvailableAsync())
-            {
-                // Shown, and kept open, for the whole prompt: Hello attaches to the foreground
-                // window, and this tray app has no other one at startup.
-                HelloConsentWindow.RequestUnlock(authenticator.UnlockWithHelloAsync);
-            }
+            await setupViewModel.CheckAsync();
         }
         catch (Exception ex)
         {
             // Never allowed to stop the app reaching its setup page — that page is the only thing
             // that can explain what went wrong, and offer the retry or the discard.
-            _webApp?.Services.GetService<ActivityLog>()?.LogError("Windows Hello unlock at startup failed", ex);
+            _webApp?.Services.GetService<ActivityLog>()?.LogError("Startup password-manager check failed", ex);
         }
-
-        await setupViewModel.CheckAsync();
     }
 
     /// <summary>
@@ -494,7 +486,29 @@ public partial class App : Application
     private bool ConfirmExitWithUnsavedChanges()
     {
         var configStoreCache = _webApp?.Services.GetService<ConfigStoreCache>();
-        if (configStoreCache is null || !configStoreCache.HasPendingChanges) return true;
+        if (configStoreCache is null) return true;
+
+        // Single use has no pending changes to warn about — every save succeeds, into memory — and
+        // that is exactly what makes the warning necessary. There is no vault behind it, so exiting
+        // is not "losing the last few edits", it is losing all of it, and nothing else in the app
+        // gets a chance to say so after this point.
+        if (_webApp!.Services.GetService<VaultGateService>() is { IsSingleUse: true }
+            && HasAnythingWorthKeeping(configStoreCache))
+        {
+            return MessageBox.Show(
+                "RavensPort is running in single use, so this configuration is held in memory only."
+                + $"{Environment.NewLine}{Environment.NewLine}"
+                + "Exiting discards every credential, route, funnel and key you set up in this "
+                + "session. None of it can be recovered."
+                + $"{Environment.NewLine}{Environment.NewLine}"
+                + "To keep it, choose Cancel and connect a password manager from the Settings tab.",
+                "RavensPort — single use",
+                MessageBoxButton.OKCancel,
+                MessageBoxImage.Warning,
+                MessageBoxResult.Cancel) == MessageBoxResult.OK;
+        }
+
+        if (!configStoreCache.HasPendingChanges) return true;
 
         // One last attempt first. The manager is often unlocked by now — the user may have
         // unlocked it for something else entirely — and warning about losing changes that could
@@ -529,6 +543,22 @@ public partial class App : Application
             MessageBoxResult.Cancel);
 
         return answer == MessageBoxResult.OK;
+    }
+
+    /// <summary>
+    /// Whether a single-use session has anything in it worth interrupting an exit over. Somebody
+    /// who pressed "Start in single use" to look around and then quit should not be asked to
+    /// confirm losing nothing.
+    /// </summary>
+    private static bool HasAnythingWorthKeeping(ConfigStoreCache configStoreCache)
+    {
+        var store = configStoreCache.Current;
+
+        return store.Credentials.Count > 0
+               || store.Routes.Count > 0
+               || store.Upstreams.Count > 0
+               || store.McpSources.Count > 0
+               || store.McpFunnels.Count > 0;
     }
 
     private static void ReportStartupFailure(Exception ex)
