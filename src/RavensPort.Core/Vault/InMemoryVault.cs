@@ -124,6 +124,10 @@ public sealed class InMemoryVault : IConfigVault
     public Task<VaultStatus> ProbeAsync(CancellationToken ct = default) =>
         Task.FromResult(new VaultStatus(Kind, _availability, VaultId: "in-memory"));
 
+    /// <summary>Depth changes nothing here: there is no CLI to launch and nobody to prompt.</summary>
+    public Task<VaultStatus> ProbeAsync(VaultProbeDepth depth, CancellationToken ct = default) =>
+        ProbeAsync(ct);
+
     /// <summary>Records the name. There is only ever one vault here, and it always exists.</summary>
     public Task CreateVaultAsync(string vaultName, CancellationToken ct = default)
     {

@@ -151,6 +151,9 @@ public class VaultLoadGateTests
         public abstract Task<ConfigStore> LoadAsync(CancellationToken ct = default);
 
         public Task<VaultStatus> ProbeAsync(CancellationToken ct = default) => Inner.ProbeAsync(ct);
+
+        public Task<VaultStatus> ProbeAsync(VaultProbeDepth depth, CancellationToken ct = default) =>
+            Inner.ProbeAsync(depth, ct);
         public Task CreateVaultAsync(string vaultName, CancellationToken ct = default) => Inner.CreateVaultAsync(vaultName, ct);
         public Task UseExistingVaultAsync(string vaultName, CancellationToken ct = default) => Inner.UseExistingVaultAsync(vaultName, ct);
         public void Forget() => Inner.Forget();

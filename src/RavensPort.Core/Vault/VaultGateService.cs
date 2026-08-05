@@ -69,13 +69,22 @@ public sealed class VaultGateService
     /// Probes both managers and resolves a backend if it can. Safe to call repeatedly — the setup
     /// page's "Check again" is exactly this.
     /// </summary>
-    public async Task<VaultGateStatus> EvaluateAsync(CancellationToken ct = default)
+    /// <param name="depth">
+    /// How much the probe may disturb the user. <see cref="VaultProbeDepth.Discovery"/> — what the
+    /// setup page's startup check uses — cannot resolve a backend at all, because knowing whether a
+    /// manager is signed in means asking it, and asking it is what raises the prompt. It answers
+    /// "what is installed here", and the user connects the one they meant. The default stays
+    /// <see cref="VaultProbeDepth.Full"/> for callers that have just done something authenticating
+    /// and need the real answer, such as a Proton Pass sign-in.
+    /// </param>
+    public async Task<VaultGateStatus> EvaluateAsync(
+        VaultProbeDepth depth = VaultProbeDepth.Full, CancellationToken ct = default)
     {
         // Concurrently: each is a subprocess launch that may sit on an unlock prompt, and running
         // them in sequence would double the worst case on the startup path.
         var probes = await Task.WhenAll(
-            ProbeSafelyAsync(_onePassword, ct),
-            ProbeSafelyAsync(_protonPass, ct));
+            ProbeSafelyAsync(_onePassword, depth, ct),
+            ProbeSafelyAsync(_protonPass, depth, ct));
 
         var ready = probes.Where(p => p.IsReady).ToList();
 
@@ -223,11 +232,12 @@ public sealed class VaultGateService
         }
     }
 
-    private static async Task<VaultStatus> ProbeSafelyAsync(IConfigVault vault, CancellationToken ct)
+    private static async Task<VaultStatus> ProbeSafelyAsync(
+        IConfigVault vault, VaultProbeDepth depth, CancellationToken ct)
     {
         try
         {
-            return await vault.ProbeAsync(ct);
+            return await vault.ProbeAsync(depth, ct);
         }
         catch (Exception ex)
         {

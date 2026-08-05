@@ -98,7 +98,10 @@ public sealed class OnePasswordVaultProvider(
     /// </summary>
     public string? ServiceAccountToken { get; set; }
 
-    public async Task<VaultStatus> ProbeAsync(CancellationToken ct = default)
+    public Task<VaultStatus> ProbeAsync(CancellationToken ct = default) =>
+        ProbeAsync(VaultProbeDepth.Full, ct);
+
+    public async Task<VaultStatus> ProbeAsync(VaultProbeDepth depth, CancellationToken ct = default)
     {
         _exePath = exePathOverride ?? VaultProbe.FindOnePassword();
         if (_exePath is null || (!File.Exists(_exePath) && _exePath != "native")) return VaultStatus.NotInstalled(Kind);
@@ -124,6 +127,14 @@ public sealed class OnePasswordVaultProvider(
             return VaultStatus.Faulted(Kind,
                 $"1Password CLI {version} is too old — {VaultProbe.MinimumOnePasswordVersion} or newer is required.",
                 _exePath);
+        }
+
+        // Everything past this point talks to the user's account, and `op` answers by asking the
+        // desktop app — which is a biometric prompt, once per command, and there are several
+        // commands below. A discovery probe stops here and says only what it can see from disk.
+        if (depth == VaultProbeDepth.Discovery)
+        {
+            return VaultStatus.NotConnected(Kind, _exePath, version?.ToString());
         }
 
         CliResult vaultList;

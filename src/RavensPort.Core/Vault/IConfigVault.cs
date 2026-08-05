@@ -29,6 +29,17 @@ public interface IConfigVault
     Task<VaultStatus> ProbeAsync(CancellationToken ct = default);
 
     /// <summary>
+    /// The same check, bounded by how much the caller is allowed to disturb the user.
+    ///
+    /// A <see cref="VaultProbeDepth.Discovery"/> probe must not run anything that can raise an
+    /// unlock prompt: locating the binary and asking its version is the whole budget, and the
+    /// answer for an installed manager is <see cref="VaultAvailability.NotConnected"/>. That is
+    /// what lets the app start without demanding a gesture for each password manager the machine
+    /// happens to have — see <see cref="VaultProbeDepth"/>.
+    /// </summary>
+    Task<VaultStatus> ProbeAsync(VaultProbeDepth depth, CancellationToken ct = default);
+
+    /// <summary>
     /// Creates a vault with the given name and starts using it.
     ///
     /// The name is the user's rather than fixed: RavensPort is only the default this app looks
