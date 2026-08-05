@@ -67,6 +67,14 @@ public sealed partial class SetupViewModel(
         StatusMessage = message;
     }
 
+    /// <summary>
+    /// Looks at what is installed, and stops there.
+    ///
+    /// Deliberately a discovery probe. The version that ran a full probe on both managers opened the
+    /// app with a queue of authentication prompts — a 1Password desktop approval per CLI call, a
+    /// Proton Pass unlock — before the user had said which manager they wanted, or whether they
+    /// wanted one at all. Connecting is now a button per card, and the prompts belong to it.
+    /// </summary>
     [RelayCommand]
     public async Task CheckAsync()
     {
@@ -75,19 +83,19 @@ public sealed partial class SetupViewModel(
         NativeCliRunner.ResetInitialization();
 
         IsBusy = true;
-        StatusMessage = "Checking…";
+        StatusMessage = "Looking for password managers…";
 
         try
         {
-            // Asked once and cached: a WinRT capability check that cannot change while the app runs,
-            // on the path that already blocks on two CLI probes.
+            // Asked once and cached: a WinRT capability check that cannot change while the app runs.
+            // It raises no prompt of its own — it reports whether Hello could prompt.
             if (!_helloChecked)
             {
                 _isHelloAvailable = await protonAuthenticator.IsHelloAvailableAsync();
                 _helloChecked = true;
             }
 
-            var status = await Task.Run(() => gate.EvaluateAsync());
+            var status = await Task.Run(() => gate.EvaluateAsync(VaultProbeDepth.Discovery));
             Apply(status);
 
             if (status.IsReady) await StartAsync("Loading your configuration from the vault…");
@@ -97,6 +105,110 @@ public sealed partial class SetupViewModel(
             // The setup page is the last thing standing between the user and an app that does
             // nothing without explaining itself, so it absorbs everything.
             activityLog.LogError("Vault check failed", ex);
+            StatusMessage = ex.Message;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// Asks one password manager for real — the button that owns the authentication prompt.
+    ///
+    /// Everything the startup check refuses to do happens here, for this manager only: the Hello
+    /// gesture that opens RavensPort's Proton Pass session, the 1Password desktop approval, the
+    /// vault and item listings behind them. The user pressed a button that says "connect", so a
+    /// prompt is the expected answer rather than an ambush.
+    /// </summary>
+    [RelayCommand]
+    private async Task ConnectAsync(ManagerCardViewModel card)
+    {
+        if (IsBusy || IsSigningIn) return;
+
+        // Answered here rather than by attempting the connection: the SDK opens against a named
+        // account, so a blank name fails inside the runner and comes back as a CLI error on the
+        // card — which reads as "1Password refused" rather than "you have not filled the box in".
+        if (card.Kind == VaultBackendKind.OnePassword && string.IsNullOrWhiteSpace(card.OnePasswordAccountName))
+        {
+            StatusMessage = "Enter your 1Password account name first — it is at the top of the "
+                            + "1Password desktop app's sidebar.";
+            return;
+        }
+
+        IsBusy = true;
+        StatusMessage = $"Connecting to {card.Name}…";
+
+        try
+        {
+            // Proton Pass first, and on this thread: the session key is what every pass-cli call
+            // below needs, it lives behind a Hello gesture, and that gesture needs a foreground
+            // window to attach to. Declining leaves the probe to report an unopened session, which
+            // is the truth and comes with its own buttons.
+            var unlocked = false;
+
+            if (card.Kind == VaultBackendKind.ProtonPass && CanUnlockWithHello)
+            {
+                if (!HelloConsentWindow.RequestUnlock(protonAuthenticator.UnlockWithHelloAsync))
+                {
+                    StatusMessage = "Not unlocked. Try Windows Hello again, or discard this session and sign in.";
+                    NotifySessionStateChanged();
+                    Apply(gate.Status);
+                    return;
+                }
+
+                unlocked = true;
+                NotifySessionStateChanged();
+            }
+
+            // A successful unlock has already connected this manager — see
+            // ProtonPassAuthenticator.UnlockWithHelloAsync — so probing again would be a second
+            // round of CLI calls for an answer already on hand.
+            var status = unlocked ? gate.Status : await Task.Run(() => gate.ConnectAsync(card.Kind));
+            Apply(status);
+
+            if (status.IsReady) await StartAsync($"Loading your configuration from {card.Name}…");
+        }
+        catch (VaultCliException ex)
+        {
+            StatusMessage = ex.Message;
+            NotifySessionStateChanged();
+        }
+        catch (Exception ex)
+        {
+            activityLog.LogError($"Could not connect to {card.Name}", ex);
+            StatusMessage = ex.Message;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// Starts the app on memory alone — every tab, every route, every funnel, and no password
+    /// manager anywhere near it.
+    ///
+    /// The point is to be able to try the whole thing, or test a change to it, without unlocking a
+    /// vault first. What it costs is stated on the card and again on the Settings tab: nothing is
+    /// written anywhere, so disconnecting or exiting takes the configuration with it.
+    /// </summary>
+    [RelayCommand]
+    private async Task StartSingleUseAsync()
+    {
+        if (IsBusy || IsSigningIn) return;
+
+        IsBusy = true;
+
+        try
+        {
+            Apply(gate.UseSingleUse());
+
+            await StartAsync("Starting in single use — nothing will be saved to a password manager…");
+        }
+        catch (Exception ex)
+        {
+            activityLog.LogError("Could not start in single use", ex);
             StatusMessage = ex.Message;
         }
         finally
@@ -661,7 +773,16 @@ public sealed partial class SetupViewModel(
             _ when status.Statuses.Any(s => s.CanCreateVault) =>
                 $"Almost there — create the '{VaultConstants.VaultName}' vault to finish.",
             _ when status.Statuses.All(s => s.Availability == VaultAvailability.NotInstalled) =>
-                "No supported password manager found. Install 1Password or Proton Pass to continue.",
+                "No supported password manager found. Install 1Password or Proton Pass to continue, "
+                + "or try RavensPort in single use.",
+
+            // Nothing has been asked yet, which is the normal state at startup now — say so, rather
+            // than reporting a lock nobody has actually run into.
+            _ when status.Statuses.Any(s => s.Availability == VaultAvailability.NotConnected) =>
+                gate.IsDisconnected
+                    ? "Disconnected. Connect a password manager to load a configuration again."
+                    : "Choose a password manager and connect to it — that is when it will ask you to unlock.",
+
             _ => "Unlock or sign in to your password manager, then choose Check again.",
         };
     }

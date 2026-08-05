@@ -20,6 +20,11 @@ public sealed partial class ManagerCardViewModel(VaultStatus status) : Observabl
     {
         VaultAvailability.NotInstalled => "Not installed",
 
+        // Says what RavensPort has done, not what the manager is: a discovery probe found the
+        // binary and asked it nothing else, so "locked" or "signed out" would be a guess — and the
+        // command that would settle it is the one that raises the prompt.
+        VaultAvailability.NotConnected => "Installed — not connected",
+
         // "Locked or signed out" hedges because for 1Password it genuinely could be either, and
         // only the CLI knows which. RavensPort owns its Proton Pass session, so there it does know:
         // not signed in, or signed in and waiting for the key — and the Detail line says which.
@@ -118,6 +123,33 @@ public sealed partial class ManagerCardViewModel(VaultStatus status) : Observabl
     public bool ShowVaultChoice => Availability == VaultAvailability.VaultChoiceNeeded;
 
     /// <summary>
+    /// Whether to offer the Connect button — the one action on this card that is allowed to raise
+    /// an authentication prompt, and the only thing offered while nothing has been asked yet.
+    /// </summary>
+    public bool ShowConnect => Availability == VaultAvailability.NotConnected;
+
+    /// <summary>Names the manager on the button, so two cards do not both say "Connect".</summary>
+    public string ConnectLabel => $"Connect to {Name}";
+
+    /// <summary>
+    /// What pressing it will actually do, per manager. Said in advance because the prompt that
+    /// follows is the app asking for the user's credentials, and one that arrives unannounced is
+    /// one people learn to click through.
+    /// </summary>
+    public string ConnectPrompt => Kind switch
+    {
+        VaultBackendKind.OnePassword =>
+            "1Password will ask you to unlock — its desktop app approves each command RavensPort "
+            + "runs. Nothing is read from your vaults until you press this.",
+
+        VaultBackendKind.ProtonPass =>
+            "RavensPort will open its own Proton Pass session, which means a Windows Hello gesture "
+            + "if you have signed in here before. Nothing is read from your vaults until you press this.",
+
+        _ => "Nothing is read from your vaults until you press this.",
+    };
+
+    /// <summary>
     /// Whether RavensPort can install the CLI and drive the sign-in itself, rather than only
     /// telling the user how.
     ///
@@ -132,7 +164,14 @@ public sealed partial class ManagerCardViewModel(VaultStatus status) : Observabl
     public bool ShowInAppSignIn => ShowSignIn && SupportsInAppSignIn;
     
     public bool IsOnePassword => Kind == VaultBackendKind.OnePassword;
-    public bool ShowOnePasswordSettings => IsOnePassword && (Availability == VaultAvailability.NotSignedIn || Availability == VaultAvailability.Faulted);
+
+    /// <summary>
+    /// Whether to show the account-name box in the <em>failed-connect</em> section. Deliberately not
+    /// including <see cref="VaultAvailability.NotConnected"/>: that state has its own copy of the
+    /// box beside the Connect button, and a card showing two would be asking which one counts.
+    /// </summary>
+    public bool ShowOnePasswordSettings => IsOnePassword && Availability is
+        VaultAvailability.NotSignedIn or VaultAvailability.Faulted;
 
     public string OnePasswordAccountName
     {
@@ -143,6 +182,12 @@ public sealed partial class ManagerCardViewModel(VaultStatus status) : Observabl
             {
                 LocalSettings.Current.OnePasswordAccountName = value;
                 LocalSettings.Save();
+
+                // The SDK client is initialised once per account name and then cached, so a name
+                // corrected after a failed connect would otherwise keep reconnecting as the old
+                // one until something else happened to reset it.
+                NativeCliRunner.ResetInitialization();
+
                 OnPropertyChanged(nameof(OnePasswordAccountName));
             }
         }

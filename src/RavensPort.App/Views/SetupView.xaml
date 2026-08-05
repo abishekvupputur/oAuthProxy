@@ -25,12 +25,33 @@
                     Style="{StaticResource EmphasisRunStyle}">Nothing is stored on this PC</Run><Run
                     >, so the proxy does not start until one of them is unlocked.</Run></TextBlock>
 
+                <!-- Says the thing the page's own behaviour now demonstrates. Startup only looks for
+                     the binaries; no manager is asked anything, so no manager prompts. -->
+                <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,16"><Run
+                    Style="{StaticResource EmphasisRunStyle}">You will only be asked to unlock when you press Connect.</Run><Run
+                    xml:space="preserve"> RavensPort checks which password managers are installed and stops there — it does not read your vaults, or open a session, until you choose one.</Run></TextBlock>
+
                 <!-- Experimental warning requested by user -->
                 <Border Background="{StaticResource PanelAltBrush}" BorderBrush="{StaticResource BorderBrush0}"
                         BorderThickness="1" Padding="11,9" CornerRadius="6" Margin="0,0,0,14">
                     <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Foreground="{StaticResource TextBrush}" FontWeight="Bold"><Run
                         Style="{StaticResource EmphasisRunStyle}">Experimental feature:</Run><Run
                         xml:space="preserve"> Having a second vault per password manager and using two password managers at the same time, although possible, is still experimental and is under testing.</Run></TextBlock>
+                </Border>
+
+                <!-- Standalone rather than part of the "which vault" card below. That card only
+                     appears when more than one manager has already been opened, and after a
+                     disconnect nothing has been opened at all — so the explanation for why the app
+                     is suddenly serving nothing had nowhere to appear. -->
+                <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14"
+                        Visibility="{Binding IsDisconnected, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <StackPanel>
+                        <TextBlock Text="Disconnected" Style="{StaticResource SectionHeaderStyle}"/>
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"><Run
+                            xml:space="preserve">You disconnected, so </Run><Run
+                            Style="{StaticResource EmphasisRunStyle}">RavensPort is holding no configuration and is proxying nothing</Run><Run
+                            xml:space="preserve">. Connect a password manager below to load one, or start again in single use. Nothing in your vault was deleted.</Run></TextBlock>
+                    </StackPanel>
                 </Border>
 
                 <!-- Port conflict: shown instead of the manager cards, since the vault is fine and
@@ -140,6 +161,48 @@
                                                Margin="0,0,0,6"
                                                Visibility="{Binding HasDetail, Converter={StaticResource BoolToVisibilityConverter}}"/>
 
+                                    <!-- The button that owns the prompt. Nothing on the startup path
+                                         asks this manager anything, so this is where the unlock,
+                                         the Hello gesture and the desktop-app approval happen —
+                                         once, for the manager the user actually meant. -->
+                                    <StackPanel Visibility="{Binding ShowConnect, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <TextBlock Text="{Binding ConnectPrompt}" Style="{StaticResource HintTextStyle}"
+                                                   TextWrapping="Wrap" Margin="0,0,0,8"/>
+
+                                        <!-- 1Password: the account name and the button belong on one
+                                             row, because neither is any use without the other. The
+                                             SDK opens its connection *to a named account*, so
+                                             Connect with an empty box could only fail — and the
+                                             box on its own does nothing until Connect is pressed. -->
+                                        <StackPanel Visibility="{Binding IsOnePassword, Converter={StaticResource BoolToVisibilityConverter}}">
+                                            <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap"
+                                                       Margin="0,0,0,6"
+                                                       Text="Your 1Password account name — the exact name at the top of the 1Password desktop app sidebar, such as 'Personal' or 'Our Family'."/>
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBox Width="230" VerticalAlignment="Center"
+                                                         Text="{Binding OnePasswordAccountName, UpdateSourceTrigger=PropertyChanged}"/>
+                                                <Button Content="{Binding ConnectLabel}" Margin="8,0,0,0" MinWidth="170"
+                                                        IsEnabled="{Binding DataContext.IsBusy,
+                                                                    RelativeSource={RelativeSource AncestorType=UserControl},
+                                                                    Converter={StaticResource InverseBoolConverter}}"
+                                                        Command="{Binding DataContext.ConnectCommand,
+                                                                  RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                        CommandParameter="{Binding}"/>
+                                            </StackPanel>
+                                        </StackPanel>
+
+                                        <!-- Proton Pass has no equivalent field: its session is
+                                             RavensPort's own, so there is nothing to name. -->
+                                        <Button Content="{Binding ConnectLabel}" HorizontalAlignment="Left" MinWidth="170"
+                                                Visibility="{Binding IsOnePassword, Converter={StaticResource InverseBoolToVisibilityConverter}}"
+                                                IsEnabled="{Binding DataContext.IsBusy,
+                                                            RelativeSource={RelativeSource AncestorType=UserControl},
+                                                            Converter={StaticResource InverseBoolConverter}}"
+                                                Command="{Binding DataContext.ConnectCommand,
+                                                          RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                CommandParameter="{Binding}"/>
+                                    </StackPanel>
+
                                     <StackPanel Visibility="{Binding ShowInstall, Converter={StaticResource BoolToVisibilityConverter}}">
                                         <TextBlock Text="Install it, then choose Check again."
                                                    Style="{StaticResource HintTextStyle}" Margin="0,0,0,6"/>
@@ -166,10 +229,25 @@
                                         </StackPanel>
                                     </StackPanel>
 
+                                    <!-- After a connect that did not work. The box is here as well as
+                                         beside the Connect button above because a wrong account
+                                         name is the usual reason, and the retry has to be next to
+                                         the correction — otherwise fixing it means finding "Check
+                                         again" at the bottom of the page first. -->
                                     <StackPanel Visibility="{Binding ShowOnePasswordSettings, Converter={StaticResource BoolToVisibilityConverter}}">
                                         <TextBlock Text="Set your 1Password Account Name:" Style="{StaticResource HintTextStyle}" Margin="0,0,0,6"/>
                                         <TextBlock Text="Enter the exact account name shown at the top of your 1Password desktop app sidebar (e.g. 'Our Family' or 'Personal')." Style="{StaticResource HintTextStyle}" Margin="0,0,0,8"/>
-                                        <TextBox Text="{Binding OnePasswordAccountName, UpdateSourceTrigger=PropertyChanged}" Width="250" HorizontalAlignment="Left" Margin="0,0,0,16"/>
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,16">
+                                            <TextBox Width="230" VerticalAlignment="Center"
+                                                     Text="{Binding OnePasswordAccountName, UpdateSourceTrigger=PropertyChanged}"/>
+                                            <Button Content="{Binding ConnectLabel}" Margin="8,0,0,0" MinWidth="170"
+                                                    IsEnabled="{Binding DataContext.IsBusy,
+                                                                RelativeSource={RelativeSource AncestorType=UserControl},
+                                                                Converter={StaticResource InverseBoolConverter}}"
+                                                    Command="{Binding DataContext.ConnectCommand,
+                                                              RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                    CommandParameter="{Binding}"/>
+                                        </StackPanel>
                                     </StackPanel>
 
                                     <StackPanel Visibility="{Binding ShowSignIn, Converter={StaticResource BoolToVisibilityConverter}}">
@@ -440,6 +518,26 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+
+                <!-- The way in for someone who wants to see what this is before handing it a vault,
+                     and the way to test a build without unlocking anything. Everything works; the
+                     configuration simply has nowhere to live but this process. -->
+                <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14">
+                    <StackPanel>
+                        <TextBlock Text="Try it without a password manager" Style="{StaticResource SectionHeaderStyle}"/>
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"><Run
+                            xml:space="preserve">Single use runs RavensPort on memory alone — every tab, every route, every MCP funnel, every credential, with </Run><Run
+                            Style="{StaticResource EmphasisRunStyle}">no password manager involved and no prompt to unlock anything</Run><Run
+                            xml:space="preserve">.</Run></TextBlock>
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"><Run
+                            Style="{StaticResource EmphasisRunStyle}">Nothing is saved.</Run><Run
+                            xml:space="preserve"> The configuration exists only inside this process: disconnecting on the Settings tab discards it, and so does closing RavensPort. Real credentials and real tokens work here — they are simply gone afterwards, and any OAuth grant you connect will need connecting again next time.</Run></TextBlock>
+                        <Button Content="Start in single use" HorizontalAlignment="Left" MinWidth="170"
+                                Style="{StaticResource GhostButtonStyle}"
+                                IsEnabled="{Binding CanCheck}"
+                                Command="{Binding StartSingleUseCommand}"/>
+                    </StackPanel>
+                </Border>
 
                 <!-- Only shown when the pre-vault file is actually there. -->
                 <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14"
