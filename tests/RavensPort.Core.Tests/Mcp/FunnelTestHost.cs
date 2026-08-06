@@ -1,3 +1,4 @@
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
@@ -47,18 +48,40 @@ internal sealed class FunnelTestHost : IAsyncDisposable
 
     public ActivityLog ActivityLog => _proxy.Services.GetRequiredService<ActivityLog>();
 
-    public static async Task<FunnelTestHost> StartAsync()
+    /// <summary>
+    /// Starts the pipeline. With <paramref name="mtls"/> the listener is the app's mTLS one:
+    /// https, a client certificate demanded on every connection, and the funnel's hop into its own
+    /// routes having to satisfy that demand like any other caller.
+    /// </summary>
+    public static async Task<FunnelTestHost> StartAsync(bool mtls = false)
     {
         var logPath = Path.Combine(Path.GetTempPath(), $"ravensport-funnel-logs-{Guid.NewGuid()}");
+        var pfx = mtls ? MtlsCertificateFactory.GenerateClientCertificatePfx() : null;
 
         var builder = WebApplication.CreateBuilder();
-        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.WebHost.UseUrls($"{(mtls ? "https" : "http")}://127.0.0.1:0");
         builder.Logging.ClearProviders();
         builder.Services.AddRavensPort();
         builder.Services.Replace(ServiceDescriptor.Singleton<IConfigVault>(_ => new InMemoryVault()));
         builder.Services.Replace(ServiceDescriptor.Singleton(_ => new ActivityLog(logPath)));
 
+        // Deliberately the same shape as App.StartHost: the callback reads the state when the
+        // endpoint is bound, which is inside StartAsync, so the certificate below is in place by
+        // then even though it is not yet loaded here.
+        builder.WebHost.ConfigureKestrel(options => options.ConfigureHttpsDefaults(https =>
+        {
+            var state = options.ApplicationServices.GetRequiredService<KestrelMtlsState>();
+            if (state.Certificate is not { } certificate) return;
+
+            https.ServerCertificate = certificate;
+            https.ClientCertificateMode = Microsoft.AspNetCore.Server.Kestrel.Https.ClientCertificateMode.RequireCertificate;
+            https.ClientCertificateValidation = (clientCert, _, _) =>
+                string.Equals(clientCert.Thumbprint, certificate.Thumbprint, StringComparison.OrdinalIgnoreCase);
+        }));
+
         var proxy = builder.Build();
+
+        if (pfx is not null) proxy.Services.GetRequiredService<KestrelMtlsState>().Enable(pfx);
 
         // A forwarding failure surfaces as a bare 502 with no detail, which is nearly impossible
         // to tell from an upstream that fell over. YARP records the real reason here.
@@ -87,6 +110,8 @@ internal sealed class FunnelTestHost : IAsyncDisposable
         await host.Cache.MutateAsync(store =>
         {
             store.Settings.McpFunnelEnabled = true;
+            store.Settings.MtlsEnabled = mtls;
+            store.Settings.MtlsClientCertificatePfx = pfx ?? "";
 
             // A route-backed source is dialled at 127.0.0.1:{ListenPort}, so the stored port has
             // to match the port actually bound. In the app they are the same by construction —
@@ -171,24 +196,53 @@ internal sealed class FunnelTestHost : IAsyncDisposable
     public void RebuildProxyConfig() =>
         _proxy.Services.GetRequiredService<ProxyConfigChangeNotifier>().Rebuild();
 
-    /// <summary>Connects an MCP client to one funnel endpoint, exactly as an agent would.</summary>
+    /// <summary>
+    /// Connects an MCP client to one funnel endpoint, exactly as an agent would — including
+    /// presenting the client certificate when the host is running mTLS, which is the only way any
+    /// caller gets past the handshake.
+    /// </summary>
     public async Task<McpClient> ConnectAsync(string slug, string? apiKey = ApiKey)
     {
         var headers = new Dictionary<string, string>();
         if (apiKey is not null) headers[LocalAccessGuard.ApiKeyHeaderName] = apiKey;
 
-        var transport = new HttpClientTransport(new HttpClientTransportOptions
+        var options = new HttpClientTransportOptions
         {
             Endpoint = new Uri($"{BaseUrl}{McpFunnelEndpoints.BasePath}/{slug}"),
             TransportMode = HttpTransportMode.StreamableHttp,
             ConnectionTimeout = TimeSpan.FromSeconds(30),
             AdditionalHeaders = headers,
-        });
+        };
+
+        var transport = CreateClientHandler() is { } handler
+            ? new HttpClientTransport(options, new HttpClient(handler), null, ownsHttpClient: true)
+            : new HttpClientTransport(options);
 
         var client = await McpClient.CreateAsync(transport);
         _clients.Add(client);
 
         return client;
+    }
+
+    /// <summary>
+    /// An outside caller's TLS setup: the client certificate this host demands, and the pinning
+    /// that stands in for a chain neither end has. Null when the host is plain HTTP, where the
+    /// default handler is what an agent would use.
+    /// </summary>
+    public SocketsHttpHandler? CreateClientHandler()
+    {
+        var state = _proxy.Services.GetRequiredService<KestrelMtlsState>();
+        if (state.Certificate is not { } certificate) return null;
+
+        return new SocketsHttpHandler
+        {
+            SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+            {
+                ClientCertificates = [certificate],
+                RemoteCertificateValidationCallback = (_, presented, _, _) =>
+                    string.Equals(presented?.GetCertHashString(), certificate.Thumbprint, StringComparison.OrdinalIgnoreCase),
+            },
+        };
     }
 
     /// <summary>Calls a tool and returns the raw result, so a caller can inspect IsError.</summary>

@@ -32,6 +32,7 @@ public sealed partial class RouteItemViewModel : ObservableObject
         UpstreamRecord? upstream,
         IReadOnlyList<CredentialRecord> availableCredentials,
         int listenPort,
+        bool isMtls,
         Action<RouteItemViewModel, string>? onChanged = null,
         Action<string>? onInvalid = null)
     {
@@ -50,7 +51,8 @@ public sealed partial class RouteItemViewModel : ObservableObject
 
         UpstreamName = upstream?.Name ?? Missing;
         UpstreamBaseUrl = upstream?.BaseUrl ?? Missing;
-        LocalUrl = $"http://127.0.0.1:{listenPort}{route.PathPrefix}";
+        var scheme = isMtls ? "https" : "http";
+        LocalUrl = $"{scheme}://127.0.0.1:{listenPort}{route.PathPrefix}";
 
         // A route whose upstream is gone is silently dropped from the proxy config, so flag it
         // rather than let it look active. A missing credential still routes, unauthenticated.

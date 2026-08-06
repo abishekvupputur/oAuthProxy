@@ -339,7 +339,13 @@ Use Include to grant a known set, Exclude to revoke a few from an otherwise trus
                         <DataGridTemplateColumn Header="STATUS" Width="*" MinWidth="150">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
-                                    <TextBlock Text="{Binding Status}" TextWrapping="Wrap" VerticalAlignment="Center" FontSize="11"/>
+                                    <!-- Trimmed rather than wrapped, and capped upstream by
+                                         McpSourceCatalog.Summarize: a failure message can carry
+                                         the upstream's whole response body, and a wrapping cell
+                                         grew to the height of that page. The full text is on the
+                                         tooltip. -->
+                                    <TextBlock Text="{Binding Status}" TextTrimming="CharacterEllipsis"
+                                               ToolTip="{Binding StatusDetail}" VerticalAlignment="Center" FontSize="11"/>
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>

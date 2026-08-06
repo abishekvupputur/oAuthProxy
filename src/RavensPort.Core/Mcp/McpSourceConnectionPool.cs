@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography.X509Certificates;
 using ModelContextProtocol;
 using ModelContextProtocol.Client;
 using RavensPort.Core.Diagnostics;
@@ -35,14 +36,16 @@ public sealed class McpSourceConnectionPool : IAsyncDisposable
 
     private readonly ConfigStoreCache _configStoreCache;
     private readonly ActivityLog _activityLog;
+    private readonly KestrelMtlsState _kestrelMtls;
 
     private readonly ConcurrentDictionary<ConnectionKey, ConnectionEntry> _connections = new();
     private volatile bool _disposed;
 
-    public McpSourceConnectionPool(ConfigStoreCache configStoreCache, ActivityLog activityLog)
+    public McpSourceConnectionPool(ConfigStoreCache configStoreCache, ActivityLog activityLog, KestrelMtlsState kestrelMtls)
     {
         _configStoreCache = configStoreCache;
         _activityLog = activityLog;
+        _kestrelMtls = kestrelMtls;
     }
 
     private readonly record struct ConnectionKey(Guid FunnelId, Guid SourceId);
@@ -139,12 +142,101 @@ public sealed class McpSourceConnectionPool : IAsyncDisposable
     private async Task<McpClient> ConnectAsync(McpSourceRecord source, CancellationToken cancellationToken)
     {
         var options = BuildTransportOptions(source);
-        var transport = new HttpClientTransport(options);
 
-        var client = await McpClient.CreateAsync(transport, cancellationToken: cancellationToken).ConfigureAwait(false);
-        _activityLog.Log($"MCP source '{source.Name}' connected ({client.ServerInfo?.Name ?? "unnamed server"})");
+        // Only the hop back into this app's own listener speaks mTLS. A remote source is whatever
+        // it is — usually ordinary public TLS — and handing it this proxy's private certificate,
+        // or pinning its server certificate to one it has never heard of, would break it.
+        var transport = source.Kind == McpSourceKind.ProxyRoute && _kestrelMtls.IsEnabled
+            ? new HttpClientTransport(options, new HttpClient(CreateMtlsHandler()), null, ownsHttpClient: true)
+            : new HttpClientTransport(options);
 
-        return client;
+        var mcpClient = await McpClient.CreateAsync(transport, cancellationToken: cancellationToken).ConfigureAwait(false);
+        _activityLog.Log($"MCP source '{source.Name}' connected ({mcpClient.ServerInfo?.Name ?? "unnamed server"})");
+
+        return mcpClient;
+    }
+
+    /// <summary>
+    /// The handler for the hop back into this app's own mTLS listener.
+    ///
+    /// Both ends hold the same self-signed certificate, so neither can validate the other by
+    /// chain: the server has no issuer the client trusts, and vice versa. Pinning replaces that —
+    /// on loopback, the only certificate accepted is the one the user generated, and chain and
+    /// name errors are expected and deliberately not consulted.
+    ///
+    /// The word "loopback" is doing real work there, because this handler does not only ever see
+    /// this app. The hop is one HTTP request and the upstream behind the route is free to answer
+    /// with a redirect somewhere else entirely — Google Apps Script always answers 302 to
+    /// script.googleusercontent.com — and HttpClient follows it on this same handler. Applying the
+    /// pin to that leg rejected a perfectly good public certificate, which is what turned every
+    /// Apps Script MCP source into "The SSL connection could not be established"; offering the
+    /// user's private client certificate on it was the quieter half of the same mistake. Off
+    /// loopback this is therefore an ordinary HTTPS client and nothing more.
+    /// </summary>
+    internal SocketsHttpHandler CreateMtlsHandler()
+    {
+        // Not null: IsEnabled is exactly "a certificate is loaded", and this is only reached
+        // behind that check.
+        var certificate = _kestrelMtls.Certificate!;
+        var expectedThumbprint = certificate.Thumbprint;
+
+        return new SocketsHttpHandler
+        {
+            SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+            {
+                ClientCertificates = [certificate],
+
+                // targetHost is the name being dialled on this connection, so it still says
+                // "somewhere else" after a redirect, when the endpoint this handler was built for
+                // no longer does.
+                LocalCertificateSelectionCallback = (_, targetHost, _, _, _) =>
+                    IsLoopback(targetHost) ? certificate : null!,
+
+                RemoteCertificateValidationCallback = (_, presented, _, errors) =>
+                {
+                    // GetCertHashString on the base type rather than X509Certificate2.Thumbprint:
+                    // both are the SHA-1 hash in the same hex form, but SslStream is only
+                    // contracted to hand back an X509Certificate, and a type check that failed
+                    // would read as "wrong certificate" — the one conclusion that is definitely
+                    // not what happened.
+                    var actual = presented?.GetCertHashString();
+                    if (string.Equals(actual, expectedThumbprint, StringComparison.OrdinalIgnoreCase)) return true;
+
+                    // Anything that is not the pinned certificate has to earn trust the ordinary
+                    // way. On loopback nothing can: a public CA does not issue for 127.0.0.1, so
+                    // this stays a pin there and only relaxes where it has to.
+                    if (errors == System.Net.Security.SslPolicyErrors.None) return true;
+
+                    _activityLog.Log(
+                        "The MCP funnel refused a TLS certificate: expected the stored mTLS "
+                        + $"certificate {Redact(expectedThumbprint)}, was offered "
+                        + $"{Redact(actual) ?? "no certificate"} ({errors}).");
+
+                    return false;
+                },
+            },
+        };
+
+        // Enough to tell two certificates apart in a log without writing a full identifier of the
+        // user's own credential into it.
+        static string? Redact(string? thumbprint) =>
+            thumbprint is null ? null : $"…{thumbprint[^8..]}";
+    }
+
+    /// <summary>
+    /// Whether a host being dialled is this machine. Only these get the client certificate and the
+    /// pinned server certificate; a redirect anywhere else is ordinary public HTTPS.
+    /// </summary>
+    internal static bool IsLoopback(string? host)
+    {
+        if (string.IsNullOrEmpty(host)) return false;
+        if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)) return true;
+
+        // Strips the brackets an IPv6 literal carries in a URI authority; IPAddress.TryParse does
+        // not accept them.
+        var trimmed = host.StartsWith('[') && host.EndsWith(']') ? host[1..^1] : host;
+
+        return System.Net.IPAddress.TryParse(trimmed, out var address) && System.Net.IPAddress.IsLoopback(address);
     }
 
     /// <summary>
@@ -166,7 +258,12 @@ public sealed class McpSourceConnectionPool : IAsyncDisposable
                             $"MCP source '{source.Name}' points at a route that no longer exists.");
 
             var prefix = route.PathPrefix.TrimEnd('/');
-            endpoint = new Uri($"http://127.0.0.1:{store.Settings.ListenPort}{prefix}");
+
+            // Scheme comes from the listener's own state, never from settings. The setting is
+            // what the user asked for; this is what Kestrel actually bound, and only the second
+            // one is dialable — they differ for the whole of a session where mTLS was switched
+            // on or off and the restart it asks for has not happened yet.
+            endpoint = new Uri($"{_kestrelMtls.Scheme}://127.0.0.1:{store.Settings.ListenPort}{prefix}");
 
             // The route's own key, not the funnel's: this hop is an ordinary call to that route,
             // and the guard on the way back in accepts nothing else. Read live rather than

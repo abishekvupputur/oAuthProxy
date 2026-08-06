@@ -383,7 +383,9 @@ public sealed class ConfigStoreCache
         List<McpSourceRecord> McpSources,
         List<McpFunnelRecord> McpFunnels,
         int ListenPort,
-        bool McpFunnelEnabled);
+        bool McpFunnelEnabled,
+        bool MtlsEnabled,
+        string MtlsClientCertificatePfx);
 
     private static StoreSnapshot Snapshot(ConfigStore store) => new(
         [.. store.Credentials],
@@ -392,7 +394,9 @@ public sealed class ConfigStoreCache
         [.. store.McpSources],
         [.. store.McpFunnels],
         store.Settings.ListenPort,
-        store.Settings.McpFunnelEnabled);
+        store.Settings.McpFunnelEnabled,
+        store.Settings.MtlsEnabled,
+        store.Settings.MtlsClientCertificatePfx);
 
     private static void RestoreInto(ConfigStore store, StoreSnapshot snapshot)
     {
@@ -404,6 +408,8 @@ public sealed class ConfigStoreCache
 
         store.Settings.ListenPort = snapshot.ListenPort;
         store.Settings.McpFunnelEnabled = snapshot.McpFunnelEnabled;
+        store.Settings.MtlsEnabled = snapshot.MtlsEnabled;
+        store.Settings.MtlsClientCertificatePfx = snapshot.MtlsClientCertificatePfx;
     }
 
     private static void ReplaceAll<T>(List<T> target, List<T> source)

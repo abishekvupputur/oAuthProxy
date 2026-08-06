@@ -43,6 +43,12 @@ public sealed partial class McpSourceItemViewModel : ObservableObject
     /// <summary>Result of the last Refresh, or a nudge to run one.</summary>
     public string Status => Catalog?.Describe() ?? "not checked yet — press Refresh";
 
+    /// <summary>
+    /// The untrimmed failure, for the cell's tooltip. Null on success, which is what leaves a
+    /// working source with no tooltip at all rather than one repeating its own cell.
+    /// </summary>
+    public string? StatusDetail => Catalog?.Detail;
+
     public bool HasError => Catalog?.Error is not null;
 
     [ObservableProperty] private bool _enabled;
@@ -64,11 +70,13 @@ public sealed partial class McpFunnelItemViewModel : ObservableObject
         int listenPort,
         int sourceCount,
         Action<McpFunnelItemViewModel, string> onChanged,
-        Action<string> onStatus)
+        Action<string> onStatus,
+        bool isMtls)
     {
         Funnel = funnel;
         SourceCount = sourceCount;
-        LocalUrl = $"http://127.0.0.1:{listenPort}{McpFunnelEndpoints.BasePath}/{funnel.Slug}";
+        var scheme = isMtls ? "https" : "http";
+        LocalUrl = $"{scheme}://127.0.0.1:{listenPort}{McpFunnelEndpoints.BasePath}/{funnel.Slug}";
         _onChanged = onChanged;
         _enabled = funnel.Enabled;
 
