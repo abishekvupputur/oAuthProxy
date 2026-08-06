@@ -23,6 +23,7 @@ public sealed partial class McpFunnelViewModel : ObservableObject
     private readonly McpSourceConnectionPool _connectionPool;
     private readonly McpCatalogCache _catalogCache;
     private readonly ActivityLog _activityLog;
+    private readonly KestrelMtlsState _mtlsState;
 
     public ObservableCollection<McpSourceItemViewModel> Sources { get; } = [];
     public ObservableCollection<McpFunnelItemViewModel> Funnels { get; } = [];
@@ -76,12 +77,14 @@ public sealed partial class McpFunnelViewModel : ObservableObject
         ConfigStoreCache configStoreCache,
         McpSourceConnectionPool connectionPool,
         McpCatalogCache catalogCache,
-        ActivityLog activityLog)
+        ActivityLog activityLog,
+        KestrelMtlsState mtlsState)
     {
         _configStoreCache = configStoreCache;
         _connectionPool = connectionPool;
         _catalogCache = catalogCache;
         _activityLog = activityLog;
+        _mtlsState = mtlsState;
 
         Sources.CollectionChanged += (_, _) =>
         {
@@ -136,6 +139,8 @@ public sealed partial class McpFunnelViewModel : ObservableObject
         }
 
         Funnels.Clear();
+        // The bound scheme, not the configured one — see RoutesViewModel.Reload.
+        var isMtls = _mtlsState.IsEnabled;
         foreach (var funnel in store.McpFunnels)
         {
             Funnels.Add(new McpFunnelItemViewModel(
@@ -143,7 +148,8 @@ public sealed partial class McpFunnelViewModel : ObservableObject
                 store.Settings.ListenPort,
                 funnel.Sources.Count,
                 OnFunnelEdited,
-                message => StatusMessage = message));
+                message => StatusMessage = message,
+                isMtls));
         }
 
         NewSourceRoute = Routes.FirstOrDefault(r => r.Id == selectedRouteId);

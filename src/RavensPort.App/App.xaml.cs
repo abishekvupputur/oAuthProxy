@@ -137,6 +137,25 @@ public partial class App : Application
         {
             // Long-lived MCP SSE/streamable-HTTP sessions shouldn't be dropped by Kestrel.
             options.Limits.KeepAliveTimeout = TimeSpan.FromHours(2);
+
+            var kestrelMtls = options.ApplicationServices.GetRequiredService<RavensPort.Core.Mcp.KestrelMtlsState>();
+
+            // Runs when the https endpoint is bound, which is inside Start() — after
+            // StartProxyAsync has read the vault and settled the state below. Reading it out here
+            // instead would settle nothing: at this point the vault has not been unlocked.
+            options.ConfigureHttpsDefaults(https =>
+            {
+                if (kestrelMtls.Certificate is not { } certificate) return;
+
+                https.ServerCertificate = certificate;
+                https.ClientCertificateMode = Microsoft.AspNetCore.Server.Kestrel.Https.ClientCertificateMode.RequireCertificate;
+
+                // The certificate is self-signed and shared by both ends, so there is no chain to
+                // validate and the default handling — which rejects on any SslPolicyError — would
+                // refuse every caller including this app's own funnel. The thumbprint is the check.
+                https.ClientCertificateValidation = (clientCert, _, _) =>
+                    string.Equals(clientCert.Thumbprint, certificate.Thumbprint, StringComparison.OrdinalIgnoreCase);
+            });
         });
 
         builder.Services.AddRavensPort();
@@ -356,8 +375,42 @@ public partial class App : Application
 
                 port = configStoreCache.Current.Settings.ListenPort;
 
+                // Settled before the URL is chosen and before Start() binds it, because the state
+                // decides both: the scheme Kestrel listens on, and the scheme the MCP funnel dials
+                // its own routes on. Anything that read the setting a second time could disagree.
+                var kestrelMtls = _webApp.Services.GetRequiredService<RavensPort.Core.Mcp.KestrelMtlsState>();
+                if (configStoreCache.Current.Settings.MtlsEnabled)
+                {
+                    // A store can say "mTLS on" and hold no certificate — earlier builds let the
+                    // checkbox be ticked without generating one. Neither answer to that is free:
+                    // binding plain HTTP anyway would tell the user their proxy is certificate-
+                    // protected while anything on the machine can call it, and refusing to start
+                    // strands them on the setup page with no way back to the checkbox. So the
+                    // certificate is minted, and the Settings tab's export is where they get it.
+                    if (string.IsNullOrWhiteSpace(configStoreCache.Current.Settings.MtlsClientCertificatePfx))
+                    {
+                        await configStoreCache.MutateAsync(store =>
+                            store.Settings.MtlsClientCertificatePfx = MtlsCertificateFactory.GenerateClientCertificatePfx());
+
+                        _webApp.Services.GetService<ActivityLog>()?.Log(
+                            "mTLS was enabled with no certificate stored; a new one was generated. "
+                            + "Export it from the Settings tab and install it on every client that calls this proxy.");
+                    }
+
+                    kestrelMtls.Enable(configStoreCache.Current.Settings.MtlsClientCertificatePfx);
+
+                    // The other half of the pin, recorded at the moment it is decided. When the
+                    // funnel later refuses this listener it logs what was presented; without this
+                    // line there is nothing to compare that against, and "the remote certificate
+                    // was rejected" is equally consistent with a stale certificate, a certificate
+                    // regenerated since the last start, and Kestrel never having received one.
+                    _webApp.Services.GetService<ActivityLog>()?.Log(
+                        $"mTLS enabled — serving certificate …{kestrelMtls.Certificate!.Thumbprint[^8..]} "
+                        + "and requiring the same one from every caller.");
+                }
+
                 _webApp.Urls.Clear();
-                _webApp.Urls.Add($"http://127.0.0.1:{port}");
+                _webApp.Urls.Add($"{kestrelMtls.Scheme}://127.0.0.1:{port}");
 
                 // Must sit ahead of MapReverseProxy: it rejects callers that cannot present the
                 // endpoint's proxy key, and blocks DNS-rebinding and browser-originated requests.

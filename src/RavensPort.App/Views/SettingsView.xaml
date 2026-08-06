@@ -277,6 +277,35 @@
                 </StackPanel>
             </Border>
 
+            <Border Style="{StaticResource SectionCardStyle}" Margin="0,0,0,14">
+                <StackPanel>
+                    <TextBlock Text="Client Certificate (mTLS)" Style="{StaticResource SectionHeaderStyle}"/>
+                    <CheckBox Content="Require mTLS for all routes and funnels" IsChecked="{Binding MtlsEnabled}" Margin="0,0,0,8"/>
+                    <TextBlock Text="Restart required for mTLS changes to take effect." 
+                               Style="{StaticResource HintTextStyle}" Foreground="{StaticResource ErrorBrush}" Margin="0,0,0,8"
+                               Visibility="{Binding IsMtlsRestartRequired, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                    <TextBlock Style="{StaticResource HintTextStyle}" Margin="0,0,0,8" TextWrapping="Wrap"
+                               Text="When enabled, Kestrel will require a valid client certificate on all connections. Clients without it will be rejected. Changing this requires a restart."/>
+                    
+                    <StackPanel Visibility="{Binding IsConfirmingGenerateCertificate, Converter={StaticResource BoolToVisibilityConverter}}">
+                        <TextBlock Style="{StaticResource HintTextStyle}" TextWrapping="Wrap" Margin="0,0,0,8"
+                                   Foreground="{StaticResource ErrorBrush}"
+                                   Text="Generating a new certificate will permanently invalidate the old one. You will need to export and reinstall the new certificate on all your clients, and completely restart RavensPort."/>
+                        <WrapPanel>
+                            <Button Content="Confirm Generate" Margin="0,0,8,6" Command="{Binding GenerateMtlsCertificateCommand}"/>
+                            <Button Content="Cancel" Margin="0,0,0,6" Style="{StaticResource GhostButtonStyle}" Command="{Binding CancelGenerateCertificateCommand}"/>
+                        </WrapPanel>
+                    </StackPanel>
+
+                    <WrapPanel Visibility="{Binding IsConfirmingGenerateCertificate, Converter={StaticResource InverseBoolToVisibilityConverter}}">
+                        <Button Content="Generate new certificate" Margin="0,0,8,6" Command="{Binding GenerateMtlsCertificateCommand}"/>
+                        <Button Content="Export certificate" Margin="0,0,8,6" Style="{StaticResource GhostButtonStyle}" Command="{Binding ExportMtlsCertificateCommand}"/>
+                    </WrapPanel>
+                    
+                    <TextBox IsReadOnly="True" FontFamily="Consolas" Margin="0,8,0,0" Padding="8" BorderThickness="1" BorderBrush="{StaticResource BorderBrush0}" Background="{StaticResource PanelAltBrush}" Foreground="{StaticResource TextBrush}" TextWrapping="Wrap"
+                             Text="cURL: curl -k --cert &quot;cert.pfx:ravensport&quot; --cert-type P12 https://...&#x0a;Node.js / MCP: https.request({ pfx: fs.readFileSync('cert.pfx'), passphrase: 'ravensport', rejectUnauthorized: false }, ...)" />
+                </StackPanel>
+            </Border>
 
             <Border Style="{StaticResource SectionCardStyle}">
                 <StackPanel>
