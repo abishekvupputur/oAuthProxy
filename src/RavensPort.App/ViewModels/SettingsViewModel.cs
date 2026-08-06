@@ -5,7 +5,6 @@ using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using RavensPort.Core.Diagnostics;
-
 using RavensPort.Core.Proxy;
 using RavensPort.Core.Storage;
 using RavensPort.Core.Vault;
@@ -28,6 +27,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly DispatcherTimer _logTimer;
 
     [ObservableProperty] private int _listenPort;
+    [ObservableProperty] private bool _mtlsEnabled;
     [ObservableProperty] private string _recentActivity = "";
     [ObservableProperty] private string _statusMessage = "Ready.";
 
@@ -160,7 +160,9 @@ public sealed partial class SettingsViewModel : ObservableObject
         var settings = _configStoreCache.Current.Settings;
         _listenPort = settings.ListenPort;
 
-
+        // Backing field, not the property: the generated setter runs OnMtlsEnabledChanged, and a
+        // write here is loading what is already stored, not the user asking for a change.
+        _mtlsEnabled = settings.MtlsEnabled;
 
         RefreshActivity();
         RefreshVaultStatus();
@@ -251,6 +253,11 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         var settings = _configStoreCache.Current.Settings;
         ListenPort = settings.ListenPort;
+
+        // Another vault can have been unlocked since this tab was last shown, and it carries its
+        // own answer. OnMtlsEnabledChanged is a no-op on a value that already matches the store,
+        // so this re-reads without claiming a restart is due.
+        MtlsEnabled = settings.MtlsEnabled;
 
         // Routes and funnels can have been added on another tab since this one was last shown.
         OnPropertyChanged(nameof(KeyLocationSummary));
@@ -821,6 +828,100 @@ public sealed partial class SettingsViewModel : ObservableObject
             : string.Join(Environment.NewLine, lines);
     }
 
+
+    [ObservableProperty] private bool _isMtlsRestartRequired;
+
+    partial void OnMtlsEnabledChanged(bool value)
+    {
+        if (_configStoreCache.Current.Settings.MtlsEnabled == value) return;
+
+        _ = PersistMtlsAsync(value);
+    }
+
+    private async Task PersistMtlsAsync(bool value)
+    {
+        try
+        {
+            await _configStoreCache.MutateAsync(store =>
+            {
+                // Switching mTLS on with no certificate would leave the app unable to start at
+                // all: the listener has nothing to present, and there is no sane fallback —
+                // quietly binding plain HTTP instead would tell the user their proxy is
+                // certificate-protected when anything on the machine can call it. Generating one
+                // here makes the switch mean what it says on the first click; the user still has
+                // to export it to whatever will be calling the proxy, which the status says.
+                if (value && string.IsNullOrWhiteSpace(store.Settings.MtlsClientCertificatePfx))
+                {
+                    store.Settings.MtlsClientCertificatePfx = MtlsCertificateFactory.GenerateClientCertificatePfx();
+                }
+
+                store.Settings.MtlsEnabled = value;
+            });
+
+            IsMtlsRestartRequired = true;
+            StatusMessage = value ? "mTLS enabled. Restart RavensPort for the change to take effect." : "mTLS disabled. Restart RavensPort for the change to take effect.";
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Could not save mTLS setting: {ex.Message}";
+        }
+    }
+
+    [ObservableProperty] private bool _isConfirmingGenerateCertificate;
+
+    [RelayCommand]
+    private async Task GenerateMtlsCertificateAsync()
+    {
+        if (!IsConfirmingGenerateCertificate)
+        {
+            IsConfirmingGenerateCertificate = true;
+            StatusMessage = "Confirm to generate a new certificate. You will need to install the new one and restart RavensPort.";
+            return;
+        }
+
+        IsConfirmingGenerateCertificate = false;
+
+        try
+        {
+            var pfx = MtlsCertificateFactory.GenerateClientCertificatePfx();
+            await _configStoreCache.MutateAsync(store => store.Settings.MtlsClientCertificatePfx = pfx);
+            StatusMessage = "New client certificate generated. Save it to disk using Export.";
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Could not generate certificate: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void CancelGenerateCertificate()
+    {
+        IsConfirmingGenerateCertificate = false;
+        StatusMessage = "Left current certificate intact.";
+    }
+
+    [RelayCommand]
+    private void ExportMtlsCertificate()
+    {
+        var pfx = _configStoreCache.Current.Settings.MtlsClientCertificatePfx;
+        if (string.IsNullOrWhiteSpace(pfx))
+        {
+            StatusMessage = "No certificate has been generated yet.";
+            return;
+        }
+
+        try
+        {
+            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "RavensPort_ClientCert.pfx");
+            File.WriteAllBytes(path, Convert.FromBase64String(pfx));
+            StatusMessage = $"Certificate saved to {path} (password: {MtlsCertificateFactory.PfxPassword})";
+            OpenInShell(Environment.GetFolderPath(Environment.SpecialFolder.Desktop));
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Could not export certificate: {ex.Message}";
+        }
+    }
 
     [RelayCommand]
     private async Task SavePortAsync()

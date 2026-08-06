@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.RegularExpressions;
 using ModelContextProtocol.Protocol;
 
 namespace RavensPort.Core.Mcp;
@@ -19,7 +20,7 @@ public sealed record McpSourceCatalog(
     /// <summary>One-line summary for the sources grid.</summary>
     public string Describe()
     {
-        if (Error is not null) return $"⚠ {Error}";
+        if (Error is not null) return $"⚠ {Summarize(Error)}";
 
         // Says "connected" explicitly, because the alternative reading of an empty result —
         // that the source could not be reached — is the one a user will assume otherwise.
@@ -31,6 +32,92 @@ public sealed record McpSourceCatalog(
         if (Prompts.Count > 0) parts.Add($"{Prompts.Count} prompts");
 
         return string.Join(" · ", parts);
+    }
+
+    /// <summary>
+    /// The full failure text, on one line, for a tooltip. Null when nothing failed.
+    ///
+    /// Nothing is dropped here — <see cref="Describe"/> is what has to fit in a cell, and the
+    /// detail it trims still has to be readable somewhere, or diagnosing a source means going to
+    /// the log file for text the app already had.
+    /// </summary>
+    public string? Detail => Error is null ? null : Collapse(Error);
+
+    /// <summary>
+    /// Reduces a failure to something a grid cell can hold.
+    ///
+    /// Transport exceptions from the MCP SDK carry the upstream's response body in their message,
+    /// and an "MCP endpoint" is frequently also a web page — a Google Apps Script deployment
+    /// answers a GET with its whole HTML document. Rendered verbatim in a wrapping cell, that one
+    /// row grows to the height of a web page and pushes every other source off the screen.
+    ///
+    /// The markup is not the message, so it comes out; what is left is the sentence the server
+    /// actually said, capped.
+    /// </summary>
+    internal static string Summarize(string error)
+    {
+        var text = LooksLikeMarkup(error) ? StripMarkup(error) : error;
+        text = Collapse(text);
+
+        // Markup that carried no text at all — a page that is pure script or styling. Saying so
+        // beats an empty cell, which reads as "no error".
+        if (text.Length == 0) return "the server answered with a web page, not an MCP response";
+
+        return text.Length <= MaxCellLength ? text : $"{text[..MaxCellLength].TrimEnd()}…";
+    }
+
+    private const int MaxCellLength = 200;
+
+    /// <summary>
+    /// Every one of these runs over a string an upstream chose: the body it answered with, verbatim
+    /// inside the SDK's exception message. A page with many unclosed &lt;script&gt; openings makes
+    /// the lazy match rescan to the end of the text once per opening, so the ceiling is what keeps
+    /// a hostile — or merely broken — response from stalling the refresh that is rendering it.
+    /// Timing out is not a failure worth reporting: the caller already has the untouched text and
+    /// falls back to it.
+    /// </summary>
+    private static readonly TimeSpan MatchTimeout = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>Every run of whitespace — newlines included — becomes one space.</summary>
+    private static string Collapse(string text)
+    {
+        try
+        {
+            return Regex.Replace(text, @"\s+", " ", RegexOptions.None, MatchTimeout).Trim();
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return text.Trim();
+        }
+    }
+
+    private static bool LooksLikeMarkup(string text) =>
+        text.Contains("<!doctype", StringComparison.OrdinalIgnoreCase)
+        || text.Contains("<html", StringComparison.OrdinalIgnoreCase)
+        || text.Contains("<body", StringComparison.OrdinalIgnoreCase)
+        || text.Contains("<script", StringComparison.OrdinalIgnoreCase);
+
+    private static string StripMarkup(string text)
+    {
+        try
+        {
+            // Script and style first, with their contents: their text is not prose, and dropping
+            // only the tags would leave JavaScript in the cell — which is what a bare tag-strip
+            // does to an Apps Script page, whose body is almost entirely script.
+            var stripped = Regex.Replace(
+                text, "<(script|style)[^>]*>.*?</\\1>", " ",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline, MatchTimeout);
+
+            stripped = Regex.Replace(stripped, "<[^>]*>", " ", RegexOptions.None, MatchTimeout);
+
+            return System.Net.WebUtility.HtmlDecode(stripped);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // Untouched markup, which Summarize then collapses and caps like anything else. A cell
+            // holding 200 characters of HTML is poor, but it is bounded and it is what happened.
+            return text;
+        }
     }
 }
 

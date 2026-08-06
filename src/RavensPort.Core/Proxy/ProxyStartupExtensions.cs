@@ -104,6 +104,13 @@ public static class ProxyStartupExtensions
     /// </summary>
     private static IServiceCollection AddMcpFunnel(this IServiceCollection services)
     {
+        // Registered here rather than beside Kestrel's own configuration, even though Kestrel is
+        // its first reader. The connection pool depends on it — it has to dial this app on the
+        // scheme the listener actually answers on — so leaving the registration in the WPF
+        // startup path made the pool unresolvable in every host that is not the app itself, the
+        // test host included.
+        services.AddSingleton<KestrelMtlsState>();
+
         services.AddSingleton<McpSourceConnectionPool>();
         services.AddSingleton<McpCatalogCache>();
         services.AddSingleton<McpFunnelHandlerFactory>();

@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using RavensPort.Core.Mcp;
 using RavensPort.Core.Models;
 using RavensPort.Core.Proxy;
 using RavensPort.Core.Storage;
@@ -11,6 +12,7 @@ public sealed partial class RoutesViewModel : ObservableObject
 {
     private readonly ConfigStoreCache _configStoreCache;
     private readonly ProxyConfigChangeNotifier _proxyConfigChangeNotifier;
+    private readonly KestrelMtlsState _mtlsState;
 
     public ObservableCollection<UpstreamRecord> Upstreams { get; } = [];
     public ObservableCollection<RouteItemViewModel> Routes { get; } = [];
@@ -128,10 +130,14 @@ public sealed partial class RoutesViewModel : ObservableObject
     public bool HasRoutes => Routes.Count > 0;
     public bool HasNoRoutes => Routes.Count == 0;
 
-    public RoutesViewModel(ConfigStoreCache configStoreCache, ProxyConfigChangeNotifier proxyConfigChangeNotifier)
+    public RoutesViewModel(
+        ConfigStoreCache configStoreCache,
+        ProxyConfigChangeNotifier proxyConfigChangeNotifier,
+        KestrelMtlsState mtlsState)
     {
         _configStoreCache = configStoreCache;
         _proxyConfigChangeNotifier = proxyConfigChangeNotifier;
+        _mtlsState = mtlsState;
 
         // Empty-state visibility is derived from these collections, so re-evaluate on change.
         Upstreams.CollectionChanged += (_, _) =>
@@ -173,6 +179,10 @@ public sealed partial class RoutesViewModel : ObservableObject
         // and the real local URL rather than bare ids.
         Routes.Clear();
         var credentials = store.Credentials.ToList();
+        // What the listener actually bound, not what the setting asks for. Between switching mTLS
+        // on and the restart it needs, the two disagree, and the URL in this grid is one the user
+        // copies into a client — it has to be the one that answers today.
+        var isMtls = _mtlsState.IsEnabled;
         foreach (var r in store.Routes)
         {
             Routes.Add(new RouteItemViewModel(
@@ -180,6 +190,7 @@ public sealed partial class RoutesViewModel : ObservableObject
                 store.Upstreams.FirstOrDefault(u => u.Id == r.UpstreamId),
                 credentials,
                 store.Settings.ListenPort,
+                isMtls,
                 OnRouteEdited,
                 message => StatusMessage = message));
         }
