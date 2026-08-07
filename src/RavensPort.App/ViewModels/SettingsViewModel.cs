@@ -166,6 +166,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         RefreshActivity();
         RefreshVaultStatus();
+        RefreshCertificateExpiry();
 
         // One timer for both: the sync queue and the gate both change state from background
         // threads, and polling them on the dispatcher's own tick avoids marshalling a stream of
@@ -268,6 +269,11 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
 
         RefreshVaultStatus();
+
+        // Re-read on every visit rather than once. Two things move underneath it: another vault can
+        // have been unlocked since this tab was last shown, and — for a certificate that is simply
+        // sitting there — the remaining days count down without anything in this app happening.
+        RefreshCertificateExpiry();
     }
 
     /// <summary>
@@ -831,6 +837,86 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     [ObservableProperty] private bool _isMtlsRestartRequired;
 
+    /// <summary>Whether there is a certificate at all, and so anything to say about its dates.</summary>
+    [ObservableProperty] private bool _hasCertificate;
+
+    /// <summary>When the stored certificate stops being accepted, in words. Empty when there is none.</summary>
+    [ObservableProperty] private string _certificateExpirySummary = "";
+
+    /// <summary>
+    /// True once the certificate is expired, or close enough to it to be worth colouring. Has to
+    /// appear well before the day it stops working rather than on it: rotating means exporting,
+    /// visiting every client that holds a copy, and restarting this app, and none of that is
+    /// something to discover at the moment the proxy starts turning callers away.
+    /// </summary>
+    [ObservableProperty] private bool _isCertificateExpiryUrgent;
+
+    /// <summary>
+    /// Read out of the stored PFX rather than remembered from the moment it was generated: the
+    /// certificate outlives the process that minted it, and every later session has to be able to
+    /// answer the same question.
+    ///
+    /// Called where the answer can have changed — construction, tab switch, generating, and the
+    /// switch minting one — and deliberately not on the two-second timer that drives the rest of
+    /// this tab. Each call parses a PFX and imports an RSA key into a CryptoAPI container, which is
+    /// not something to do thirty times a minute for a date that moves once a day.
+    /// </summary>
+    private void RefreshCertificateExpiry()
+    {
+        var settings = _configStoreCache.Current.Settings;
+        var pfx = settings.MtlsClientCertificatePfx;
+
+        HasCertificate = !string.IsNullOrWhiteSpace(pfx);
+        if (!HasCertificate)
+        {
+            CertificateExpirySummary = "";
+            IsCertificateExpiryUrgent = false;
+            return;
+        }
+
+        try
+        {
+            // Disposed: X509Certificate2 holds an OS key handle, and the container is only removed
+            // when the last one closes. A tab that leaked one per visit would leave key files
+            // behind for the life of the process.
+            using var certificate = MtlsCertificateFactory.Load(pfx!, settings.MtlsClientCertificatePassword);
+
+            var remaining = certificate.NotAfter.ToUniversalTime() - DateTime.UtcNow;
+            var expiresOn = certificate.NotAfter.ToLocalTime().ToString("d MMMM yyyy");
+
+            if (remaining <= TimeSpan.Zero)
+            {
+                IsCertificateExpiryUrgent = true;
+                CertificateExpirySummary =
+                    $"This certificate expired on {expiresOn}. The proxy now refuses every caller that "
+                    + "presents it — including its own MCP funnel — and the failure happens during the TLS "
+                    + "handshake, so clients see a dropped connection rather than an error. Generate a new "
+                    + "certificate, export it, install it on every client, and restart RavensPort.";
+                return;
+            }
+
+            // Ceiling, not truncation: with eleven hours left, "0 days" reads as already gone and
+            // "1 day" is the answer to the question actually being asked, which is how long there is.
+            var days = (int)Math.Ceiling(remaining.TotalDays);
+            var howLong = days == 1 ? "1 day" : $"{days} days";
+
+            IsCertificateExpiryUrgent = remaining <= MtlsCertificateFactory.ExpiryWarningWindow;
+            CertificateExpirySummary = IsCertificateExpiryUrgent
+                ? $"This certificate expires on {expiresOn} — {howLong} from now. After that the proxy "
+                  + "refuses every client presenting it. Replacing it means installing the new one "
+                  + "everywhere this one is used, so start before the day it stops working."
+                : $"This certificate expires on {expiresOn}, {howLong} from now.";
+        }
+        catch (Exception ex)
+        {
+            // A certificate that cannot be opened is the same problem wearing a different face: the
+            // app will not be able to present it either, so it is said in the same place and in the
+            // same colour rather than swallowed into an empty line.
+            IsCertificateExpiryUrgent = true;
+            CertificateExpirySummary = $"The stored certificate could not be read: {ex.Message}";
+        }
+    }
+
     partial void OnMtlsEnabledChanged(bool value)
     {
         if (_configStoreCache.Current.Settings.MtlsEnabled == value) return;
@@ -840,6 +926,8 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     private async Task PersistMtlsAsync(bool value)
     {
+        var minted = false;
+
         try
         {
             await _configStoreCache.MutateAsync(store =>
@@ -850,16 +938,27 @@ public sealed partial class SettingsViewModel : ObservableObject
                 // certificate-protected when anything on the machine can call it. Generating one
                 // here makes the switch mean what it says on the first click; the user still has
                 // to export it to whatever will be calling the proxy, which the status says.
+                //
+                // No password is asked for here, because this click is not the one that offers a
+                // box to type it in. The certificate takes the built-in password and the status
+                // below points at Generate, which is where a password of the user's own is set.
                 if (value && string.IsNullOrWhiteSpace(store.Settings.MtlsClientCertificatePfx))
                 {
                     store.Settings.MtlsClientCertificatePfx = MtlsCertificateFactory.GenerateClientCertificatePfx();
+                    store.Settings.MtlsClientCertificatePassword = "";
+                    minted = true;
                 }
 
                 store.Settings.MtlsEnabled = value;
             });
 
             IsMtlsRestartRequired = true;
-            StatusMessage = value ? "mTLS enabled. Restart RavensPort for the change to take effect." : "mTLS disabled. Restart RavensPort for the change to take effect.";
+            RefreshCertificateExpiry();
+            StatusMessage = value
+                ? minted
+                    ? "mTLS enabled, and a certificate was generated so the listener has one to present. It carries the built-in password; use Generate new certificate to set your own before exporting. Restart RavensPort for the change to take effect."
+                    : "mTLS enabled. Restart RavensPort for the change to take effect."
+                : "mTLS disabled. Restart RavensPort for the change to take effect.";
         }
         catch (Exception ex)
         {
@@ -869,13 +968,34 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     [ObservableProperty] private bool _isConfirmingGenerateCertificate;
 
+    /// <summary>
+    /// What the next generated PFX will be encrypted with. Only ever holds a password the user is
+    /// in the middle of typing: it is cleared the moment the certificate is written, so nothing
+    /// keeps it alive in a view model that outlives the dialog. The stored copy lives in the vault
+    /// beside the certificate, because the app has to reopen its own PFX at every start.
+    /// </summary>
+    [ObservableProperty] private string _newCertificatePassword = "";
+
     [RelayCommand]
     private async Task GenerateMtlsCertificateAsync()
     {
         if (!IsConfirmingGenerateCertificate)
         {
             IsConfirmingGenerateCertificate = true;
-            StatusMessage = "Confirm to generate a new certificate. You will need to install the new one and restart RavensPort.";
+            NewCertificatePassword = "";
+            StatusMessage = "Choose a password for the new certificate, then confirm. You will need to install the new one and restart RavensPort.";
+            return;
+        }
+
+        // Required rather than defaulted, because an empty box has to mean something and both
+        // readings are worse than asking again: minting with the built-in password would hand back
+        // a certificate whose password is not the one the user thinks they set, and minting with no
+        // password at all produces a PFX that Windows' certificate import and curl's Schannel
+        // backend both refuse. The box is right there; a second click costs nothing.
+        var password = NewCertificatePassword;
+        if (string.IsNullOrEmpty(password))
+        {
+            StatusMessage = "Enter a password for the new certificate. Clients will need it to load the exported file.";
             return;
         }
 
@@ -883,13 +1003,30 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         try
         {
-            var pfx = MtlsCertificateFactory.GenerateClientCertificatePfx();
-            await _configStoreCache.MutateAsync(store => store.Settings.MtlsClientCertificatePfx = pfx);
-            StatusMessage = "New client certificate generated. Save it to disk using Export.";
+            var pfx = MtlsCertificateFactory.GenerateClientCertificatePfx(password);
+            await _configStoreCache.MutateAsync(store =>
+            {
+                store.Settings.MtlsClientCertificatePfx = pfx;
+                store.Settings.MtlsClientCertificatePassword = password;
+            });
+
+            // The same banner the switch raises, for the same reason: KestrelMtlsState settles the
+            // certificate once, before Kestrel binds, so the running process is still presenting
+            // and demanding the old one. Until the restart, every client that installs the new
+            // certificate is refused — which looks like the export was broken rather than like a
+            // restart being owed.
+            IsMtlsRestartRequired = true;
+            RefreshCertificateExpiry();
+
+            StatusMessage = "New client certificate generated. Export it, install it on every client, and restart RavensPort — until then the proxy still demands the old certificate.";
         }
         catch (Exception ex)
         {
             StatusMessage = $"Could not generate certificate: {ex.Message}";
+        }
+        finally
+        {
+            NewCertificatePassword = "";
         }
     }
 
@@ -897,6 +1034,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private void CancelGenerateCertificate()
     {
         IsConfirmingGenerateCertificate = false;
+        NewCertificatePassword = "";
         StatusMessage = "Left current certificate intact.";
     }
 
@@ -910,12 +1048,38 @@ public sealed partial class SettingsViewModel : ObservableObject
             return;
         }
 
+        // Asked for, rather than dropped on the Desktop. The file has to end up wherever the thing
+        // that will call the proxy can read it, and that is rarely the Desktop -- and the Desktop
+        // itself may be redirected into OneDrive, which is a synced folder this credential has no
+        // business being copied into without the user saying so.
+        // Qualified: WinForms is enabled in this project (see UseWindowsForms) and ships a
+        // SaveFileDialog of its own, so the bare name does not compile. This is the WPF one.
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "Export client certificate",
+            FileName = "RavensPort_ClientCert.pfx",
+            DefaultExt = ".pfx",
+            AddExtension = true,
+            Filter = "Certificate (*.pfx)|*.pfx|All files (*.*)|*.*",
+            InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+            OverwritePrompt = true
+        };
+
+        if (dialog.ShowDialog() != true)
+        {
+            StatusMessage = "Export cancelled. The certificate is still stored in the vault.";
+            return;
+        }
+
         try
         {
-            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "RavensPort_ClientCert.pfx");
+            var path = dialog.FileName;
             File.WriteAllBytes(path, Convert.FromBase64String(pfx));
-            StatusMessage = $"Certificate saved to {path} (password: {MtlsCertificateFactory.PfxPassword})";
-            OpenInShell(Environment.GetFolderPath(Environment.SpecialFolder.Desktop));
+            // The password is deliberately not echoed here. The status line is the one part of this
+            // window that is read aloud in a screen share and captured in a screenshot of an
+            // unrelated problem, and a password printed there outlives the export by however long
+            // that image does.
+            StatusMessage = $"Certificate saved to {path}. It opens with the password you chose when it was generated.";
         }
         catch (Exception ex)
         {

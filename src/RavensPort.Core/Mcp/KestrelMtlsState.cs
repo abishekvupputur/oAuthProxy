@@ -28,6 +28,24 @@ public sealed class KestrelMtlsState : IDisposable
 
     public bool IsEnabled => _certificate is not null;
 
+    /// <summary>
+    /// When the certificate in use stops being accepted, or null when mTLS is off. Both ends check
+    /// this window on every handshake, so past this moment the proxy refuses its own callers —
+    /// including the funnel's hop into its own routes — until a new certificate is generated,
+    /// installed everywhere, and the app restarted.
+    /// </summary>
+    public DateTimeOffset? ExpiresUtc => _certificate?.NotAfter.ToUniversalTime();
+
+    /// <summary>
+    /// True once the loaded certificate is outside its validity window. Deliberately not a reason
+    /// to refuse to bind: dropping to plain HTTP would tell the user their proxy is certificate-
+    /// protected while anything on the machine can call it, and refusing to start would strand
+    /// them with no way to reach the button that fixes it. The listener comes up and turns callers
+    /// away, which is a state the log and the Settings tab both explain.
+    /// </summary>
+    public bool IsExpired =>
+        _certificate is not null && !MtlsCertificateFactory.IsWithinValidity(_certificate, DateTimeOffset.UtcNow);
+
     /// <summary>The scheme this app's own listener answers on. The single source of that answer.</summary>
     public string Scheme => IsEnabled ? "https" : "http";
 
@@ -36,7 +54,12 @@ public sealed class KestrelMtlsState : IDisposable
     /// before Kestrel binds: the listener's scheme and its client-certificate demand are both
     /// fixed at bind time, which is why toggling the setting in the GUI asks for a restart.
     /// </summary>
-    public void Enable(string base64Pfx)
+    /// <param name="password">
+    /// The password the stored PFX was written with, from settings. Empty is the ordinary case for
+    /// a certificate the app minted itself — see
+    /// <see cref="Models.AppSettings.MtlsClientCertificatePassword"/>.
+    /// </param>
+    public void Enable(string base64Pfx, string? password = null)
     {
         if (string.IsNullOrWhiteSpace(base64Pfx))
         {
@@ -44,7 +67,7 @@ public sealed class KestrelMtlsState : IDisposable
                 "mTLS is enabled but no client certificate has been generated. Generate one on the Settings tab.");
         }
 
-        var loaded = MtlsCertificateFactory.Load(base64Pfx);
+        var loaded = MtlsCertificateFactory.Load(base64Pfx, password);
 
         _certificate?.Dispose();
         _certificate = loaded;

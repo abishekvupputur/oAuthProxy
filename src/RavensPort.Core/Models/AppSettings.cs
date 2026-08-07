@@ -22,6 +22,22 @@ public sealed class AppSettings
     /// </summary>
     public string MtlsClientCertificatePfx { get; set; } = "";
 
+    /// <summary>
+    /// The password <see cref="MtlsClientCertificatePfx"/> is encrypted with, when the user chose
+    /// one on the Settings tab. Empty means the certificate carries
+    /// <see cref="Proxy.MtlsCertificateFactory.DefaultPfxPassword"/> — which is the case for every
+    /// store written before this field existed, and for the certificates the app mints for itself
+    /// when the switch is turned on with nothing stored and there is nobody to ask.
+    ///
+    /// It lives here because the app has to re-read its own certificate unattended at every start,
+    /// so a password it cannot recover is a password that locks the proxy out of its own listener.
+    /// The vault this is written to is the same one holding the OAuth refresh tokens; a password
+    /// stored beside the file it opens buys nothing on top of that, which is why the exported copy
+    /// is the credential and the password is only there to stop Windows and curl refusing a PFX
+    /// with no password at all.
+    /// </summary>
+    public string MtlsClientCertificatePassword { get; set; } = "";
+
     // There is deliberately no proxy-wide API key here. Authentication is per endpoint: every
     // route and every funnel carries its own <see cref="ProxyKey"/>, so a key leaked from one
     // client cannot spend the OAuth grant attached to a different route, and revoking one client
