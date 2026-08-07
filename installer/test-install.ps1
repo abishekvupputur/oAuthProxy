@@ -67,6 +67,11 @@ Assert ($proc.ExitCode -eq 0) "silent install exited 0 (got $($proc.ExitCode))"
 Assert (Test-Path $exePath) "RavensPort.exe is at $exePath"
 Assert (Test-Path $shortcut) 'Start menu shortcut was created'
 Assert (Test-Path (Join-Path $installDir 'LICENSE')) 'LICENSE was installed alongside the exe'
+# Not cosmetic. The exe statically links BSD-3-Clause and Apache-2.0 components -- the Go runtime
+# and everything inside onepassword.dll among them -- and both licences require their notices to
+# accompany a binary redistribution. This file beside the exe is how that is satisfied, so a
+# packaging change that quietly dropped it would put the installer out of compliance.
+Assert (Test-Path (Join-Path $installDir 'THIRD-PARTY-NOTICES.md')) 'THIRD-PARTY-NOTICES.md was installed alongside the exe'
 Assert (Test-Path $arpKey) 'Add or Remove Programs entry was written'
 
 # The version winget compares against PackageVersion. A mismatch here is the whole of
