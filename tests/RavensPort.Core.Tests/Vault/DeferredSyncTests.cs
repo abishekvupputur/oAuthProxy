@@ -141,6 +141,112 @@ public class DeferredSyncTests : IDisposable
         Assert.False(cache.HasPendingChanges);
     }
 
+    // ---- Declined authorization -----------------------------------------------------------------
+
+    [Fact]
+    public async Task ADeclinedAuthorizationIsNotRetriedOnATimer()
+    {
+        // Reaching the manager is what raises its prompt, so retrying a decline asks the same
+        // question again. A user reported this as the app pushing notifications at them: three
+        // "Denied authorization for SDK client" failures inside a minute, each one a prompt they
+        // had already answered.
+        var vault = new SwitchableVault();
+        var cache = new ConfigStoreCache(vault);
+        await cache.InitializeAsync();
+
+        var queue = NewQueue(cache, vault);
+        vault.DeclinesAuthorization = true;
+
+        await cache.MutateAsync(store =>
+            store.Credentials.Add(new CredentialRecord { Name = "queued", ClientId = "id", ClientSecret = "s" }));
+
+        Assert.False(await queue.TrySyncAsync());
+        Assert.Equal(VaultSyncState.AuthorizationDeclined, queue.State);
+
+        var attemptsAfterTheDecline = vault.SaveAttempts;
+
+        // The pump ticking, and an unrelated edit landing. Neither may go near the vault.
+        Assert.False(await queue.TrySyncAsync());
+        await cache.MutateAsync(store => store.Settings.ListenPort = 6001);
+        Assert.False(await queue.TrySyncAsync());
+
+        Assert.Equal(attemptsAfterTheDecline, vault.SaveAttempts);
+        Assert.True(cache.HasPendingChanges);
+    }
+
+    [Fact]
+    public async Task AskingToSaveAfterADeclineTriesAgain()
+    {
+        // The way back. Nothing else clears the latch, so this is the only thing standing between
+        // the user's pending changes and losing them on exit.
+        var vault = new SwitchableVault();
+        var cache = new ConfigStoreCache(vault);
+        await cache.InitializeAsync();
+
+        var queue = NewQueue(cache, vault);
+        vault.DeclinesAuthorization = true;
+
+        await cache.MutateAsync(store =>
+            store.Credentials.Add(new CredentialRecord { Name = "queued", ClientId = "id", ClientSecret = "s" }));
+
+        await queue.TrySyncAsync();
+        Assert.Equal(VaultSyncState.AuthorizationDeclined, queue.State);
+
+        // The user unlocks 1Password and presses "I've unlocked it — save now".
+        vault.DeclinesAuthorization = false;
+
+        Assert.True(await queue.FlushAsync(TimeSpan.FromSeconds(5)));
+        Assert.False(cache.HasPendingChanges);
+        Assert.Equal(VaultSyncState.Synced, queue.State);
+        Assert.Contains((await vault.LoadAsync()).Credentials, c => c.Name == "queued");
+    }
+
+    [Fact]
+    public async Task ADeclineFollowedByAnotherDeclineStaysStopped()
+    {
+        // Pressing the button is the user asking, so the prompt is raised once more — and if they
+        // decline that one too, everything goes quiet again rather than resuming the timer.
+        var vault = new SwitchableVault();
+        var cache = new ConfigStoreCache(vault);
+        await cache.InitializeAsync();
+
+        var queue = NewQueue(cache, vault);
+        vault.DeclinesAuthorization = true;
+
+        await cache.MutateAsync(store => store.Settings.ListenPort = 6002);
+        await queue.TrySyncAsync();
+
+        Assert.False(await queue.FlushAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(VaultSyncState.AuthorizationDeclined, queue.State);
+
+        var attempts = vault.SaveAttempts;
+        Assert.False(await queue.TrySyncAsync());
+        Assert.Equal(attempts, vault.SaveAttempts);
+    }
+
+    [Fact]
+    public async Task AnOrdinaryLockIsStillRetriedAutomatically()
+    {
+        // The decline latch must not swallow the common case: a manager that is simply locked lets
+        // us back in without the user doing anything in RavensPort, and that has to keep working.
+        var vault = new SwitchableVault();
+        var cache = new ConfigStoreCache(vault);
+        await cache.InitializeAsync();
+
+        var queue = NewQueue(cache, vault);
+        vault.IsLocked = true;
+
+        await cache.MutateAsync(store => store.Settings.ListenPort = 6003);
+
+        Assert.False(await queue.TrySyncAsync());
+        Assert.Equal(VaultSyncState.WaitingForUnlock, queue.State);
+
+        vault.IsLocked = false;
+
+        Assert.True(await queue.TrySyncAsync());
+        Assert.Equal(VaultSyncState.Synced, queue.State);
+    }
+
     // ---- Token refresh --------------------------------------------------------------------------
 
     [Fact]
@@ -333,7 +439,19 @@ public class DeferredSyncTests : IDisposable
 
         public bool IsLocked { get; set; }
 
+        /// <summary>
+        /// The manager reporting that the user dismissed its authorization prompt, rather than that
+        /// it happens to be locked. Worded as 1Password's SDK words it.
+        /// </summary>
+        public bool DeclinesAuthorization { get; set; }
+
         public int SaveCount { get; private set; }
+
+        /// <summary>
+        /// Every save that reached this vault, successful or not — which is what counts as an
+        /// interruption, because reaching the manager is what raises its prompt.
+        /// </summary>
+        public int SaveAttempts { get; private set; }
 
         /// <summary>Runs inside SaveAsync, to land an edit while a write is in flight.</summary>
         public Func<Task>? BeforeSave { get; set; }
@@ -376,6 +494,15 @@ public class DeferredSyncTests : IDisposable
 
         public async Task SaveAsync(ConfigStore store, CancellationToken ct = default)
         {
+            SaveAttempts++;
+
+            if (DeclinesAuthorization)
+            {
+                throw new VaultCliException(
+                    "Could not list the 'RavensPort' vault: An error occurred when processing SDK "
+                    + "request: Error { msg: Denied authorization for SDK client, inner: None }");
+            }
+
             if (IsLocked) throw new VaultLockedException(Kind);
 
             if (BeforeSave != null)

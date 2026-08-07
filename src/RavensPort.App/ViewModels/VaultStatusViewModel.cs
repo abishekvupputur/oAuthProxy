@@ -55,6 +55,8 @@ public sealed partial class VaultStatusViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsDegraded))]
+    [NotifyPropertyChangedFor(nameof(CanSyncNow))]
+    [NotifyCanExecuteChangedFor(nameof(SyncNowCommand))]
     private bool _hasPendingChanges;
 
     [ObservableProperty]
@@ -92,16 +94,63 @@ public sealed partial class VaultStatusViewModel : ObservableObject
     /// </summary>
     public bool IsDegraded => HasPendingChanges && State != VaultSyncState.Syncing;
 
-    public bool IsWaitingForUnlock => State == VaultSyncState.WaitingForUnlock;
+    /// <summary>
+    /// Whether the per-manager "how do I stop this happening" advice is worth showing. Both states
+    /// it covers are the manager being unavailable rather than the vault objecting to the content,
+    /// and the advice — keep it unlocked longer, allow the integration — answers both.
+    /// </summary>
+    public bool IsWaitingForUnlock =>
+        State is VaultSyncState.WaitingForUnlock or VaultSyncState.AuthorizationDeclined;
 
-    public bool CanSyncNow => false;
+    /// <summary>True while a "save now" the user asked for is still running.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanSyncNow))]
+    [NotifyCanExecuteChangedFor(nameof(SyncNowCommand))]
+    private bool _isSyncingNow;
 
-    /// <summary>Pushes now, for when the user has just unlocked their manager.</summary>
+    /// <summary>
+    /// Whether "save now" has anything to do and anywhere to put it.
+    ///
+    /// This was hard-coded to false as an interim guard while the cross-vault destruction bugs were
+    /// being fixed, and left that way — which made the app unusable with a password manager the user
+    /// keeps locked. Once the manager had refused a write there was no way to ask for another
+    /// attempt, so an unlock later in the day did nothing until the vault was disconnected and
+    /// reconnected, and everything pending was lost on exit.
+    ///
+    /// The guard is now the specific one it should always have been: the store must have come from
+    /// the vault it is about to be written to. That is the condition the sync queue itself refuses
+    /// on, so enabling the button in that state would only produce a press that silently did
+    /// nothing — the way out of a switched vault is "discard and reload", which sits beside it.
+    /// </summary>
+    public bool CanSyncNow =>
+        HasPendingChanges
+        && !IsSyncingNow
+        && !_configStoreCache.IsFromAnotherVault
+        && _gate.Status.Selected != VaultBackendKind.None;
+
+    /// <summary>
+    /// Pushes now, for when the user has just unlocked their manager.
+    ///
+    /// Long timeout because this is the one save the user is watching: it can sit on an unlock
+    /// prompt, and for 1Password it may also have to rebuild a connection the desktop app
+    /// invalidated while it was locked — which is another prompt, in series with the first.
+    /// </summary>
     [RelayCommand(CanExecute = nameof(CanSyncNow))]
     private async Task SyncNowAsync()
     {
-        await _syncQueue.FlushAsync(TimeSpan.FromSeconds(30));
-        Apply();
+        IsSyncingNow = true;
+
+        try
+        {
+            // Off the dispatcher: FlushAsync blocks on vault I/O, and running it inline would
+            // freeze the window for as long as the password manager took to answer.
+            await Task.Run(() => _syncQueue.FlushAsync(TimeSpan.FromMinutes(2)));
+        }
+        finally
+        {
+            IsSyncingNow = false;
+            Apply();
+        }
     }
 
     /// <summary>
@@ -150,6 +199,13 @@ public sealed partial class VaultStatusViewModel : ObservableObject
         State = _syncQueue.State;
         Notice = _configStoreCache.LastLoadNotice ?? "";
 
+        // Explicitly, because two of the three things CanSyncNow reads are not observable — the
+        // cache's view of which vault the store came from, and which backend the gate has settled
+        // on. Both move without HasPendingChanges changing, and a button that stayed disabled
+        // through a reconnect would be the original bug wearing a different hat.
+        OnPropertyChanged(nameof(CanSyncNow));
+        SyncNowCommand.NotifyCanExecuteChanged();
+
         var manager = VaultLockGuidance.DisplayName(_gate.Status.Selected);
 
         if (!HasPendingChanges)
@@ -165,6 +221,7 @@ public sealed partial class VaultStatusViewModel : ObservableObject
         Headline = State switch
         {
             VaultSyncState.WaitingForUnlock => $"Waiting for {manager} — your changes are not saved yet.",
+            VaultSyncState.AuthorizationDeclined => $"{manager} was not authorized — your changes are not saved yet.",
             VaultSyncState.Failed => $"{manager} refused the last save.",
             _ => "Saving to your password manager…",
         };
@@ -174,7 +231,19 @@ public sealed partial class VaultStatusViewModel : ObservableObject
         Detail = State switch
         {
             VaultSyncState.WaitingForUnlock =>
-                $"Unlock {manager} and they will be saved automatically. "
+                $"Unlock {manager} and they will be saved automatically — or press \"I've unlocked "
+                + "it — save now\" to do it straight away. "
+                + "Everything keeps working in the meantime — but if RavensPort exits first, these "
+                + "changes are lost, and any credential whose token was refreshed will need reconnecting."
+                + PendingFor(),
+
+            // Says outright that nothing is happening, because nothing is. Repeating "they will be
+            // saved automatically" here would be a lie the user could only discover by quitting —
+            // this is the one state where the button is the only thing that saves their work.
+            VaultSyncState.AuthorizationDeclined =>
+                $"Nothing more will be tried automatically — each attempt asks {manager} for "
+                + "permission again, and you have already been asked. Unlock it whenever suits you, "
+                + "then press \"I've unlocked it — save now\". "
                 + "Everything keeps working in the meantime — but if RavensPort exits first, these "
                 + "changes are lost, and any credential whose token was refreshed will need reconnecting."
                 + PendingFor(),
