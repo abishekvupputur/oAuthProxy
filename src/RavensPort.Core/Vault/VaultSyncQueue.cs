@@ -18,6 +18,16 @@ public enum VaultSyncState
 
     /// <summary>The vault refused the write for a reason unlocking will not fix.</summary>
     Failed,
+
+    /// <summary>
+    /// The user was asked to authorize and said no. Nothing is retried until they ask for it.
+    ///
+    /// Separate from <see cref="WaitingForUnlock"/> because the correct behaviour is the opposite.
+    /// Waiting means keep trying — the manager will let us in eventually and the user need never
+    /// know. A decline is an answer, and every attempt to write raises the prompt again, so
+    /// retrying one is the app asking the same question every few seconds.
+    /// </summary>
+    AuthorizationDeclined,
 }
 
 /// <summary>
@@ -43,9 +53,19 @@ public sealed class VaultSyncQueue : BackgroundService
     /// </summary>
     private static readonly TimeSpan Debounce = TimeSpan.FromMilliseconds(400);
 
-    /// <summary>Retry pacing while the manager is locked. Capped so a long lock is not a busy loop.</summary>
+    /// <summary>
+    /// Retry pacing while the manager is locked. Capped so a long lock is not a busy loop.
+    ///
+    /// The cap is minutes rather than seconds because a retry is not free to the user: reaching a
+    /// locked manager is what raises its unlock prompt, and for 1Password a connection the desktop
+    /// app has invalidated costs an authorization prompt on top. At a one-minute cap, someone who
+    /// had deliberately left 1Password locked was interrupted every minute for as long as the app
+    /// ran. Nothing is lost by waiting longer: a new edit wakes the pump immediately whatever this
+    /// says, and the banner's "I've unlocked it — save now" is there for the moment the user is
+    /// ready.
+    /// </summary>
     private static readonly TimeSpan MinRetry = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan MaxRetry = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan MaxRetry = TimeSpan.FromMinutes(5);
 
     private readonly ConfigStoreCache _configStoreCache;
     private readonly IConfigVault _vault;
@@ -57,6 +77,22 @@ public sealed class VaultSyncQueue : BackgroundService
 
     private TimeSpan _retryDelay = MinRetry;
     private bool _reportedWaiting;
+
+    /// <summary>
+    /// Set when the manager reported that the user declined authorization, and cleared only by the
+    /// user asking for a save. While set, nothing here touches the vault at all.
+    ///
+    /// That is stronger than a longer backoff, and deliberately so. Reaching the vault is what
+    /// raises the prompt, so any interval short enough to be useful is also short enough to be an
+    /// interruption — and the user has already said they do not want to be interrupted. The banner
+    /// says plainly that nothing is being retried and that its button is how to resume, which makes
+    /// this a decision the user is holding rather than a state they have to guess at.
+    ///
+    /// Volatile because the pump thread reads it and the dispatcher clears it.
+    /// </summary>
+    private volatile bool _authorizationDeclined;
+
+    private bool _reportedDeclined;
 
     public VaultSyncQueue(
         ConfigStoreCache configStoreCache,
@@ -92,8 +128,11 @@ public sealed class VaultSyncQueue : BackgroundService
             try
             {
                 // Wait for something to do, but wake anyway on the retry timer so a lock that
-                // lifts with no further edits still gets the pending change written.
-                var idleFor = _configStoreCache.HasPendingChanges ? _retryDelay : Timeout.InfiniteTimeSpan;
+                // lifts with no further edits still gets the pending change written. Not after a
+                // decline: there the timer's only effect would be to ask again.
+                var idleFor = _configStoreCache.HasPendingChanges && !_authorizationDeclined
+                    ? _retryDelay
+                    : Timeout.InfiniteTimeSpan;
                 await _wakeUp.WaitAsync(idleFor, stoppingToken).ConfigureAwait(false);
 
                 if (_configStoreCache.HasPendingChanges)
@@ -139,6 +178,15 @@ public sealed class VaultSyncQueue : BackgroundService
             return false;
         }
 
+        // Before the write lock and before anything reaches the vault, because reaching the vault
+        // is the prompt. An edit made after a decline still wakes this pump — it has to, so the
+        // change is recorded as pending — and without this it would raise the question again.
+        if (_authorizationDeclined)
+        {
+            SetState(VaultSyncState.AuthorizationDeclined);
+            return false;
+        }
+
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -156,6 +204,7 @@ public sealed class VaultSyncQueue : BackgroundService
 
             _retryDelay = MinRetry;
             _reportedWaiting = false;
+            _reportedDeclined = false;
             LastError = null;
 
             SetState(_configStoreCache.HasPendingChanges ? VaultSyncState.Syncing : VaultSyncState.Synced);
@@ -164,6 +213,13 @@ public sealed class VaultSyncQueue : BackgroundService
         catch (Exception ex) when (ex is VaultLockedException or VaultCliException)
         {
             LastError = ex.Message;
+
+            if (VaultAuthorization.WasDeclined(ex.Message))
+            {
+                Decline();
+                return false;
+            }
+
             ReportWaitingOnce();
             Backoff();
             SetState(VaultSyncState.WaitingForUnlock);
@@ -208,6 +264,10 @@ public sealed class VaultSyncQueue : BackgroundService
     {
         if (_gate.Status.Selected == VaultBackendKind.None) return false;
 
+        // Both entry points are a button on the Settings tab, so this is the user asking. Same
+        // reasoning as FlushAsync.
+        Resume();
+
         // Never write a store into a vault it did not come from. Choosing another password manager,
         // or another vault in the same one, repoints the gate immediately — and until the reload
         // that follows has landed, memory still holds the previous vault's configuration. Writing
@@ -249,6 +309,7 @@ public sealed class VaultSyncQueue : BackgroundService
             _configStoreCache.MarkSynced(version);
             _retryDelay = MinRetry;
             _reportedWaiting = false;
+            _reportedDeclined = false;
             LastError = null;
 
             _activityLog.Log(rewriteEverything
@@ -263,6 +324,13 @@ public sealed class VaultSyncQueue : BackgroundService
         {
             LastError = ex.Message;
             _activityLog.LogError("Could not write to the vault", ex);
+
+            if (VaultAuthorization.WasDeclined(ex.Message))
+            {
+                Decline();
+                return false;
+            }
+
             SetState(ex is VaultSaveException ? VaultSyncState.Failed : VaultSyncState.WaitingForUnlock);
             return false;
         }
@@ -278,6 +346,11 @@ public sealed class VaultSyncQueue : BackgroundService
     /// </summary>
     public async Task<bool> FlushAsync(TimeSpan timeout)
     {
+        // Every caller is the user deciding to save: the banner's button, the exit confirmation,
+        // and the last attempt before a disconnect. That is the answer a decline was waiting for,
+        // so it is the one place the latch comes off — the prompt raised next is one they asked for.
+        Resume();
+
         using var cts = new CancellationTokenSource(timeout);
 
         try
@@ -323,6 +396,38 @@ public sealed class VaultSyncQueue : BackgroundService
         // keep it. Holding it would deadlock the disconnect against the queue's own pump.
         _writeLock.Release();
         return true;
+    }
+
+    /// <summary>
+    /// Stops trying, until the user says otherwise. See <see cref="_authorizationDeclined"/>.
+    /// </summary>
+    private void Decline()
+    {
+        _authorizationDeclined = true;
+
+        if (!_reportedDeclined)
+        {
+            _reportedDeclined = true;
+
+            _activityLog.Log(
+                $"VAULT {VaultLockGuidance.DisplayName(_gate.Status.Selected)} was not authorized — "
+                + "nothing more will be tried automatically, because every attempt asks again. "
+                + "Changes are being kept in memory; use \"I've unlocked it — save now\" when ready. "
+                + "They are lost if RavensPort exits first.");
+        }
+
+        SetState(VaultSyncState.AuthorizationDeclined);
+    }
+
+    /// <summary>
+    /// Lifts the decline and puts the retry timing back to where it started, so a save the user has
+    /// asked for is not paced by however long the previous failures had backed off to.
+    /// </summary>
+    private void Resume()
+    {
+        _authorizationDeclined = false;
+        _reportedDeclined = false;
+        _retryDelay = MinRetry;
     }
 
     /// <summary>
