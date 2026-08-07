@@ -24,18 +24,17 @@ ProductCode: '{C47DF74F-150F-4AD3-9B12-46A8BF02BE9C}_is1'
 ExpectedReturnCodes:
 - InstallerReturnCode: 7
   ReturnResponse: packageInUse
-# STALE: 4.1.7's release date. Set this to the day the v4.2.0 release is actually published.
-ReleaseDate: 2026-08-05
+# The day the v4.2.0 release was published, not the day the manifest was written.
+ReleaseDate: 2026-08-07
 Installers:
 # ArchitecturesAllowed=x64compatible, so this also installs and runs on ARM64 Windows under
 # emulation; winget treats x64 as applicable there.
 - Architecture: x64
   InstallerUrl: https://github.com/abishekvupputur/ravensPort/releases/download/v4.2.0/RavensPort-Setup-4.2.0.exe
-  # STALE: this is 4.1.7's hash. It must be replaced with the SHA256 of the exe the v4.2.0 release
-  # actually publishes -- computed from that asset, not from a local build, since the release is
-  # built by CI from the tag. `wingetcreate update` regenerates both this and the URL above; see
-  # docs/WINGET-SUBMISSION.md. Submitting with a hash that does not match the asset fails
-  # validation.
-  InstallerSha256: 0D6252C4C475F3446290192C1E515F7D94B2380BD972079A0AB31691DCB6FF0F
+  # Of the asset the release publishes, not of a local build: the release is built by CI from the
+  # tag, so a locally compiled installer is a different file with a different hash even at the same
+  # version. Submitting a hash that does not match what the URL serves fails validation.
+  # `wingetcreate update` regenerates this and the URL above; see docs/WINGET-SUBMISSION.md.
+  InstallerSha256: B1623CCBABA9267581858E38AC0BB4D2FC6EE8CFFAF8A76F6435DCDDCEF33B5C
 ManifestType: installer
 ManifestVersion: 1.12.0
