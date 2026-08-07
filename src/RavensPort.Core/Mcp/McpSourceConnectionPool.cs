@@ -200,7 +200,21 @@ public sealed class McpSourceConnectionPool : IAsyncDisposable
                     // would read as "wrong certificate" — the one conclusion that is definitely
                     // not what happened.
                     var actual = presented?.GetCertHashString();
-                    if (string.Equals(actual, expectedThumbprint, StringComparison.OrdinalIgnoreCase)) return true;
+                    if (string.Equals(actual, expectedThumbprint, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // The pin does not exempt it from its own dates. Pinning replaces chain
+                        // validation, which is what would ordinarily have caught this; leaving it
+                        // out would mean the listener refuses an expired certificate while the
+                        // funnel accepts one, and the two are the same certificate.
+                        if (MtlsCertificateFactory.IsWithinValidity(presented!, DateTimeOffset.UtcNow)) return true;
+
+                        _activityLog.Log(
+                            $"The MCP funnel refused the stored mTLS certificate {Redact(actual)}: it is "
+                            + "outside its validity window. Generate a new one on the Settings tab, install "
+                            + "it on every client, and restart RavensPort.");
+
+                        return false;
+                    }
 
                     // Anything that is not the pinned certificate has to earn trust the ordinary
                     // way. On loopback nothing can: a public CA does not issue for 127.0.0.1, so

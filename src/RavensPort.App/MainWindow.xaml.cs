@@ -18,6 +18,14 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
+        // Set here rather than in XAML, because the number comes from the assembly the build
+        // stamped and markup has nothing to read it from. This is the one place a user can see
+        // which build they are running without opening the exe's file properties, which matters
+        // when a bug report says "latest".
+        // "v" here rather than baked into AppVersion.Display: the bare number is what matches the
+        // installer name and the exe's file properties, and a prefix belongs to how it is shown.
+        Title = $"RavensPort v{AppVersion.Display}";
+
         DataContext = mainWindowViewModel;
 
         SetupViewControl.DataContext = setupViewModel;

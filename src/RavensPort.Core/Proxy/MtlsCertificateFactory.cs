@@ -15,11 +15,71 @@ namespace RavensPort.Core.Proxy;
 public static class MtlsCertificateFactory
 {
     /// <summary>
-    /// Password on the exported PFX. Not a secret and not pretending to be one: the file is the
-    /// credential, and a constant password is what lets the app re-read its own copy unattended.
-    /// Anyone holding the PFX holds the access it grants regardless of what is typed here.
+    /// The password used when the user was not asked for one: certificates minted by the mTLS
+    /// switch itself, by startup repairing a store that says "on" and holds none, and every
+    /// certificate written before the Settings tab offered a password box.
+    ///
+    /// Not a secret and not pretending to be one. The file is the credential: anyone holding the
+    /// PFX holds the access it grants regardless of what is typed here, which is why a user-chosen
+    /// password changes who can open the exported copy and nothing about what it can reach.
     /// </summary>
-    public const string PfxPassword = "ravensport";
+    public const string DefaultPfxPassword = "ravensport";
+
+    /// <summary>
+    /// How long a generated certificate stays inside its validity window. 90 days, so a copy that
+    /// leaked — off a machine it was installed on, out of a backup of one — stops being a working
+    /// credential within a quarter rather than within a decade. There is no revocation here: no CA,
+    /// no CRL, no OCSP, so expiry is the only thing that retires a certificate the user cannot get
+    /// back.
+    ///
+    /// Note what this does not do. Both ends pin the thumbprint and accept it in spite of chain
+    /// errors — see the validation callbacks in App.xaml.cs and McpSourceConnectionPool — so an
+    /// expired certificate is not refused by this app, and the curl and Node recipes on the
+    /// Settings tab disable verification too. The date is a prompt to rotate, not an enforced
+    /// cut-off, and rotating means generating, exporting, reinstalling on every client, and
+    /// restarting.
+    /// </summary>
+    public static readonly TimeSpan Lifetime = TimeSpan.FromDays(90);
+
+    /// <summary>
+    /// How close to expiry the Settings tab starts saying so. Long enough that a certificate can be
+    /// rotated between one use of the app and the next rather than in the moment it stops working,
+    /// which matters because rotating means visiting every client that holds a copy.
+    /// </summary>
+    public static readonly TimeSpan ExpiryWarningWindow = TimeSpan.FromDays(14);
+
+    /// <summary>
+    /// Whether <paramref name="certificate"/> is inside its validity window. The one place that is
+    /// decided, so the listener, the funnel, and the Settings tab cannot disagree about whether a
+    /// certificate is still good.
+    ///
+    /// Both ends pin a thumbprint and accept the certificate in spite of chain errors, because a
+    /// self-signed pair on loopback has no chain to validate. That deliberately turns off the
+    /// platform's own expiry check along with everything else, so it has to be put back by hand —
+    /// otherwise <see cref="Lifetime"/> would be decoration and a leaked copy would stay a working
+    /// credential for as long as anyone kept it.
+    /// </summary>
+    public static bool IsWithinValidity(X509Certificate2 certificate, DateTimeOffset now) =>
+        now >= certificate.NotBefore.ToUniversalTime() && now <= certificate.NotAfter.ToUniversalTime();
+
+    /// <inheritdoc cref="IsWithinValidity(X509Certificate2, DateTimeOffset)"/>
+    /// <remarks>
+    /// The X509Certificate overload, for the SslStream callbacks: those are contracted to hand back
+    /// the base type, and a cast that failed would read as "wrong certificate" — which is the one
+    /// conclusion that would definitely not be what happened.
+    /// </remarks>
+    public static bool IsWithinValidity(X509Certificate certificate, DateTimeOffset now)
+    {
+        // Both are the certificate's own dates in local time; DateTime.Parse is what the framework
+        // itself uses to surface them off the base type.
+        if (!DateTime.TryParse(certificate.GetEffectiveDateString(), out var notBefore) ||
+            !DateTime.TryParse(certificate.GetExpirationDateString(), out var notAfter))
+        {
+            return false;
+        }
+
+        return now >= notBefore.ToUniversalTime() && now <= notAfter.ToUniversalTime();
+    }
 
     /// <summary>
     /// Deliberately <em>not</em> <see cref="X509KeyStorageFlags.EphemeralKeySet"/>, tempting as it
@@ -38,7 +98,11 @@ public static class MtlsCertificateFactory
     /// </summary>
     private const X509KeyStorageFlags StorageFlags = X509KeyStorageFlags.DefaultKeySet;
 
-    public static string GenerateClientCertificatePfx()
+    /// <param name="password">
+    /// What the exported PFX will ask for. Empty or null takes <see cref="DefaultPfxPassword"/>,
+    /// so the callers that have nobody to ask do not each have to name it.
+    /// </param>
+    public static string GenerateClientCertificatePfx(string? password = null)
     {
         using var rsa = RSA.Create(2048);
         var request = new CertificateRequest("CN=RavensPort MCP Client", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
@@ -58,23 +122,33 @@ public static class MtlsCertificateFactory
         subjectAlternativeNames.AddIpAddress(IPAddress.IPv6Loopback);
         request.CertificateExtensions.Add(subjectAlternativeNames.Build());
 
-        var expire = DateTimeOffset.UtcNow.AddYears(10);
+        // The backdated start is not padding: a client whose clock runs a few minutes ahead of this
+        // machine would otherwise reject a certificate minted seconds ago as not yet valid.
+        var expire = DateTimeOffset.UtcNow.Add(Lifetime);
         using var cert = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), expire);
 
-        var pfxBytes = cert.Export(X509ContentType.Pfx, PfxPassword);
+        var pfxBytes = cert.Export(X509ContentType.Pfx, Resolve(password));
         return Convert.ToBase64String(pfxBytes);
     }
+
+    /// <summary>
+    /// Empty means "the store predates the password box", not "no password" — see
+    /// <see cref="Models.AppSettings.MtlsClientCertificatePassword"/>. Both readings load an
+    /// existing certificate; only this one loads the ones already on disk.
+    /// </summary>
+    private static string Resolve(string? password) =>
+        string.IsNullOrEmpty(password) ? DefaultPfxPassword : password;
 
     /// <summary>
     /// Reads back a certificate stored by <see cref="GenerateClientCertificatePfx"/>. The single
     /// place the storage flags and the password are applied, so the copy Kestrel serves and the
     /// copy the funnel presents are loaded identically and their thumbprints match.
     /// </summary>
-    public static X509Certificate2 Load(string base64Pfx)
+    public static X509Certificate2 Load(string base64Pfx, string? password = null)
     {
         try
         {
-            return new X509Certificate2(Convert.FromBase64String(base64Pfx), PfxPassword, StorageFlags);
+            return new X509Certificate2(Convert.FromBase64String(base64Pfx), Resolve(password), StorageFlags);
         }
         catch (Exception ex) when (ex is FormatException or CryptographicException)
         {
