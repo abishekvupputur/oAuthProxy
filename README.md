@@ -66,6 +66,8 @@ reach on its own.
 - **A proxy key per endpoint** — every route and every funnel has its own, with its own expiry, so
   other processes on your machine cannot spend your grants and a key leaked from one client cannot
   reach the rest
+- **Client certificates (mTLS)** — optionally require a certificate on every connection as well as
+  the key, so a process that reads a key out of a config file still cannot call the proxy
 - **Activity log** with redaction and rotation, viewable in-app
 - **Tray-resident** — starts hidden, survives provider and network errors, single-instance guard
 - **CI-published releases** with build provenance attestation
@@ -404,6 +406,9 @@ Anything without a valid key gets `403`: a wrong key, another endpoint's key, an
 a path belonging to no route or funnel all answer the same way, so the reply cannot be used to map
 which endpoints exist.
 
+The key can be backed by a client certificate as well — see
+[Client certificates (mTLS)](#client-certificates-mtls-new-in-420).
+
 ### Key validity
 
 Each key is generated when its route or funnel is created and is valid **until you replace it**
@@ -445,6 +450,75 @@ them.
 Alongside the key, the proxy refuses requests whose `Host` is not loopback, refuses requests
 carrying an `Origin` header (only browsers send one), and strips `Access-Control-*` headers from
 upstream responses so a permissive upstream cannot reopen the same hole.
+
+---
+
+## Client certificates (mTLS) <sub><sup>new in 4.2.0</sup></sub>
+
+Optional, off by default. Turn on **Require mTLS for all routes and funnels** on the Settings tab
+and the proxy switches from `http://127.0.0.1:5559` to **`https://127.0.0.1:5559`** and demands a
+client certificate on every connection — routes, funnels, everything.
+
+This is a second factor for the same door, not a replacement for the proxy key. A key sits in
+whatever config file the client reads it from, so any process that can read that file can spend it;
+a certificate has to be installed as well, and both are checked. Every request still needs the key
+of the endpoint it is calling.
+
+**Changing the setting requires a full restart of RavensPort.** The listener's scheme and its
+certificate demand are fixed when Kestrel binds, so nothing about this takes effect until the app
+is restarted — the Settings tab says so in red until it is.
+
+### Generating and exporting
+
+**Generate new certificate** asks for a password, then mints a self-signed certificate. RavensPort
+keeps it in the vault with everything else and presents it at both ends: the listener serves it and
+demands it back, and the funnel presents it when it dials this app's own routes.
+
+- **You choose the password, and it is shown nowhere afterwards** — not on the status line, not in
+  the log. Write it down before confirming. There is no way to recover it; the way out of a
+  forgotten one is generating another certificate and reinstalling it everywhere.
+- **Export certificate** asks where to save the `.pfx`. That file *is* the credential — whoever
+  holds it can call the proxy — so put it where the client that needs it can read it, and nowhere
+  else. The password stops Windows and curl refusing a password-less PFX; it does not make a copy
+  of the file safe to leave lying around.
+- **Generating a new certificate invalidates the old one immediately.** Every client holding the
+  previous file is refused. Export the new one, install it everywhere it is used, and restart.
+
+### Pointing a client at it
+
+```bash
+curl -k --cert "cert.pfx:<your-password>" --cert-type P12 \
+     -H "X-Proxy-Key: <this-route's-key>" \
+     https://127.0.0.1:5559/app/my-service/foo
+```
+
+```jsonc
+https.request({
+  pfx: fs.readFileSync('cert.pfx'),
+  passphrase: '<your-password>',
+  rejectUnauthorized: false
+}, ...)
+```
+
+`-k` / `rejectUnauthorized: false` are there because the certificate is self-signed and no
+machine trusts it. That switches off the client's verification of the *server*, not the server's
+demand for a certificate from the *client* — which is the direction that matters here. RavensPort
+does not skip anything: it compares the thumbprint of what it was handed against its own.
+
+### Expiry
+
+Certificates are minted with a **90-day** life. Nothing renews them, and there is no CA behind
+them — no revocation list to publish, no way to recall a copy that leaked — so the expiry date is
+the only thing that retires one.
+
+It is enforced, at both ends. Past the date the proxy refuses the certificate it issued, including
+its own funnel's hop into its own routes. **An expired certificate fails during the TLS handshake,
+so clients see a dropped connection rather than a status code** — there is no `403` to read, which
+is why the date is worth watching.
+
+The Settings tab shows when the current certificate expires, and says so in red once it is within
+14 days. Rotating means generating, exporting, installing on every client, and restarting, so it
+is not something to start on the day it stops working.
 
 ---
 
@@ -717,6 +791,12 @@ whether it accepts your token.
 or the key belongs to a *different* route or funnel, which opens nothing here. Copy the key from
 the row of the endpoint you are calling: the Routes tab for a route, the MCP Funnel tab for a
 funnel. The activity log names which endpoint refused and why.
+
+**Connections are dropped with no status code at all, since enabling mTLS.** The failure is in the
+TLS handshake, which is over before any HTTP exists to answer with. Either the client is presenting
+no certificate or the wrong one, it is still calling `http://` at a listener that now answers
+`https://`, or the certificate has expired — the Settings tab shows the date, and the activity log
+names which of these it was.
 
 **A path that used to work now 403s instead of 404ing.** A request to a path belonging to no route
 and no funnel has no key to check against and is refused rather than answered, so which prefixes
