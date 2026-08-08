@@ -25,13 +25,69 @@ public sealed class NativeCliRunner : ICliRunner
     /// </summary>
     private static readonly SemaphoreSlim _callGate = new(1, 1);
 
+    /// <summary>
+    /// The pipe 1Password publishes for desktop app integration.
+    ///
+    /// Checked directly rather than inferred from a failed call, because of a 1Password defect that
+    /// makes merely *loading* its library destructive — see <see cref="RequireIntegrationChannel"/>.
+    /// </summary>
+    private const string IntegrationChannel = @"\\.\pipe\1password-sdk-integrations";
+
     private readonly ActivityLog? _activityLog;
     private readonly IOnePasswordNativeClient _client;
+    private readonly Func<bool> _integrationChannelPresent;
 
-    public NativeCliRunner(ActivityLog? activityLog = null, IOnePasswordNativeClient? client = null)
+    /// <param name="integrationChannelPresent">
+    /// Whether 1Password is listening. A seam for tests, which must not depend on whether the
+    /// machine running them happens to have 1Password open.
+    /// </param>
+    public NativeCliRunner(
+        ActivityLog? activityLog = null,
+        IOnePasswordNativeClient? client = null,
+        Func<bool>? integrationChannelPresent = null)
     {
         _activityLog = activityLog;
         _client = client ?? new OnePasswordNativeClientWrapper();
+        _integrationChannelPresent = integrationChannelPresent ?? (() => File.Exists(IntegrationChannel));
+    }
+
+    /// <summary>
+    /// Refuses to go near the SDK unless 1Password is actually listening.
+    ///
+    /// This exists because of a 1Password defect, and the cost of tripping it is out of all
+    /// proportion to the mistake. <b>If any process has 1Password's <c>op_sdk_ipc_client.dll</c>
+    /// mapped when 1Password starts, 1Password does not create the integration pipe at all</b> — a
+    /// mapped DLL cannot be replaced or deleted on Windows, and its startup evidently touches that
+    /// file. It never retries, so the channel stays missing for the entire life of that 1Password
+    /// process, and releasing the library afterwards does not bring it back.
+    ///
+    /// Reproduced in isolation with a process that did nothing but <c>LoadLibrary</c> — never
+    /// connected, never authenticated: 1Password restarted with it running, no pipe; restarted
+    /// without it, pipe present.
+    ///
+    /// So the damage is done by loading the library at the wrong moment, and the only defence is
+    /// not to load it then. RavensPort cannot know when the user will start 1Password, but it does
+    /// know 1Password can only start while it is not running — so declining to load whenever the
+    /// channel is absent keeps the file free across every window in which a start could happen.
+    /// Without this, an install set to run at login held the library from boot and 1Password could
+    /// never open the channel again, on any restart, forever.
+    ///
+    /// The library cannot be released once loaded — the SDK caches it in a package-level variable
+    /// in an internal package — which is why the message differs once that has happened. There the
+    /// only honest advice is to restart RavensPort, because this process is now the thing standing
+    /// in 1Password's way.
+    /// </summary>
+    private void RequireIntegrationChannel()
+    {
+        if (_integrationChannelPresent()) return;
+
+        throw new VaultCliException(_initialized
+            ? "1Password is not running, and RavensPort has already loaded 1Password's integration "
+              + "library — which stops 1Password from opening its integration channel when it "
+              + "starts again. Start 1Password, then restart RavensPort."
+            : "1Password is not running. Start the 1Password desktop app and try again. If you have "
+              + "just switched on Settings > Developer > \"Integrate with other apps\", restart "
+              + "1Password too — it only opens the integration channel when it starts.");
     }
 
     /// <summary>
@@ -121,17 +177,20 @@ public sealed class NativeCliRunner : ICliRunner
     }
 
     /// <summary>
-    /// Puts a sentence in front of the SDK's own wording when that wording is a bare Win32 error.
+    /// Puts a usable sentence in front of the SDK's own wording when that wording is a bare Win32
+    /// error — see <see cref="VaultAuthorization.IsUnreachable"/> for what it actually means.
     ///
-    /// "The system cannot find the file specified" is what a user is shown when 1Password is not
-    /// running — the named pipe behind desktop app integration is the missing "file". Nothing about
-    /// that tells them to start 1Password, and it reads like RavensPort has lost one of its own.
+    /// The restart clause is the whole point of writing this. "1Password isn't running" is easy
+    /// enough to work out; that turning the integration on inside a running 1Password does nothing
+    /// until it is restarted is not, and it is the failure people actually hit. Without it the log
+    /// reads as though RavensPort has misplaced a file of its own.
     /// </summary>
     private static string Explain(string message) =>
-        VaultAuthorization.ClientIsDead(message)
-            ? "1Password does not appear to be running, or its app integration is switched off. "
-              + VaultLockGuidance.SignInSteps(VaultBackendKind.OnePassword)
-              + $" ({message})"
+        VaultAuthorization.IsUnreachable(message)
+            ? "1Password is not reachable. Start the 1Password desktop app — and if you have just "
+              + "turned on Settings > Developer > \"Integrate with other apps\", restart 1Password, "
+              + "because it only opens the integration channel when it starts. "
+              + $"({message})"
             : message;
 
     /// <summary>
@@ -207,6 +266,10 @@ public sealed class NativeCliRunner : ICliRunner
 
         try
         {
+            // Ahead of EnsureInitialized, because the whole point is to not load the library. After
+            // the --version answer above, because that must stay free of 1Password entirely.
+            RequireIntegrationChannel();
+
             EnsureInitialized();
 
             CliResult result;

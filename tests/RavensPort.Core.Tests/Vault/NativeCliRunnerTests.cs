@@ -12,7 +12,10 @@ public class NativeCliRunnerTests
     public NativeCliRunnerTests()
     {
         _mockClient = new Mock<IOnePasswordNativeClient>();
-        _runner = new NativeCliRunner(client: _mockClient.Object);
+
+        // 1Password listening, so these tests exercise the runner rather than whether the machine
+        // running them happens to have the app open.
+        _runner = new NativeCliRunner(client: _mockClient.Object, integrationChannelPresent: () => true);
         Environment.SetEnvironmentVariable("OP_ACCOUNT", "TestAccount");
         NativeCliRunner.ResetInitialization();
     }
@@ -181,21 +184,57 @@ public class NativeCliRunnerTests
     }
 
     [Fact]
-    public async Task ARestartedDesktopAppGetsAFreshConnection()
+    public async Task WithNoIntegrationChannelTheLibraryIsNeverLoaded()
     {
-        // Desktop app integration runs over a named pipe. Quitting 1Password takes the pipe down,
-        // and the client made before the restart still points at it — so every call fails instantly
-        // with Win32 error 2, wearing the least informative message Windows owns. The SDK does not
-        // rebuild the connection itself (1Password's own issue #266, open, no fix), so this does.
-        _mockClient.SetupSequence(c => c.ListItems("vault123"))
-            .Throws(new VaultCliException("The system cannot find the file specified."))
-            .Returns(new JsonArray());
+        // The one that matters. If any process has 1Password's op_sdk_ipc_client.dll mapped when
+        // 1Password starts, 1Password never creates the integration pipe — for the whole life of
+        // that process, unrecoverably, because releasing the library afterwards does not help.
+        // So the library must not be loaded during any window in which 1Password could start, and
+        // "1Password is not running" is exactly that window.
+        //
+        // An install set to run at login held the library from boot, which meant 1Password could
+        // never open the channel again on any restart.
+        var runner = new NativeCliRunner(client: _mockClient.Object, integrationChannelPresent: () => false);
+
+        var result = await runner.RunAsync("op", ["item", "list", "--vault", "vault123"]);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("1Password is not running", result.StdErr);
+
+        // Initialize is what loads the DLL. It must not have been reached.
+        _mockClient.Verify(c => c.Initialize(It.IsAny<string>()), Times.Never);
+        _mockClient.Verify(c => c.ListItems(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task VersionStillAnswersWithNoIntegrationChannel()
+    {
+        // Discovery must keep working with 1Password closed — the setup page asks what is installed
+        // before anyone has connected anything, and the guard must not turn that into a failure.
+        var runner = new NativeCliRunner(client: _mockClient.Object, integrationChannelPresent: () => false);
+
+        var result = await runner.RunAsync("native", ["--version"]);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal("0.4.1", result.StdOut);
+        _mockClient.Verify(c => c.Initialize(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task AnUnreachableDesktopAppIsNotAnsweredByRebuildingTheConnection()
+    {
+        // "The system cannot find the file specified" is 1Password's integration pipe not being
+        // published — the app is not running. There is nothing on the other end to connect to, so
+        // rebuilding would spend an attempt arriving at the same answer. Measured, not assumed: a
+        // process with no cached state fails identically on its first call.
+        _mockClient.Setup(c => c.ListItems("vault123"))
+            .Throws(new VaultCliException("The system cannot find the file specified."));
 
         var result = await _runner.RunAsync("op", ["item", "list", "--vault", "vault123"]);
 
-        Assert.Equal(0, result.ExitCode);
-        _mockClient.Verify(c => c.Initialize(It.IsAny<string>()), Times.Exactly(2));
-        _mockClient.Verify(c => c.ListItems("vault123"), Times.Exactly(2));
+        Assert.Equal(1, result.ExitCode);
+        _mockClient.Verify(c => c.Initialize(It.IsAny<string>()), Times.Once);
+        _mockClient.Verify(c => c.ListItems("vault123"), Times.Once);
     }
 
     [Fact]
@@ -209,8 +248,10 @@ public class NativeCliRunnerTests
         var first = await _runner.RunAsync("op", ["item", "list", "--vault", "vault123"]);
         Assert.Equal(1, first.ExitCode);
 
-        // Says what to do about it, rather than handing the user a bare Win32 error.
-        Assert.Contains("1Password does not appear to be running", first.StdErr);
+        // Names the restart, which is the part nobody works out on their own: switching the
+        // integration on inside a running 1Password saves the setting and opens no pipe.
+        Assert.Contains("1Password is not reachable", first.StdErr);
+        Assert.Contains("restart 1Password", first.StdErr);
 
         _mockClient.Reset();
         _mockClient.Setup(c => c.ListItems("vault123")).Returns(new JsonArray());
@@ -226,9 +267,9 @@ public class NativeCliRunnerTests
     {
         // Calls reaching this runner are not paced by the sync queue: loading the store fans out
         // over items, and a probe walks the vault list. An activity log showed six failures inside
-        // four seconds — and against a running-but-locked 1Password each reconnect is a prompt.
+        // four seconds — and against a running 1Password each rebuild is an authorization prompt.
         _mockClient.Setup(c => c.ListItems("vault123"))
-            .Throws(new VaultCliException("The system cannot find the file specified."));
+            .Throws(new VaultCliException("invalid client id"));
 
         for (var i = 0; i < 6; i++)
         {

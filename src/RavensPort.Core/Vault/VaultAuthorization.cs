@@ -47,6 +47,46 @@ public static class VaultAuthorization
         || Says(message, "user declined")
         || Says(message, "request was declined");
 
+    /// <summary>
+    /// Whether 1Password cannot be reached at all, as opposed to reaching it and being refused.
+    ///
+    /// Desktop app integration listens on <c>\\.\pipe\1password-sdk-integrations</c>. 1Password opens
+    /// that pipe <b>when the app starts</b>, provided Settings > Developer > "Integrate with other
+    /// apps" is on, and keeps it open for the life of the process. Opening a pipe that was never
+    /// published is an ordinary <c>CreateFileW</c> against a path that does not exist, so Windows
+    /// answers ERROR_FILE_NOT_FOUND and the SDK passes it through as the least informative sentence
+    /// it owns: <c>The system cannot find the file specified.</c>
+    ///
+    /// Measured, not guessed, because the obvious readings are all wrong:
+    ///
+    /// <list type="bullet">
+    /// <item>Not a lock. The pipe survives locking, and a locked 1Password answers on it — with a
+    /// real SDK error, never this one.</item>
+    /// <item>Not a stale handle. A freshly started process with no cached state of any kind fails
+    /// identically on its first call, so there is nothing to rebuild.</item>
+    /// <item>Not the app restarting. A restarted 1Password has the pipe before anyone unlocks it.</item>
+    /// </list>
+    ///
+    /// The case that actually produces it — beyond 1Password simply not running — is switching the
+    /// integration on inside an already-running app. The setting is saved, the pipe is not created
+    /// retroactively, and nothing recovers until 1Password is restarted. A user lost an evening to
+    /// exactly that, with the app blaming itself in the log the whole time, which is why the message
+    /// this feeds names the restart specifically.
+    ///
+    /// Never drives a reconnect. There is nothing on the other end to connect to, so rebuilding
+    /// would burn an attempt to arrive at the same answer. Retrying is free and silent — it fails
+    /// without reaching anyone — so the ordinary queue simply keeps the change and saves it the
+    /// moment 1Password is there.
+    ///
+    /// The Win32 wording is broad, and matching it is safe only because of where it is asked.
+    /// <see cref="NativeCliRunner"/> launches no processes and opens no files, so within it the only
+    /// file that can be missing is the pipe. It must not be reused anywhere that runs an executable
+    /// — there the same message means the CLI itself is missing, which no amount of waiting fixes.
+    /// <see cref="CliRunner"/> is that place, and does not call this.
+    /// </summary>
+    public static bool IsUnreachable(string? message) =>
+        Says(message, "the system cannot find the file specified");
+
     private static bool Says(string? message, string phrase) =>
         message is not null && message.Contains(phrase, StringComparison.OrdinalIgnoreCase);
 }
