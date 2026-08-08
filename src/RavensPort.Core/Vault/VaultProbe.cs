@@ -86,10 +86,36 @@ public static partial class VaultProbe
                 continue;
             }
 
-            if (File.Exists(candidate)) return candidate;
+            if (File.Exists(candidate)) return RealBinary(candidate);
         }
 
-        return wellKnownPaths.FirstOrDefault(File.Exists);
+        return wellKnownPaths.FirstOrDefault(File.Exists) is { } known ? RealBinary(known) : null;
+    }
+
+    /// <summary>
+    /// The actual executable behind whatever was found, following a symlink to its target.
+    ///
+    /// WinGet installs both CLIs as symlinks in its Links directory, which is the copy that lands on
+    /// PATH and therefore the one this probe finds first. A symlink is a zero-byte reparse point
+    /// carrying no signature of its own, so everything downstream has to see through it — and
+    /// resolving here means it is seen through once, at the point the answer is decided, rather than
+    /// separately by the signature check, the trust cache and the launcher.
+    ///
+    /// That matters because the fallback when resolution fails is not neutral. A signature read
+    /// against the link itself reports "not signed at all" and RavensPort refuses to run it, which
+    /// is what a user hit: 1Password's CLI is validly signed by AgileBits, and the app declined it
+    /// anyway because a momentary failure to follow the link left it inspecting an empty file.
+    ///
+    /// When the link cannot be followed the link is still returned, because reporting an installed
+    /// CLI as missing would be a worse lie than reporting it unverified. What stops that becoming
+    /// the same wrong refusal is <see cref="ExecutableSignature"/>, which distinguishes "this file
+    /// carries no signature" from "this is a link I could not follow".
+    /// </summary>
+    private static string RealBinary(string path)
+    {
+        var resolved = ExecutableSignature.ResolveFinalTarget(path);
+
+        return File.Exists(resolved) ? resolved : path;
     }
 
     /// <summary>
