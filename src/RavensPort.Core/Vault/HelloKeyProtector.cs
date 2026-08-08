@@ -89,6 +89,20 @@ public sealed class HelloKeyProtector
     private const string BaseName = "RavensPort.ProtonPassSessionKey";
 
     /// <summary>
+    /// The credential holding a 1Password service-account token, for a user who has asked to keep
+    /// one between runs.
+    ///
+    /// A separate name from the Proton Pass key on purpose. They are different secrets belonging to
+    /// different managers with different lifetimes — a rotated service account has to be forgettable
+    /// without disturbing a Proton session, and vice versa — and one name for both would make
+    /// "forget the token" quietly sign the user out of the other manager.
+    ///
+    /// Unscoped by anything else because there is only one: the token is not tied to a directory
+    /// the way a pass-cli session is.
+    /// </summary>
+    private const string OnePasswordTokenName = "RavensPort.OnePasswordServiceToken";
+
+    /// <summary>
     /// Where the blob used to live, before it moved into the Credential Manager. Read once by
     /// <see cref="MigrateLegacyBlob"/> and then deleted; nothing writes it any more.
     ///
@@ -157,8 +171,74 @@ public sealed class HelloKeyProtector
     /// </summary>
     public async Task ProtectAsync(string sessionDirectory, string sessionKey)
     {
-        var name = NameFor(sessionDirectory);
+        await ProtectNamedAsync(NameFor(sessionDirectory), sessionKey, "Proton Pass session key");
 
+        // Belt and braces for an install being upgraded mid-flight: the old file is superseded the
+        // moment the store succeeds, and leaving it would be a stale copy of a single secret.
+        TryDeleteLegacyBlob(sessionDirectory);
+    }
+
+    // ---- 1Password service-account token ---------------------------------------------------------
+
+    /// <summary>
+    /// Whether a service-account token has been kept for next time. Never prompts and never returns
+    /// the ciphertext — the setup page binds this to decide which buttons to offer.
+    /// </summary>
+    public bool HasProtectedOnePasswordToken() => _store.Exists(OnePasswordTokenName);
+
+    /// <summary>
+    /// Keeps the service-account token so the user need not paste it again after a restart.
+    ///
+    /// This is the one place the "never stored" rule bends, and only because the user asked for it.
+    /// What is written is ciphertext whose key exists nowhere: it is derived from a Hello signature
+    /// each time, so the bytes in Credential Manager open only to a gesture on this PC. A copy of
+    /// the token in plain text — an environment variable, a settings file, a note — would be a
+    /// bearer credential for every vault the service account can reach, sitting outside the password
+    /// manager it came from. This is not that, and the UI must not describe the two as equivalent.
+    /// </summary>
+    public Task ProtectOnePasswordTokenAsync(string token) =>
+        ProtectNamedAsync(OnePasswordTokenName, token, "1Password service account token");
+
+    /// <summary>
+    /// Brings the token back, prompting for Hello. Null when nothing is stored; throws when
+    /// something is stored and would not open, because those need different things said about them.
+    /// </summary>
+    public Task<string?> UnprotectOnePasswordTokenAsync() =>
+        UnprotectNamedAsync(OnePasswordTokenName, "1Password service account token");
+
+    /// <summary>
+    /// Forgets the stored token.
+    ///
+    /// Needed rather than merely tidy: service-account tokens are rotated, and a stored one that has
+    /// been revoked is a credential that fails every startup with no way to clear it from inside the
+    /// app. It is also what a user reaches for when they realise they saved it on a machine they
+    /// would rather not have.
+    /// </summary>
+    public Task ForgetOnePasswordTokenAsync()
+    {
+        try
+        {
+            SafeDeleteStored(OnePasswordTokenName);
+            _activityLog.Log("VAULT removed the saved 1Password service account token from Windows Credential Manager");
+        }
+        catch (Exception ex)
+        {
+            // Never allowed to fail the action that follows. Without the blob there is nothing to
+            // open, whatever is left in the Hello store.
+            _activityLog.Log($"VAULT could not fully remove the saved service account token: {ex.Message}");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    // ---- The shared mechanism --------------------------------------------------------------------
+
+    /// <param name="what">
+    /// What is being protected, for the log. The secret itself is never logged; this names the kind
+    /// so an activity log makes sense when a machine holds both a Proton session and a token.
+    /// </param>
+    private async Task ProtectNamedAsync(string name, string secret, string what)
+    {
         // Reused when it is already there. Creating prompts and signing prompts, so a credential
         // made fresh on every sign-in cost two gestures where one is needed.
         var ensured = await _signer.EnsureAsync(name);
@@ -185,7 +265,7 @@ public sealed class HelloKeyProtector
 
         try
         {
-            blob = HelloSealedKey.Seal(derived, challenge, sessionKey);
+            blob = HelloSealedKey.Seal(derived, challenge, secret);
         }
         finally
         {
@@ -201,30 +281,31 @@ public sealed class HelloKeyProtector
             await DeleteIfWeCreatedItAsync(ensured, name);
 
             throw new VaultCliException(
-                $"RavensPort could not store the session key in Windows Credential Manager: {ex.Message}");
+                $"RavensPort could not store the {what} in Windows Credential Manager: {ex.Message}");
         }
         finally
         {
             CryptographicOperations.ZeroMemory(blob);
         }
 
-        // Belt and braces for an install being upgraded mid-flight: the old file is superseded the
-        // moment this succeeds, and leaving it would be a stale copy of a supposedly single secret.
-        TryDeleteLegacyBlob(sessionDirectory);
-
         _activityLog.Log(
-            "VAULT stored the Proton Pass session key in Windows Credential Manager behind Windows Hello");
+            $"VAULT stored the {what} in Windows Credential Manager behind Windows Hello");
     }
 
     /// <summary>
     /// Retrieves the key, prompting for Hello. Returns null when there is nothing stored; throws
     /// when there is but it could not be opened, since those need different things said about them.
     /// </summary>
-    public async Task<string?> UnprotectAsync(string sessionDirectory)
+    public Task<string?> UnprotectAsync(string sessionDirectory)
     {
         var name = NameFor(sessionDirectory);
         MigrateLegacyBlob(sessionDirectory, name);
 
+        return UnprotectNamedAsync(name, "Proton Pass session key");
+    }
+
+    private async Task<string?> UnprotectNamedAsync(string name, string what)
+    {
         var blob = _store.Read(name);
         if (blob is null) return null;
 
@@ -252,10 +333,10 @@ public sealed class HelloKeyProtector
 
             try
             {
-                var key = HelloSealedKey.Open(derived, blob);
+                var secret = HelloSealedKey.Open(derived, blob);
 
-                _activityLog.Log("VAULT unlocked the Proton Pass session key with Windows Hello");
-                return key;
+                _activityLog.Log($"VAULT unlocked the {what} with Windows Hello");
+                return secret;
             }
             finally
             {

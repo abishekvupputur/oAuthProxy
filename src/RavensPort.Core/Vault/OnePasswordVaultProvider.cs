@@ -18,11 +18,34 @@ namespace RavensPort.Core.Vault;
 /// happens to be installed — and must not reach for the process-wide environment variable, since
 /// test classes run in parallel and would clobber each other's.
 /// </param>
+/// <param name="session">
+/// The service-account token, when the user has chosen that way in. Optional so every existing
+/// caller — and every test — keeps working against the desktop-app path unchanged.
+/// </param>
+/// <param name="processRunner">
+/// A runner that launches the real <c>op.exe</c>, used only in service-account mode and only when
+/// the CLI is actually installed. See <see cref="RunAsync"/> for why that is preferred over the
+/// in-process SDK when both are available.
+/// </param>
+/// <param name="cliExeLocator">
+/// Where to look for <c>op.exe</c>. A seam for tests, which must not behave differently depending
+/// on whether the machine running them happens to have the 1Password CLI installed.
+/// </param>
+/// <param name="executableTrust">
+/// Whether a located CLI may be launched. Asked before choosing the CLI route so a refusal quietly
+/// selects the other transport instead of failing a vault operation — see <see cref="ResolveCliExe"/>.
+/// </param>
 public sealed class OnePasswordVaultProvider(
     ICliRunner cliRunner,
     ActivityLog activityLog,
-    string? exePathOverride = null) : IConfigVault
+    string? exePathOverride = null,
+    OnePasswordSession? session = null,
+    ICliRunner? processRunner = null,
+    Func<string?>? cliExeLocator = null,
+    IExecutableTrustPolicy? executableTrust = null) : IConfigVault
 {
+    private IExecutableTrustPolicy trustPolicy => executableTrust ?? AuthenticodeTrustPolicy.Default;
+
     /// <summary>Fields that can legitimately become absent, and so must be actively cleared.</summary>
     private static readonly string[] ClearableSecretFields =
     [
@@ -93,10 +116,30 @@ public sealed class OnePasswordVaultProvider(
     public IReadOnlyList<string> LastLoadRemovals { get; private set; } = [];
 
     /// <summary>
-    /// Optional service-account token, for a machine that should never show an unlock prompt.
-    /// Passed in the child's environment, never as an argument.
+    /// The service-account token, for a machine that should never show an unlock prompt. Passed in
+    /// the child's environment, never as an argument.
+    ///
+    /// Reads through to <see cref="OnePasswordSession"/> so there is one copy of the credential in
+    /// the process rather than two that can disagree. Settable for the tests that predate the
+    /// session, which set it directly; a session, when there is one, wins.
     /// </summary>
-    public string? ServiceAccountToken { get; set; }
+    public string? ServiceAccountToken
+    {
+        get => session?.HasToken == true ? session.CurrentToken : _serviceAccountToken;
+        set => _serviceAccountToken = value;
+    }
+
+    private string? _serviceAccountToken;
+
+    /// <summary>
+    /// Where <c>op.exe</c> is, looked up once. <see cref="RunAsync"/> asks on every call and the
+    /// lookup walks PATH plus two registry values, which is not something to do per vault read.
+    /// Null means "not looked yet"; the sentinel below means "looked, and it is not installed".
+    /// </summary>
+    private string? _cliExePath;
+    private bool _cliExeResolved;
+
+    private const string NativeExePath = "native";
 
     public Task<VaultStatus> ProbeAsync(CancellationToken ct = default) =>
         ProbeAsync(VaultProbeDepth.Full, ct);
@@ -1157,6 +1200,22 @@ await ReconcileDeletionsAsync(items, secretItems, previousIndex, ct);
         });
     }
 
+    /// <summary>
+    /// Runs one command, against whichever of the two transports fits the way the user signed in.
+    ///
+    /// <b>Desktop app</b> goes to the in-process SDK, which is the only thing that can talk to the
+    /// desktop app at all.
+    ///
+    /// <b>Service account</b> prefers the real <c>op.exe</c> when it is installed. Both routes work
+    /// headless, so the reason is isolation: the token lives in a child process that exits, rather
+    /// than being handed to a library mapped into this one for the rest of the run. It also keeps
+    /// the credential out of the SDK entirely, and the environment-block plumbing it uses is the
+    /// same one Proton Pass has been using all along.
+    ///
+    /// Falling back to the SDK matters as much as preferring the CLI: a machine chosen for the token
+    /// mode is quite likely to have no 1Password software installed whatsoever, and requiring a CLI
+    /// download would defeat the point of a mode whose selling point is needing nothing local.
+    /// </summary>
     private Task<CliResult> RunAsync(
         IReadOnlyList<string> args, string? stdin = null, TimeSpan? timeout = null, CancellationToken ct = default)
     {
@@ -1164,8 +1223,62 @@ await ReconcileDeletionsAsync(items, secretItems, previousIndex, ct);
             ? new Dictionary<string, string> { ["OP_SERVICE_ACCOUNT_TOKEN"] = token }
             : null;
 
+        if (env is not null && processRunner is not null && ResolveCliExe() is { } opExe)
+        {
+            return processRunner.RunAsync(opExe, args, stdin, env, timeout, ct);
+        }
+
         return cliRunner.RunAsync(
             _exePath ?? throw new VaultCliException("The 1Password CLI has not been located yet."),
             args, stdin, env, timeout, ct);
+    }
+
+    /// <summary>
+    /// The real <c>op.exe</c>, or null when there is no usable one. Answered once per provider.
+    ///
+    /// "Usable" means more than present. The CLI is a preference, not a requirement — the token
+    /// works perfectly well through the in-process SDK — so anything that would stop this launch
+    /// has to send the work down the other route rather than fail the whole connection. A machine
+    /// where the CLI cannot be verified is exactly a machine where the SDK should be used instead,
+    /// and the user should never have to know either happened.
+    ///
+    /// That is not a theoretical case. A user's install refused the CLI outright: WinGet's copy is a
+    /// symlink, following it failed inside RavensPort's process while succeeding elsewhere, and the
+    /// trust policy — correctly, on the evidence available to it — declined to run a file it could
+    /// not verify. The right answer there was never "the feature is broken"; it was "use the SDK".
+    ///
+    /// Deliberately ignores <c>exePathOverride</c>: that is either the "native" sentinel, which is
+    /// not a file, or a test's stub path, and neither is a CLI this should launch for real.
+    /// </summary>
+    private string? ResolveCliExe()
+    {
+        if (_cliExeResolved) return _cliExePath;
+
+        _cliExeResolved = true;
+
+        var found = exePathOverride is null or NativeExePath
+            ? (cliExeLocator ?? VaultProbe.FindOnePassword)()
+            : null;
+
+        if (found is null) return _cliExePath = null;
+
+        // Asked here rather than left to the launcher, because a refusal at launch is a failed
+        // vault operation while a refusal here is just a quieter transport.
+        var decision = trustPolicy.Decide(found);
+
+        if (!decision.Allowed)
+        {
+            activityLog.Log(
+                $"VAULT 1Password service account — not using the CLI at {found} ({decision.Summary}). "
+                + "Connecting to 1Password directly instead, which needs no CLI.");
+
+            return _cliExePath = null;
+        }
+
+        activityLog.Log(
+            $"VAULT 1Password service account — using the 1Password CLI at {found}, "
+            + "so the token stays in a child process rather than in RavensPort");
+
+        return _cliExePath = found;
     }
 }

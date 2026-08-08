@@ -14,6 +14,7 @@ namespace RavensPort.Core.Tests.Vault;
 /// cosmetic — every one of those prompts is a CLI call, so "did it prompt" is answerable by asking
 /// the fake runner what was run.
 /// </summary>
+[Collection(NativeCliRunnerCollection.Name)]
 public class DeferredAuthenticationTests : IDisposable
 {
     private readonly string _stubDir = Path.Combine(Path.GetTempPath(), $"ravensport-defer-{Guid.NewGuid()}");

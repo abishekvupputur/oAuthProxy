@@ -89,9 +89,13 @@
                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
                 </Grid>
 
+                <!-- Which manager this consent is about. Set in code rather than fixed here: the
+                     same window now fronts a Proton Pass session key and a 1Password service token,
+                     and showing the wrong vendor above "approve this" would be worse than showing
+                     none at all. -->
                 <Border Grid.Column="2" Width="72" Height="72" CornerRadius="14" Background="#111111"
                         BorderBrush="{StaticResource BorderBrush0}" BorderThickness="1">
-                    <Image Source="/Assets/proton-pass-logo.png" Stretch="Uniform" Margin="6"/>
+                    <Image x:Name="VendorLogo" Source="/Assets/proton-pass-logo.png" Stretch="Uniform" Margin="6"/>
                 </Border>
             </Grid>
 

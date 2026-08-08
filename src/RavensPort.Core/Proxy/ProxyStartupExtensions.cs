@@ -23,10 +23,21 @@ public static class ProxyStartupExtensions
         services.AddSingleton<ActivityLog>();
         services.AddSingleton<ICliRunner, CliRunner>();
 
+        services.AddSingleton<OnePasswordSession>();
+
+        // Two runners, because there are two ways in. The desktop-app path can only go through the
+        // in-process SDK; the service-account path prefers the real op.exe when it is installed, so
+        // the token lives in a child process that exits rather than in a library mapped into this
+        // one. OnePasswordVaultProvider.RunAsync picks between them per call.
         services.AddSingleton(sp => new OnePasswordVaultProvider(
-            new NativeCliRunner(sp.GetRequiredService<ActivityLog>()),
+            new NativeCliRunner(
+                sp.GetRequiredService<ActivityLog>(),
+                session: sp.GetRequiredService<OnePasswordSession>()),
             sp.GetRequiredService<ActivityLog>(),
-            exePathOverride: "native"));
+            exePathOverride: "native",
+            session: sp.GetRequiredService<OnePasswordSession>(),
+            processRunner: sp.GetRequiredService<ICliRunner>()));
+
         services.AddSingleton<ProtonPassSession>();
         services.AddSingleton<ProtonPassInstaller>();
         services.AddSingleton<HelloKeyProtector>();

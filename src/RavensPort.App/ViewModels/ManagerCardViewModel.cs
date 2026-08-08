@@ -147,6 +147,14 @@ public sealed partial class ManagerCardViewModel(VaultStatus status) : Observabl
     /// </summary>
     public string ConnectPrompt => Kind switch
     {
+        // Said before the button rather than after: a service account raises no prompt at all, so
+        // the thing worth warning about is not an interruption but the absence of one -- and that
+        // the token has to be typed again after every restart.
+        VaultBackendKind.OnePassword when UsesServiceToken =>
+            "RavensPort will sign in with the token, over the network. No prompt, and 1Password does "
+            + "not need to be installed here. The token is never saved, so you will be asked for it "
+            + "again after every restart.",
+
         VaultBackendKind.OnePassword =>
             "1Password will ask you to unlock — its desktop app approves each command RavensPort "
             + "runs. Nothing is read from your vaults until you press this.",
@@ -181,6 +189,75 @@ public sealed partial class ManagerCardViewModel(VaultStatus status) : Observabl
     /// </summary>
     public bool ShowOnePasswordSettings => IsOnePassword && Availability is
         VaultAvailability.NotSignedIn or VaultAvailability.Faulted;
+
+    /// <summary>
+    /// Which way in the user has chosen for 1Password. Desktop app by default, because that is the
+    /// mode that needs no preparation — a service account has to be created and granted access to a
+    /// vault before it can be used at all.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(UsesServiceToken))]
+    [NotifyPropertyChangedFor(nameof(UsesDesktopApp))]
+    [NotifyPropertyChangedFor(nameof(ShowDesktopAppRequirement))]
+    [NotifyPropertyChangedFor(nameof(ShowDesktopAppKnownIssue))]
+    [NotifyPropertyChangedFor(nameof(ShowRememberToken))]
+    [NotifyPropertyChangedFor(nameof(ShowSavedToken))]
+    [NotifyPropertyChangedFor(nameof(ConnectPrompt))]
+    private bool _useServiceToken;
+
+    public bool UsesServiceToken => IsOnePassword && UseServiceToken;
+
+    public bool UsesDesktopApp => IsOnePassword && !UseServiceToken;
+
+    /// <summary>
+    /// The token the user has typed, held here and nowhere else until Connect hands it to
+    /// <see cref="OnePasswordSession"/>.
+    ///
+    /// Deliberately not routed through <see cref="LocalSettings"/> the way the account name above
+    /// is. The account name is a label; this is a bearer credential for every vault the service
+    /// account can reach, and writing it to local_settings.json would put a copy of the user's
+    /// access outside their password manager — the one thing this app exists not to do.
+    /// </summary>
+    [ObservableProperty]
+    private string _serviceToken = "";
+
+    /// <summary>
+    /// Whether the desktop-app warning applies. It does not in token mode: nothing is loaded from
+    /// the 1Password install, so there is no library to be in the way and no ordering to observe.
+    /// </summary>
+    public bool ShowDesktopAppRequirement => HasDesktopAppRequirement && !UsesServiceToken;
+
+    /// <summary>The known 1Password defect, shown against the mode it affects.</summary>
+    public string DesktopAppKnownIssue { get; } = VaultLockGuidance.DesktopAppKnownIssue(status.Kind);
+
+    public bool ShowDesktopAppKnownIssue => UsesDesktopApp && DesktopAppKnownIssue.Length > 0;
+
+    /// <summary>What a bearer token actually is, shown before the box it goes in.</summary>
+    public string ServiceTokenWarning { get; } = VaultLockGuidance.ServiceTokenWarning(status.Kind);
+
+    /// <summary>
+    /// Whether to offer keeping the token between runs. False when Windows Hello is unavailable,
+    /// because the offer is only ever "encrypted behind a gesture" — there is no plain-text fallback
+    /// and there must not be one.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowRememberToken))]
+    private bool _canRememberToken;
+
+    public bool ShowRememberToken => UsesServiceToken && CanRememberToken;
+
+    /// <summary>
+    /// Whether the user has asked for the token to be kept. Off by default: storing a bearer
+    /// credential is a decision to make deliberately, not one to arrive at by leaving a box ticked.
+    /// </summary>
+    [ObservableProperty] private bool _rememberToken;
+
+    /// <summary>Whether a token is already saved, so the card offers to use or forget it.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowSavedToken))]
+    private bool _hasSavedToken;
+
+    public bool ShowSavedToken => UsesServiceToken && HasSavedToken;
 
     public string OnePasswordAccountName
     {
