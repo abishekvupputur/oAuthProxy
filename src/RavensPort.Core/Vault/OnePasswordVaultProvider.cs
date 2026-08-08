@@ -141,6 +141,13 @@ public sealed class OnePasswordVaultProvider(
 
     private const string NativeExePath = "native";
 
+    /// <summary>
+    /// Whether this provider is signed in as a service account rather than as the person at the
+    /// keyboard. Changes what may be offered, never what may be read or written — see
+    /// <see cref="FindAdoptableVaultsAsync"/>.
+    /// </summary>
+    private bool UsesServiceAccount => ServiceAccountToken is { Length: > 0 };
+
     public Task<VaultStatus> ProbeAsync(CancellationToken ct = default) =>
         ProbeAsync(VaultProbeDepth.Full, ct);
 
@@ -1114,10 +1121,25 @@ await ReconcileDeletionsAsync(items, secretItems, previousIndex, ct);
     }
 
     /// <summary>
-    /// The vaults the setup page may offer: named after RavensPort, and either empty or
-    /// already RavensPort's. Only the name-matching ones are looked inside — every other vault in
-    /// the account is none of this app's business, and listing them all is both the slow answer
-    /// and the one that makes a user wonder what else it is reading.
+    /// The vaults the setup page may offer: either empty or already RavensPort's, and — signing in
+    /// as a person — named after RavensPort.
+    ///
+    /// <b>The name filter exists to protect a human's other vaults.</b> Signed in through the
+    /// desktop app, this app can see everything the user can, Private included. A picker listing all
+    /// of it would be inviting someone to point a credential store at their personal vault, and
+    /// would read as an app rummaging through things that are none of its business. The naming rule
+    /// is what keeps the offer to vaults made for this purpose.
+    ///
+    /// <b>A service account has already been scoped, by hand, by someone.</b> It can see exactly the
+    /// vaults it was granted and cannot see a Private vault at all, so the visible set <em>is</em>
+    /// the deliberate choice the name filter is a proxy for — applying it again filters a list that
+    /// was already filtered, on a rule the grant never had to follow. A user who granted their
+    /// service account one vault called "Automation" was then offered nothing to pick and could not
+    /// choose it, which is the whole feature refusing to start over a naming convention.
+    ///
+    /// <see cref="VaultAdoption.LooksAdoptable"/> still applies either way: empty, or already
+    /// holding a RavensPort configuration. That is the check that actually protects data, and it is
+    /// the one that never relaxes.
     /// </summary>
     /// <param name="configured">
     /// Vaults the discovery pass has already been through, so their items are not listed twice.
@@ -1126,10 +1148,14 @@ await ReconcileDeletionsAsync(items, secretItems, previousIndex, ct);
     private async Task<List<string>> FindAdoptableVaultsAsync(
         List<OnePasswordVault> vaults, List<OnePasswordVault> configured, CancellationToken ct)
     {
+        var candidates = UsesServiceAccount
+            ? vaults
+            : vaults.Where(v => VaultProfile.Matches(v.Name)).ToList();
+
         // Concurrently, like FindConfiguredVaultsAsync above. These are independent vaults with
         // nothing to order between them, and each look is a subprocess launch measured in seconds —
         // done one after another this was the slowest thing on the setup path.
-        var checks = vaults.Where(v => VaultProfile.Matches(v.Name)).Select(async vault =>
+        var checks = candidates.Select(async vault =>
         {
             if (configured.Any(c => c.VaultId == vault.VaultId)) return vault.Name;
 

@@ -18,7 +18,7 @@
 
     <!-- 1Password's own mark, shown on the consent window that asks before keeping a service-account
          token. AgileBits' trademark, used to identify the manager being connected to and nothing
-         else -- see THIRD-PARTY-NOTICES.md. -->
+         else. See THIRD-PARTY-NOTICES.md. -->
     <Resource Include="Assets\onepassword-logo.png" />
     <Resource Include="..\RavensPort.Core\Assets\logo.png" Link="Assets\ravensport-mark.png" />
   </ItemGroup>
