@@ -211,6 +211,68 @@ public class OnePasswordServiceAccountTests : IDisposable
         Assert.Empty(process.Invocations);
     }
 
+    // ---- Choosing a vault -----------------------------------------------------------------------
+
+    [Fact]
+    public async Task AServiceAccountIsOfferedEveryVaultItCanReach()
+    {
+        // The name filter exists to protect a human's other vaults: through the desktop app this
+        // app sees everything the user sees, Private included, and a picker listing all of it would
+        // be inviting someone to point a credential store at their personal vault.
+        //
+        // A service account has already been scoped by hand. It can see exactly what it was granted
+        // and cannot see Private at all, so the visible set *is* the deliberate choice the naming
+        // rule stands in for. Applying it again filtered an already-filtered list against a rule the
+        // grant never had to follow — a user who granted one vault called "Automation" was offered
+        // nothing to pick, and could not connect at all.
+        var fake = new FakeOnePassword { VaultExists = false };
+        fake.AddVault("Automation");
+        fake.AddVault("Shared Ops");
+
+        var session = new OnePasswordSession();
+        session.Unlock(Token);
+
+        var status = await NewProviderOver(fake, session).ProbeAsync();
+
+        Assert.Contains("Automation", status.AdoptableVaults!);
+        Assert.Contains("Shared Ops", status.AdoptableVaults!);
+    }
+
+    [Fact]
+    public async Task SignedInAsAPersonTheOfferIsStillLimitedToRavensPortVaults()
+    {
+        // The other half, and the one that must not regress: through the desktop app the app can
+        // see a human's whole account, so the naming rule is what keeps the offer to vaults made
+        // for this purpose rather than their personal one.
+        var fake = new FakeOnePassword { VaultExists = false };
+        fake.AddVault("Automation");
+        fake.AddVault("Personal");
+
+        var status = await NewProviderOver(fake, session: null).ProbeAsync();
+
+        Assert.DoesNotContain("Automation", status.AdoptableVaults!);
+        Assert.DoesNotContain("Personal", status.AdoptableVaults!);
+    }
+
+    [Fact]
+    public async Task AVaultHoldingSomebodyElsesItemsIsNeverOffered()
+    {
+        // The check that actually protects data, and the one that does not relax for a service
+        // account. Being granted a vault is not the same as that vault being free to take over —
+        // adopting one full of unrelated items would be refused anyway, so offering it would be
+        // offering something that cannot be accepted.
+        var fake = new FakeOnePassword { VaultExists = false };
+        var occupied = fake.AddVault("Automation");
+        fake.AddItem(occupied, "Someone's bank login");
+
+        var session = new OnePasswordSession();
+        session.Unlock(Token);
+
+        var status = await NewProviderOver(fake, session).ProbeAsync();
+
+        Assert.DoesNotContain("Automation", status.AdoptableVaults!);
+    }
+
     // ---- The credential does not leak -----------------------------------------------------------
 
     [Fact]
@@ -327,6 +389,13 @@ public class OnePasswordServiceAccountTests : IDisposable
     private static FakeCliRunner Scripted(FakeCliRunner runner) => runner
         .Respond(["--version"], "2.34.0")
         .Respond(["vault", "list"], "[]");
+
+    /// <summary>
+    /// A provider over a populated fake account, for the questions about which vaults get offered.
+    /// A null session is the desktop-app path.
+    /// </summary>
+    private OnePasswordVaultProvider NewProviderOver(FakeOnePassword fake, OnePasswordSession? session) =>
+        new(fake.AsRunner(), new ActivityLog(_logPath), "native", session);
 
     /// <summary>A trust policy that says no, standing in for a CLI that cannot be verified here.</summary>
     private sealed class RefusingTrustPolicy : IExecutableTrustPolicy

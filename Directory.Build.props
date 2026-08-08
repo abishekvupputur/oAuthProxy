@@ -17,6 +17,28 @@
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
 
     <!--
+      A local publish rewrites these files, and the rewritten shape breaks CI. That cannot be fixed
+      from here, so it is written down instead.
+
+      `dotnet publish -r win-x64` restores a RID-specific graph plus Microsoft.NET.ILLink.Tasks and
+      writes both into the lock files. The restore CI runs has no RID and sees neither, so locked
+      mode against a publish-written lock file fails with NU1004: "the project's runtime identifiers
+      have changed from. Project's runtime identifiers: , lock file's runtime identifiers win-x64".
+
+      Turning this property off under a RID looks like the fix and is not. NuGet rejects
+      RestorePackagesWithLockFile=false while a lock file exists, with NU1005, so every publish then
+      fails outright. Tried, measured, reverted.
+
+      What works is a habit: the committed lock files are the RID-less ones, so after publishing
+      locally, put them back before committing.
+
+          git restore **/packages.lock.json
+
+      Committing a publish-written lock file is how this last broke, and it fails on the next push
+      rather than locally, which is what makes it worth this much explanation.
+    -->
+
+    <!--
       One target framework for every project, because they have to move together: the App
       references Core, and the test project references Core, so a Windows API version raised in one
       place has to be raised in all three or the references stop resolving.
