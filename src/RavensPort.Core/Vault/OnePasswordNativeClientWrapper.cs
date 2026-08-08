@@ -5,6 +5,9 @@ namespace RavensPort.Core.Vault;
 public sealed class OnePasswordNativeClientWrapper : IOnePasswordNativeClient
 {
     public void Initialize(string accountName) => OnePasswordNativeClient.Initialize(accountName);
+
+    public void InitializeServiceAccount(string token) =>
+        OnePasswordNativeClient.InitializeServiceAccount(token);
     
     public JsonNode? ListVaults() => OnePasswordNativeClient.ListVaults();
     

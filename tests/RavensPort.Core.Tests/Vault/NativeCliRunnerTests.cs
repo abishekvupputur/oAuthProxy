@@ -4,6 +4,7 @@ using RavensPort.Core.Vault;
 
 namespace RavensPort.Core.Tests.Vault;
 
+[Collection(NativeCliRunnerCollection.Name)]
 public class NativeCliRunnerTests
 {
     private readonly Mock<IOnePasswordNativeClient> _mockClient;

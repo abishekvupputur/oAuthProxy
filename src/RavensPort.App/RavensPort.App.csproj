@@ -15,6 +15,11 @@
     <EmbeddedResource Include="Assets\tray.ico" />
     <Resource Include="Assets\logo.png" />
     <Resource Include="Assets\proton-pass-logo.png" />
+
+    <!-- PLACEHOLDER, generated rather than supplied: a blue disc and keyhole standing in for
+         1Password's mark, so the consent window has something to show. Replace with the official
+         asset from 1Password's brand resources before release. -->
+    <Resource Include="Assets\onepassword-logo.png" />
     <Resource Include="..\RavensPort.Core\Assets\logo.png" Link="Assets\ravensport-mark.png" />
   </ItemGroup>
 

@@ -21,7 +21,9 @@ public sealed partial class SetupViewModel(
     VaultGateService gate,
     ProtonPassSession protonSession,
     ProtonPassAuthenticator protonAuthenticator,
-    ActivityLog activityLog) : ObservableObject
+    ActivityLog activityLog,
+    OnePasswordSession onePasswordSession,
+    HelloKeyProtector helloKeyProtector) : ObservableObject
 {
     /// <summary>The pre-vault store, kept only so the page can offer to delete it.</summary>
     private static readonly string LegacyStorePath = Path.Combine(
@@ -129,11 +131,45 @@ public sealed partial class SetupViewModel(
         // Answered here rather than by attempting the connection: the SDK opens against a named
         // account, so a blank name fails inside the runner and comes back as a CLI error on the
         // card — which reads as "1Password refused" rather than "you have not filled the box in".
-        if (card.Kind == VaultBackendKind.OnePassword && string.IsNullOrWhiteSpace(card.OnePasswordAccountName))
+        if (card.Kind == VaultBackendKind.OnePassword && !card.UsesServiceToken
+            && string.IsNullOrWhiteSpace(card.OnePasswordAccountName))
         {
             StatusMessage = "Enter your 1Password account name first — it is at the top of the "
                             + "1Password desktop app's sidebar.";
             return;
+        }
+
+        // The token has to reach the session before anything probes, because its presence is what
+        // selects the whole authentication mode — the runner reads it to decide whether to open the
+        // desktop app's channel or go straight to 1Password over the network.
+        if (card.Kind == VaultBackendKind.OnePassword && card.UsesServiceToken)
+        {
+            try
+            {
+                onePasswordSession.Unlock(card.ServiceToken);
+            }
+            catch (VaultCliException ex)
+            {
+                StatusMessage = ex.Message;
+                return;
+            }
+
+            // The SDK client is cached per authentication mode, so a switch between the desktop app
+            // and a token — or a corrected token after a refusal — would otherwise keep using the
+            // connection made for the previous one.
+            NativeCliRunner.ResetInitialization();
+
+            // Saved only once the token has been accepted, further down. Storing first would leave
+            // a typo behind Windows Hello and offer it back on every restart.
+            _saveTokenAfterConnect = card.RememberToken;
+        }
+        else if (card.Kind == VaultBackendKind.OnePassword && onePasswordSession.HasToken)
+        {
+            // Switching back to the desktop app. The token has to go, because holding one is what
+            // puts the runner in service-account mode — leaving it would mean pressing "Connect" on
+            // the desktop option and silently connecting as the service account instead.
+            onePasswordSession.Clear();
+            NativeCliRunner.ResetInitialization();
         }
 
         IsBusy = true;
@@ -167,6 +203,11 @@ public sealed partial class SetupViewModel(
             var status = unlocked ? gate.Status : await Task.Run(() => gate.ConnectAsync(card.Kind));
             Apply(status);
 
+            // After the connection worked, never before. A token that 1Password refused is a typo or
+            // a revoked account, and storing one behind a Hello gesture would offer it back on every
+            // restart as though it were good.
+            if (status.IsReady && _saveTokenAfterConnect) SaveTokenWithConsent(card);
+
             if (status.IsReady) await StartAsync($"Loading your configuration from {card.Name}…");
         }
         catch (VaultCliException ex)
@@ -193,6 +234,124 @@ public sealed partial class SetupViewModel(
     /// vault first. What it costs is stated on the card and again on the Settings tab: nothing is
     /// written anywhere, so disconnecting or exiting takes the configuration with it.
     /// </summary>
+    /// <summary>
+    /// Set by <see cref="ConnectAsync"/> when the user asked to keep the token, and acted on only
+    /// once the connection has actually worked.
+    /// </summary>
+    private bool _saveTokenAfterConnect;
+
+    /// <summary>
+    /// Stores the token behind Windows Hello, asking first.
+    ///
+    /// Failing here is deliberately not failing the connection: the user is connected either way,
+    /// and the difference is only whether they type the token again next time. Saying so beats
+    /// tearing down a working session over a declined gesture.
+    /// </summary>
+    /// <param name="card">
+    /// Where the token is read from. Deliberately not from <see cref="OnePasswordSession"/>, which
+    /// hands its token out through nothing but an environment block — a property that returned it
+    /// would be a second way to get at the credential, and a test pins that there is none.
+    /// </param>
+    private void SaveTokenWithConsent(ManagerCardViewModel card)
+    {
+        _saveTokenAfterConnect = false;
+
+        if (string.IsNullOrWhiteSpace(card.ServiceToken)) return;
+
+        var token = card.ServiceToken;
+
+        try
+        {
+            if (HelloConsentWindow.RequestTokenSave(() => helloKeyProtector.ProtectOnePasswordTokenAsync(token)))
+            {
+                StatusMessage = "Connected. The token is saved on this PC behind Windows Hello.";
+            }
+            else
+            {
+                StatusMessage = "Connected. The token was not saved — you will be asked for it again next time.";
+            }
+        }
+        catch (Exception ex)
+        {
+            activityLog.LogError("Could not save the 1Password service account token", ex);
+            StatusMessage = $"Connected, but the token could not be saved: {ex.Message}";
+        }
+
+        NotifySessionStateChanged();
+    }
+
+    /// <summary>
+    /// Connects using the token kept from a previous run, after a Hello gesture.
+    /// </summary>
+    [RelayCommand]
+    private async Task UseSavedTokenAsync(ManagerCardViewModel card)
+    {
+        if (IsBusy || IsSigningIn) return;
+
+        string? token = null;
+
+        // The gesture runs on this thread: Hello needs a foreground window to attach to, and the
+        // consent window is the thing that owns it.
+        if (!HelloConsentWindow.RequestTokenUnlock(async () =>
+                token = await helloKeyProtector.UnprotectOnePasswordTokenAsync()))
+        {
+            StatusMessage = "Not unlocked. Paste a token instead, or forget the saved one.";
+            return;
+        }
+
+        if (token is null)
+        {
+            StatusMessage = "There is no saved token any more. Paste one to connect.";
+            card.HasSavedToken = false;
+            return;
+        }
+
+        IsBusy = true;
+        StatusMessage = $"Connecting to {card.Name}…";
+
+        try
+        {
+            onePasswordSession.Unlock(token);
+            NativeCliRunner.ResetInitialization();
+
+            var status = await Task.Run(() => gate.ConnectAsync(card.Kind));
+            Apply(status);
+
+            if (status.IsReady) await StartAsync($"Loading your configuration from {card.Name}…");
+        }
+        catch (VaultCliException ex)
+        {
+            StatusMessage = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            activityLog.LogError($"Could not connect to {card.Name}", ex);
+            StatusMessage = ex.Message;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// Removes the saved token.
+    ///
+    /// Needed rather than tidy: service accounts are rotated, and a saved token that has been
+    /// revoked fails every startup with nothing in the UI to clear it. It is also what someone
+    /// reaches for on a machine they have decided they should not have saved it on.
+    /// </summary>
+    [RelayCommand]
+    private async Task ForgetSavedTokenAsync(ManagerCardViewModel card)
+    {
+        await helloKeyProtector.ForgetOnePasswordTokenAsync();
+
+        card.HasSavedToken = false;
+        card.RememberToken = false;
+
+        StatusMessage = "The saved token has been removed from this PC.";
+    }
+
     [RelayCommand]
     private async Task StartSingleUseAsync()
     {
@@ -752,7 +911,31 @@ public sealed partial class SetupViewModel(
     private void Apply(VaultGateStatus status)
     {
         Managers.Clear();
-        foreach (var manager in status.Statuses) Managers.Add(new ManagerCardViewModel(manager));
+
+        // Read once per rebuild rather than per card: both answers are the same for every card, and
+        // HasProtectedOnePasswordToken touches Credential Manager.
+        var helloAvailable = _isHelloAvailable;
+        var hasSavedToken = helloAvailable && helloKeyProtector.HasProtectedOnePasswordToken();
+
+        foreach (var manager in status.Statuses)
+        {
+            var card = new ManagerCardViewModel(manager);
+
+            if (card.IsOnePassword)
+            {
+                // Keeping a token is only ever offered as "encrypted behind a gesture". Without
+                // Hello there is no offer, because the alternative would be plain text and there
+                // must not be one.
+                card.CanRememberToken = helloAvailable;
+                card.HasSavedToken = hasSavedToken;
+
+                // A saved token means the user already chose this mode; starting the card on the
+                // desktop-app option would hide the button that uses it.
+                if (hasSavedToken) card.UseServiceToken = true;
+            }
+
+            Managers.Add(card);
+        }
 
         NeedsAChoice = status.NeedsAChoice;
         IsDisconnected = gate.IsDisconnected;

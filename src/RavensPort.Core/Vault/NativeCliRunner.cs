@@ -36,20 +36,34 @@ public sealed class NativeCliRunner : ICliRunner
     private readonly ActivityLog? _activityLog;
     private readonly IOnePasswordNativeClient _client;
     private readonly Func<bool> _integrationChannelPresent;
+    private readonly OnePasswordSession? _session;
 
     /// <param name="integrationChannelPresent">
     /// Whether 1Password is listening. A seam for tests, which must not depend on whether the
     /// machine running them happens to have 1Password open.
     /// </param>
+    /// <param name="session">
+    /// The service-account token, when the user has chosen that way in. Its presence selects the
+    /// whole authentication mode — see <see cref="UsesServiceAccount"/>.
+    /// </param>
     public NativeCliRunner(
         ActivityLog? activityLog = null,
         IOnePasswordNativeClient? client = null,
-        Func<bool>? integrationChannelPresent = null)
+        Func<bool>? integrationChannelPresent = null,
+        OnePasswordSession? session = null)
     {
         _activityLog = activityLog;
         _client = client ?? new OnePasswordNativeClientWrapper();
         _integrationChannelPresent = integrationChannelPresent ?? (() => File.Exists(IntegrationChannel));
+        _session = session;
     }
+
+    /// <summary>
+    /// Whether this runner is authenticating with a service-account token rather than through the
+    /// desktop app. The token's presence is the whole switch: the SDK refuses to accept both, and a
+    /// user who has pasted one has said which they want.
+    /// </summary>
+    private bool UsesServiceAccount => _session?.HasToken == true;
 
     /// <summary>
     /// Refuses to go near the SDK unless 1Password is actually listening.
@@ -79,6 +93,13 @@ public sealed class NativeCliRunner : ICliRunner
     /// </summary>
     private void RequireIntegrationChannel()
     {
+        // A service account never goes near any of this. The SDK routes a token to its own embedded
+        // core and reaches 1Password over the network, so no pipe is opened, no library of theirs is
+        // mapped, and nothing this guard protects against can happen. Applying it anyway would block
+        // the one authentication mode that is immune to the fault it exists for -- and block it on
+        // exactly the machines the token mode is for, where 1Password is not installed at all.
+        if (UsesServiceAccount) return;
+
         if (_integrationChannelPresent()) return;
 
         throw new VaultCliException(_initialized
@@ -149,6 +170,16 @@ public sealed class NativeCliRunner : ICliRunner
         {
             if (_initialized) return;
 
+            // A service account authenticates with the token alone. Demanding an account name here
+            // would be asking for something the SDK will not accept alongside it -- and something a
+            // headless machine has no way to know, since the name is read off the desktop app's
+            // sidebar and that app is precisely what this mode does without.
+            if (UsesServiceAccount)
+            {
+                InitializeServiceAccount();
+                return;
+            }
+
             var accountName = LocalSettings.Current.OnePasswordAccountName;
             if (string.IsNullOrWhiteSpace(accountName))
             {
@@ -159,7 +190,7 @@ public sealed class NativeCliRunner : ICliRunner
                 throw new VaultCliException("1Password SDK requires your Account Name (as shown in the top-left sidebar of the 1Password app) to connect. Please configure it in the Setup page.");
             }
 
-            try 
+            try
             {
                 _client.Initialize(accountName);
                 _initialized = true;
@@ -173,6 +204,31 @@ public sealed class NativeCliRunner : ICliRunner
                     $"Failed to connect to 1Password Desktop App for account '{accountName}': "
                     + Explain(ex.Message), ex);
             }
+        }
+    }
+
+    /// <summary>
+    /// Connects with the service-account token. Caller holds <see cref="_initLock"/>.
+    ///
+    /// The token is read from the session and handed straight across; it is never copied into a
+    /// field here, never logged, and never named in the failure message. What comes back from the
+    /// SDK on a bad token says the token was refused, not what it was.
+    /// </summary>
+    private void InitializeServiceAccount()
+    {
+        try
+        {
+            _client.InitializeServiceAccount(_session!.CurrentToken!);
+            _initialized = true;
+        }
+        catch (Exception ex)
+        {
+            // Left false, like the desktop path: a token rejected because the machine was offline
+            // should start working again when it is not, without anything having to notice.
+            throw new VaultCliException(
+                "Could not connect to 1Password with the service account token. Check that the "
+                + "token is current and that the account has been granted access to the vault. "
+                + $"({ex.Message})", ex);
         }
     }
 

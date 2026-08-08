@@ -19,6 +19,11 @@
     <SolidColorBrush x:Key="AccentSelectedBgBrush" Color="#3A2D12"/>
     <SolidColorBrush x:Key="SuccessBrush" Color="#3FB950"/>
     <SolidColorBrush x:Key="ErrorBrush" Color="#E5534B"/>
+
+    <!-- For things the user should know but that are not failures: a known upstream defect, the
+         standing risk of a bearer credential. Distinct from ErrorBrush so a permanent advisory does
+         not read as something having just gone wrong. -->
+    <SolidColorBrush x:Key="WarningBrush" Color="#D29922"/>
     <SolidColorBrush x:Key="ScrollThumbBrush" Color="#3E3E3E"/>
     <SolidColorBrush x:Key="ScrollThumbHoverBrush" Color="#4E4E4E"/>
 
@@ -219,6 +224,46 @@
                         </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="CheckBorder" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Dark RadioButton. Templated for the same reason the CheckBox above is: the stock control
+         draws its own indicator with system colours, so on this background the label came out black
+         on near-black and the glyph washed out. Deliberately the CheckBox's shape and states with a
+         round indicator, so a group of radios and a row of checkboxes read as the same family. -->
+    <Style TargetType="RadioButton">
+        <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+        <Setter Property="VerticalContentAlignment" Value="Center"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <Border x:Name="RadioBorder"
+                                Width="14" Height="14"
+                                Background="{StaticResource PanelAltBrush}" BorderBrush="#555555" BorderThickness="1"
+                                CornerRadius="7" Margin="0,0,7,0" VerticalAlignment="Center">
+                            <Ellipse x:Name="RadioDot"
+                                     Width="6" Height="6"
+                                     Fill="{StaticResource AccentBrush}"
+                                     Visibility="Collapsed"
+                                     HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ContentPresenter VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="RadioDot" Property="Visibility" Value="Visible"/>
+                            <Setter TargetName="RadioBorder" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="RadioBorder" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>

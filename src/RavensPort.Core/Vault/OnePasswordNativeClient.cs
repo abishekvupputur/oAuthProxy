@@ -14,6 +14,9 @@ public static class OnePasswordNativeClient
     private static extern IntPtr InitializeOP([MarshalAs(UnmanagedType.LPUTF8Str)] string accountName);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr InitializeOPServiceAccount([MarshalAs(UnmanagedType.LPUTF8Str)] string token);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr VaultList();
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
@@ -52,6 +55,23 @@ public static class OnePasswordNativeClient
         if (!string.IsNullOrEmpty(err))
         {
             throw new InvalidOperationException($"Failed to initialize 1Password SDK: {err}");
+        }
+    }
+
+    /// <summary>
+    /// Connects as a service account. The token crosses the interop boundary as UTF-8 and is never
+    /// written down on either side of it — see <see cref="OnePasswordSession"/> for why.
+    /// </summary>
+    public static void InitializeServiceAccount(string token)
+    {
+        var errPtr = InitializeOPServiceAccount(token ?? "");
+        var err = GetStringAndFree(errPtr);
+        if (!string.IsNullOrEmpty(err))
+        {
+            // The SDK's message is safe to surface: it reports why the token was refused, not the
+            // token. Anything that echoed the credential back would end up in the activity log.
+            throw new InvalidOperationException(
+                $"Failed to connect to 1Password with the service account token: {err}");
         }
     }
 

@@ -22,7 +22,13 @@ public partial class HelloConsentWindow : Window
     /// <summary>True once the Hello-backed operation actually succeeded.</summary>
     public bool Confirmed { get; private set; }
 
-    private HelloConsentWindow(string heading, string body, string detail, string confirmText, Func<Task> action)
+    private HelloConsentWindow(
+        string heading,
+        string body,
+        string detail,
+        string confirmText,
+        Func<Task> action,
+        string vendorLogo = "/Assets/proton-pass-logo.png")
     {
         _action = action;
 
@@ -32,6 +38,8 @@ public partial class HelloConsentWindow : Window
         BodyText.Text = body;
         DetailText.Text = detail;
         ConfirmButton.Content = confirmText;
+        VendorLogo.Source = new System.Windows.Media.Imaging.BitmapImage(
+            new Uri(vendorLogo, UriKind.Relative));
 
         // Re-anchored on every size change, not just once at load. The window is SizeToContent, so
         // it grows when Report() reveals the status line — anchored only at startup, the bottom
@@ -100,6 +108,45 @@ public partial class HelloConsentWindow : Window
         + "nothing is created and no sign-in happens.",
         "Continue with Windows Hello",
         prepareAsync));
+
+    private const string OnePasswordLogo = "/Assets/onepassword-logo.png";
+
+    /// <summary>
+    /// Asks before keeping a 1Password service-account token between runs.
+    ///
+    /// Its own consent step, and deliberately not folded into a checkbox that saves silently. Up to
+    /// this point the token has lived only in memory and the app has said so plainly; storing one is
+    /// a change to that promise, and the user should be the one making it, having read what it does
+    /// and does not protect.
+    /// </summary>
+    public static bool RequestTokenSave(Func<Task> protectAsync) => Show(new HelloConsentWindow(
+        "Keep this token on this PC?",
+        "RavensPort will store your 1Password service account token in Windows Credential Manager, "
+        + "encrypted so that only a Windows Hello gesture on this PC can bring it back.",
+        "The token is encrypted with a key that is not stored anywhere: it is derived from your Hello "
+        + "signature each time, so the saved bytes open only to a gesture on this PC. It is never "
+        + "written in plain text and never leaves this machine. Anyone who can already sign in as you "
+        + "here could still ask for that gesture, so only do this on a PC you own and trust — and "
+        + "remember the token stays valid until you rotate it in 1Password. Cancel and nothing is "
+        + "saved; you will simply paste it again next time.",
+        "Save with Windows Hello",
+        protectAsync,
+        OnePasswordLogo));
+
+    /// <summary>
+    /// Asks before bringing a saved token back at startup.
+    /// </summary>
+    public static bool RequestTokenUnlock(Func<Task> unlockAsync) => Show(new HelloConsentWindow(
+        "Unlock your 1Password token",
+        "RavensPort wants to ask Windows Hello to unlock the saved 1Password service account token, "
+        + "so it can connect without you pasting it again.",
+        "The token is held in Windows Credential Manager, encrypted so that only a Windows Hello "
+        + "gesture on this PC can decrypt it. The gesture is not a check RavensPort could skip — the "
+        + "key it produces is what performs the decryption. Cancel and nothing is decrypted; you can "
+        + "paste a token by hand instead, or forget the saved one on the Settings tab.",
+        "Unlock with Windows Hello",
+        unlockAsync,
+        OnePasswordLogo));
 
     private static bool Show(HelloConsentWindow window)
     {

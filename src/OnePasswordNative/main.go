@@ -17,10 +17,36 @@ var opClient *onepassword.Client
 //export InitializeOP
 func InitializeOP(accountName *C.char) *C.char {
 	accName := C.GoString(accountName)
-	
+
 	opts := []onepassword.ClientOption{
 		onepassword.WithIntegrationInfo("RavensPort", "1.0.0"),
 		onepassword.WithDesktopAppIntegration(accName),
+	}
+
+	var err error
+	opClient, err = onepassword.NewClient(context.Background(), opts...)
+	if err != nil {
+		return C.CString(err.Error())
+	}
+	return nil
+}
+
+// InitializeOPServiceAccount connects as a service account instead of through the desktop app.
+//
+// The SDK picks its backend from which option was given: an account name loads 1Password's own
+// op_sdk_ipc_client.dll and talks to the desktop app over a named pipe, while a token goes to the
+// SDK's embedded core and talks to 1Password over the network. Only the first of those needs the
+// GUI running and unlocked, and only the first can be broken by 1Password failing to publish its
+// integration channel -- so this path works on a machine nobody is sitting at, and cannot hit that
+// fault at all.
+//
+// The token arrives as a C string from the caller's memory and is never written anywhere here.
+//
+//export InitializeOPServiceAccount
+func InitializeOPServiceAccount(token *C.char) *C.char {
+	opts := []onepassword.ClientOption{
+		onepassword.WithIntegrationInfo("RavensPort", "1.0.0"),
+		onepassword.WithServiceAccountToken(C.GoString(token)),
 	}
 
 	var err error

@@ -101,11 +101,19 @@ public static class VaultLockGuidance
     /// </summary>
     public static string UnattendedTokenSteps(VaultBackendKind kind) => kind switch
     {
+        // Names the setup page rather than OP_SERVICE_ACCOUNT_TOKEN, which is what this used to say
+        // and which nothing ever read. An environment variable would also defeat the point: it
+        // survives restarts, which is the same as storing the credential, in a place every process
+        // the user runs can read.
         VaultBackendKind.OnePassword =>
-            "Create a 1Password service account, grant it access to this vault specifically, and put "
-            + "its token in the OP_SERVICE_ACCOUNT_TOKEN environment variable. Nothing then has to "
-            + "stay unlocked. A service account cannot see your Private vault, so it reaches only "
-            + "what you gave it.",
+            "Create a 1Password service account, grant it access to this vault specifically, and "
+            + "paste its token on the setup page under \"Service account token\". Nothing then has "
+            + "to stay unlocked, and 1Password itself does not need to be installed on this PC at "
+            + "all. A service account cannot see your Private vault, so it reaches only what you "
+            + "gave it.\n\n"
+            + "The token is never written anywhere — not to disk, not to the vault — so it has to "
+            + "be pasted again after every restart. That is the trade: an install set to start at "
+            + "login serves nothing until someone enters it.",
 
         VaultBackendKind.ProtonPass =>
             "Create a Proton Pass personal access token scoped to this vault and put it in the "
@@ -119,15 +127,20 @@ public static class VaultLockGuidance
     /// The one thing a 1Password user has to know that nothing on screen would otherwise tell them:
     /// the desktop app has to stay running, and getting back from a restart has an order to it.
     ///
-    /// RavensPort reaches 1Password over a connection the SDK opens once and holds for as long as
-    /// the process lives. Closing or restarting the desktop app breaks it, and neither side can
-    /// rebuild it unaided: the connection is over a named pipe, a pipe survives while either end
-    /// still holds it, and the SDK's own way of handing it back is a message down that same pipe —
-    /// so once 1Password has gone there is no longer any channel on which to say goodbye. Only
-    /// RavensPort exiting frees the name for 1Password to claim again.
+    /// The reason, established by experiment and reported as
+    /// <see href="https://github.com/1Password/onepassword-ipc-client/issues/9">ipc-client#9</see>:
+    /// 1Password stages its own <c>op_sdk_ipc_client.dll</c> to an unprotected location when the app
+    /// starts, and a DLL mapped by another process cannot be moved on Windows. The move fails with a
+    /// sharing violation and 1Password treats that as fatal to its whole SDK IPC server, so the
+    /// integration channel is never created — silently, with no retry, for the life of that app
+    /// process. RavensPort loads that DLL on its first vault read and the SDK never releases it, so
+    /// RavensPort is the process in the way.
     ///
     /// Hence the sequence, and hence spelling it out rather than hinting: the obvious repair —
     /// restart 1Password — is the one that does not work.
+    ///
+    /// This applies to desktop app integration only. A service account never loads that library, so
+    /// the whole problem is absent from that mode, which is why the text below points at it.
     ///
     /// Empty for Proton Pass, which owns its session outright and has no such dependency.
     /// </summary>
@@ -138,7 +151,46 @@ public static class VaultLockGuidance
         // 1Password by itself does not work, and the recovery has an order.
         VaultBackendKind.OnePassword =>
             "Keep 1Password running. If it restarts, restarting it alone will not reconnect — "
-            + "quit both, start 1Password, then RavensPort.",
+            + "quit both, start 1Password, then RavensPort. A service account token avoids this "
+            + "entirely and needs no desktop app.",
+
+        _ => "",
+    };
+
+    /// <summary>
+    /// The known defect behind desktop app integration, in one line, shown the moment that mode is
+    /// chosen rather than after it fails.
+    ///
+    /// Said up front because the failure is silent, permanent for the life of the 1Password process,
+    /// and the obvious repair does not work — so a user who meets it without warning concludes
+    /// RavensPort is broken. Naming it as reported and pending keeps that honest in both directions:
+    /// it is not RavensPort's to fix, and it is not being ignored.
+    /// </summary>
+    public static string DesktopAppKnownIssue(VaultBackendKind kind) => kind switch
+    {
+        VaultBackendKind.OnePassword =>
+            "Known issue: if 1Password starts while RavensPort is already running, it will not open "
+            + "its integration channel and this mode stops working until both are restarted in order "
+            + "— reported to 1Password, fix pending on their side.",
+
+        _ => "",
+    };
+
+    /// <summary>
+    /// What a service-account token actually is, said before the user pastes one in.
+    ///
+    /// A scoped vault is not the same as a scoped risk. The token is a bearer credential: whoever
+    /// holds the string is the service account, from any machine, until it is rotated. None of that
+    /// is obvious from a box labelled "token", and the mistakes it invites — a text file, a chat
+    /// message, a borrowed laptop — are the kind that are not noticed until much later.
+    /// </summary>
+    public static string ServiceTokenWarning(VaultBackendKind kind) => kind switch
+    {
+        VaultBackendKind.OnePassword =>
+            "This token is a key to every vault the service account can reach, from any machine, "
+            + "until you rotate it — scoping the vault limits what it opens, not who can use it. "
+            + "Never keep it in plain text. Never enter it on a PC you do not own and trust. "
+            + "Never share it with anyone.",
 
         _ => "",
     };

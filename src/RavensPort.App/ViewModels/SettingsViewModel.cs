@@ -22,6 +22,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly VaultSyncQueue _syncQueue;
     private readonly VaultIntegrityService _integrity;
     private readonly ProtonPassAuthenticator _protonAuthenticator;
+    private readonly OnePasswordSession _onePasswordSession;
     private readonly ProxyConfigChangeNotifier _proxyConfigChangeNotifier;
     private readonly McpSourceConnectionPool _mcpSourceConnectionPool;
     private readonly DispatcherTimer _logTimer;
@@ -146,8 +147,10 @@ public sealed partial class SettingsViewModel : ObservableObject
         VaultIntegrityService integrity,
         ProtonPassAuthenticator protonAuthenticator,
         ProxyConfigChangeNotifier proxyConfigChangeNotifier,
-        McpSourceConnectionPool mcpSourceConnectionPool)
+        McpSourceConnectionPool mcpSourceConnectionPool,
+        OnePasswordSession onePasswordSession)
     {
+        _onePasswordSession = onePasswordSession;
         _protonAuthenticator = protonAuthenticator;
         _configStoreCache = configStoreCache;
         _activityLog = activityLog;
@@ -687,6 +690,18 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
 
         var wasSingleUse = IsSingleUse;
+
+        // The service-account token goes with the connection it opened. Keeping it would leave the
+        // next Connect silently authenticating as a service account the user thought they had just
+        // disconnected — and the whole promise of this mode is that the credential lives no longer
+        // than the session using it.
+        //
+        // Only the in-memory copy. A token the user deliberately saved behind Windows Hello is not
+        // this session's to throw away — disconnecting is about which vault is in use, and quietly
+        // destroying a stored credential would make it impossible to disconnect without also having
+        // to fetch the token again. Forgetting it is its own button, on the setup page.
+        _onePasswordSession.Clear();
+        NativeCliRunner.ResetInitialization();
 
         _gate.Disconnect();
         await TearDownAsync(
