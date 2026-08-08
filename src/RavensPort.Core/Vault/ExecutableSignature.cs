@@ -52,6 +52,19 @@ public static class ExecutableSignature
         // otherwise describe two different files. This is not hypothetical: WinGet installs op.exe
         // as a symlink in its Links directory, which is what most 1Password CLI installs put on
         // PATH, and reading the signature off the link fails outright.
+        // Said plainly rather than passed off as "unsigned". A symlink is a zero-byte reparse point
+        // with no signature of its own, so verifying one produces "is not signed at all" — a
+        // sentence that accuses a validly signed vendor binary of being tampered with, and sends
+        // the user hunting for a file that does not exist. A user hit exactly that: following the
+        // link failed for a moment, most likely while a scanner held it, and RavensPort refused to
+        // run 1Password's own CLI. Naming the real reason keeps the refusal honest and retryable.
+        if (IsUnresolvedLink(path))
+        {
+            return new SignatureInfo(false, null,
+                "is a link that could not be followed just now, so its signature could not be "
+                + "checked — this is usually temporary, so try again");
+        }
+
         path = ResolveFinalTarget(path);
 
         var filePathText = Marshal.StringToCoTaskMemUni(path);
@@ -132,6 +145,31 @@ public static class ExecutableSignature
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
             return path;
+        }
+    }
+
+    /// <summary>
+    /// Whether this path is a reparse point whose target could not be reached.
+    ///
+    /// The two halves both matter. Not a link at all means an ordinary file, which is fine to verify
+    /// directly. A link that resolves is fine too — the target is what gets verified. Only a link
+    /// that will not follow is a problem, and it is a problem worth naming rather than verifying
+    /// anyway: what sits behind an unfollowed link is zero bytes, and zero bytes are never signed.
+    /// </summary>
+    private static bool IsUnresolvedLink(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Attributes.HasFlag(FileAttributes.ReparsePoint)) return false;
+
+            var target = File.ResolveLinkTarget(path, returnFinalTarget: true)?.FullName;
+            return target is null || !File.Exists(target);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            // The link is there and cannot be followed, which is precisely the case this reports.
+            return true;
         }
     }
 

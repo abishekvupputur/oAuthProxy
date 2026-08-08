@@ -63,6 +63,42 @@ public class VaultProbeTests : IDisposable
     }
 
     [Fact]
+    public void ASymlinkOnPathResolvesToTheBinaryBehindIt()
+    {
+        // WinGet installs both CLIs as symlinks in its Links directory, and that is the copy that
+        // lands on PATH. A symlink is a zero-byte reparse point carrying no signature of its own,
+        // so handing one on meant the signature check inspected an empty file and reported
+        // 1Password's validly signed CLI as "not signed at all" — and RavensPort refused to run it.
+        //
+        // Skipped rather than failed where the OS will not create the link: that needs Developer
+        // Mode or elevation, and a machine without either should not fail the suite over it.
+        var target = Stub(_wellKnownDir, "op-real.exe");
+        var link = Path.Combine(_pathDir, "op.exe");
+
+        try
+        {
+            File.CreateSymbolicLink(link, target);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        Assert.Equal(target, VaultProbe.Find(Variable, "op.exe", [], _pathDir));
+    }
+
+    [Fact]
+    public void AnOrdinaryBinaryIsReturnedUnchanged()
+    {
+        // The other half of resolving links: a normal file must come back exactly as found, not
+        // rewritten into some canonical form the trust cache and the launcher would then disagree
+        // about.
+        var onPath = Stub(_pathDir, "op.exe");
+
+        Assert.Equal(onPath, VaultProbe.Find(Variable, "op.exe", [], _pathDir));
+    }
+
+    [Fact]
     public void AMalformedPathEntryDoesNotStopTheSearch()
     {
         // A long-lived Windows PATH accumulates junk — quoted entries, empty segments, and entries
