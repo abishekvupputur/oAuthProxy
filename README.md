@@ -27,7 +27,8 @@ into filtered, per-agent MCP endpoints.
 > The old `%AppData%\RavensPort\store.dat` is left where it is — RavensPort never reads or
 > deletes it, and the setup page offers to delete it once you are done with it.
 >
-> You will need **1Password** or **Proton Pass** installed and unlocked. See
+> You will need **1Password** or **Proton Pass** installed and unlocked — or, for 1Password, a
+> service account token, which needs nothing installed at all. See
 > [Where your configuration lives](#where-your-configuration-lives).
 
 ---
@@ -63,6 +64,9 @@ reach on its own.
 - **Automatic token refresh** — 10 minutes ahead of expiry, in the background
 - **Any credential backs any route** — not a fixed 1:1 mapping
 - **Stored in your password manager** — 1Password or Proton Pass holds every secret; nothing is written to this PC
+- **1Password without the desktop app** — sign in with a service account token instead, so nothing
+  local has to be installed, running, or unlocked; the token is kept only in memory unless you ask
+  for it to be saved behind Windows Hello
 - **A proxy key per endpoint** — every route and every funnel has its own, with its own expiry, so
   other processes on your machine cannot spend your grants and a key leaked from one client cannot
   reach the rest
@@ -543,16 +547,17 @@ authorize and nothing to refresh. Test appears only once a test endpoint is set.
 Everything — OAuth client secrets, access and refresh tokens, API keys, per-endpoint proxy keys,
 routes, upstreams, MCP sources and funnels, and settings — is stored in a vault called
 **`RavensPort`** in your password manager. **None of it is kept on this PC.** There is no local
-cache and no fallback file, so the proxy does not start until 1Password or Proton Pass is
-unlocked. (RavensPort does write logs, and — if you sign in to Proton Pass from inside the app —
-its own encrypted session for that sign-in. Neither contains any of the above. See
-[Logs](#logs).)
+cache and no fallback file, so the proxy does not start until the vault is reachable — 1Password or
+Proton Pass unlocked, or a 1Password service account token entered, which needs nothing local
+unlocked at all. (RavensPort does write logs, and — if you sign in to Proton Pass from inside the
+app, or ask it to remember a 1Password service account token — its own encrypted credential for
+that sign-in. Neither contains any of the above. See [Logs](#logs).)
 
 ### Supported managers
 
 | Manager | Client | Install |
 | --- | --- | --- |
-| 1Password | [Native SDK (embedded)](https://github.com/1Password/onepassword-sdk-go) | `winget install AgileBits.1Password` (Desktop App required) |
+| 1Password | [Native SDK (embedded)](https://github.com/1Password/onepassword-sdk-go), or `op.exe` when a service account token is used and the CLI is installed | `winget install AgileBits.1Password` (desktop app required for that mode) — or a **service account token**, which needs nothing installed |
 | Proton Pass | `pass-cli` | `winget install Proton.PassCLI`, or let RavensPort fetch it — the setup page offers **Download it for me** |
 
 Open RavensPort and it walks you through the rest: install, sign in, and set up a vault. It only
@@ -562,13 +567,53 @@ ever touches items it created, so the vault stays safe to keep other things in.
 
 
 
-**Signing in — 1Password.** In the 1Password desktop app, navigate to **Settings → Developer** and enable the **[1Password SDK](https://github.com/1Password/onepassword-sdk-go)**. (The older `op` CLI is no longer supported).
+**Signing in — 1Password.** There are two ways in, picked on the setup card. Which one you want is
+a decision about the machine, so RavensPort asks rather than guessing.
+
+**1. Desktop app integration.** In the 1Password desktop app, navigate to **Settings → Developer**
+and enable the **[1Password SDK](https://github.com/1Password/onepassword-sdk-go)**, then enter your
+account name — the exact name at the top of the 1Password sidebar, such as `Personal`.
 
 [![Enable 1Password SDK](media/onePasswordEnableSDK.png)](media/onePasswordEnableSDK.png)
 
 When RavensPort first tries to access your vault, 1Password will show a consent screen:
 
 [![1Password Consent](media/onePasswordConsentScreen.png)](media/onePasswordConsentScreen.png)
+
+This mode needs 1Password running and unlocked, and it carries a known defect on 1Password's side
+([ipc-client#9](https://github.com/1Password/onepassword-ipc-client/issues/9)): if 1Password starts
+while RavensPort is already running, it never opens its integration channel, silently, for the life
+of that 1Password process. Restarting 1Password alone does not fix it — quit both, start 1Password,
+then RavensPort. RavensPort now avoids causing this itself (see below), but it cannot repair a
+1Password restarted mid-session, and says so plainly instead of leaving you to guess.
+
+**2. Service account token.** <sub><sup>new in 4.3.0</sup></sub> Create a
+[1Password service account](https://developer.1password.com/docs/service-accounts/), grant it access
+to the `RavensPort` vault **explicitly** — a service account cannot see your Private vault, and
+without the grant it sees no vaults at all — and paste its token on the setup card. Nothing local
+has to be running, unlocked, or even installed, and none of the desktop-app defect above applies.
+
+> **A service account token is a bearer credential.** Whoever holds the string *is* the service
+> account, from any machine, until you rotate it — scoping the vault limits what it opens, not who
+> can use it. Never keep it in plain text, never enter it on a PC you do not own, never share it.
+
+By default the token is **written nowhere**: it lives in memory for the run and is asked for again
+after a restart, so an install set to start at login serves nothing until someone enters it. Tick
+**Keep this token on this PC, behind Windows Hello** and it is stored in Windows Credential Manager
+encrypted with a key derived from a Hello signature — never in plain text, and only a gesture on
+this PC brings it back. That has its own consent screen, and its own credential separate from the
+Proton Pass session, so **Forget saved token** cannot sign you out of Proton Pass. The offer is not
+made where Windows Hello is unavailable — there is no plain-text fallback and there must not be one.
+
+Once a token is saved, the card offers **Use the saved token** and **Forget saved token**; service
+accounts rotate, and a revoked one would otherwise fail every startup with nothing in the UI to
+clear it. **Disconnect** always drops the in-memory token, but never the saved one — that is what
+**Forget saved token** is for.
+
+Where the real `op.exe` is installed and its signature verifies, the token is passed through it
+instead of the in-process SDK, so the credential lives in a child process that exits rather than in
+a library mapped into RavensPort for the rest of the run. No CLI, or one that cannot be verified,
+simply uses the SDK — the token needs no CLI at all.
 
 
 **If both are installed** and neither vault clearly holds the configuration, RavensPort asks which
@@ -655,6 +700,13 @@ the UI.
 A banner appears while anything is unsaved, with an **I've unlocked it — save now** button. The
 sync also retries on its own, so unlocking is usually enough.
 
+**If you decline an authorization prompt**, that is taken as an answer: retrying is what raises the
+prompt again, so RavensPort stops asking until you press **I've unlocked it — save now**. Nothing is
+lost by declining — the pending changes stay in memory and go up on the next save. And a 1Password
+that locks, or a prompt dismissed, no longer costs you the connection: the SDK invalidates its client
+id in both cases, so RavensPort rebuilds the connection and replays the call once, rather than
+failing every later call for the life of the process.
+
 **The catch, stated plainly.** Nothing is written to disk while it waits — a pending change lives
 in memory and nowhere else, because a spill file would be a copy of your secrets sitting outside
 your password manager, which is the thing this app exists to avoid. So:
@@ -673,10 +725,11 @@ often than exiting mid-lock. Only the newest token is ever useful, so there is n
 keeping that a reconnect cannot restore.
 
 **Keeping it available.** The option that weakens nothing is a token — a 1Password service account
-or a Proton Pass personal access token, scoped to the vault in use — so nothing has to stay unlocked
-at all. It is under **Running unattended** on the Settings tab, deliberately not in the lock banner:
-that banner interrupts you mid-task and should offer the thirty-second fix, not a walkthrough of
-creating a long-lived credential. Failing that, you can raise the auto-lock timeout in your
+token entered on the setup card, or a Proton Pass personal access token in
+`PROTON_PASS_PERSONAL_ACCESS_TOKEN` (read-only), scoped to the vault in use — so nothing has to stay
+unlocked at all. **Running unattended** on the Settings tab explains both, deliberately away from the
+lock banner: that banner interrupts you mid-task and should offer the thirty-second fix, not a
+walkthrough of creating a long-lived credential. Failing that, you can raise the auto-lock timeout in your
 manager's security settings, but that is a real trade: the timeout exists to limit how long an
 unattended machine holds your secrets decrypted. RavensPort never changes those settings for you.
 
@@ -808,6 +861,26 @@ reachable and `https`.
 **An upstream returns 401 and you cannot tell which credential it objected to.** A 401 does not
 say, so all of the route's credentials are flagged. Set a **Test endpoint** on each and use the
 Test button to narrow it down — that reports per-credential, which a proxied request cannot.
+
+**1Password stops answering, and restarting 1Password does not help.** Its integration channel is
+only opened at 1Password startup, and it is not opened at all if another process holds
+`op_sdk_ipc_client.dll` at that moment — a defect on 1Password's side
+([ipc-client#9](https://github.com/1Password/onepassword-ipc-client/issues/9)). Quit both, start
+1Password, then RavensPort. RavensPort no longer touches that library while 1Password is closed, so
+the start-at-login case cannot happen; a 1Password restarted mid-session still requires the order
+above, and RavensPort says so instead of failing silently. A service account token avoids the whole
+problem — it never loads that library.
+
+**1Password says the CLI "is not signed at all", but it plainly is.** WinGet installs `op.exe` as a
+symlink in its Links directory, and that is the copy on `PATH`. A symlink is a zero-byte reparse
+point carrying no signature of its own, so the trust check was inspecting an empty file. RavensPort
+now resolves the link and verifies the binary behind it. A link that cannot be followed is reported
+as exactly that — temporary, and not an accusation that the vendor binary was tampered with — and
+service-account mode falls back to the in-process SDK rather than failing the connection.
+
+**RavensPort keeps raising 1Password prompts every few seconds.** Fixed in 4.3.0: a declined
+authorization was retried on a timer, and reaching the vault is what raises the prompt. A decline
+now stops the retries until you press **I've unlocked it — save now**.
 
 **An API key looks right but is always rejected.** Check the placement, not the key: a valid key
 in the wrong header is as broken as a wrong one, and Test reports both as `401`. Also check for a
