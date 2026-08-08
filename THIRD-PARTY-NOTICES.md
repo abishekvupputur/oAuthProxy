@@ -155,6 +155,18 @@ The archive contains `pass-cli.exe` and `libcrypto-3-x64.dll`; both are extracte
 unmodified, and the download is rejected outright if its SHA-256 does not match the value
 above.
 
+## Trademarks
+
+RavensPort bundles the 1Password and Proton Pass marks as image resources
+(`src/RavensPort.App/Assets/onepassword-logo.png`, `proton-pass-logo.png`) and shows them on the
+screens that connect to, or ask for a credential for, that manager.
+
+Those marks belong to AgileBits Inc. and Proton AG respectively. They are used nominatively — to
+identify which password manager a screen is talking about — and no endorsement, affiliation, or
+sponsorship is claimed or implied. Neither company is a party to this project. If you redistribute a
+modified RavensPort, the marks stay theirs and their brand guidelines, not the MIT License, govern
+what you may do with them.
+
 ## What the licenses require of you
 
 **MIT** — include the copyright notice and permission notice when redistributing.
