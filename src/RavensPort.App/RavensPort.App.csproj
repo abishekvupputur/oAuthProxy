@@ -20,7 +20,6 @@
          token. AgileBits' trademark, used to identify the manager being connected to and nothing
          else. See THIRD-PARTY-NOTICES.md. -->
     <Resource Include="Assets\onepassword-logo.png" />
-    <Resource Include="..\RavensPort.Core\Assets\logo.png" Link="Assets\ravensport-mark.png" />
   </ItemGroup>
 
   <ItemGroup>

@@ -9,7 +9,8 @@
         WindowStyle="None" ResizeMode="NoResize" ShowInTaskbar="True" Topmost="True"
         WindowStartupLocation="Manual"
         Background="{StaticResource BgBrush}" Foreground="{StaticResource TextBrush}"
-        TextElement.FontFamily="Segoe UI">
+        TextElement.FontFamily="Segoe UI"
+        UseLayoutRounding="True">
     <shell:WindowChrome.WindowChrome>
         <shell:WindowChrome CaptionHeight="34" ResizeBorderThickness="0" CornerRadius="0"
                            GlassFrameThickness="0"/>
@@ -44,7 +45,14 @@
                     BorderThickness="0,0,0,1">
                 <Grid>
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="11,0,0,0">
-                        <Image Source="/Assets/ravensport-mark.png" Width="17" Height="17" Margin="0,0,7,0"/>
+                        <!-- HighQuality (Fant) on every mark in this window. The default Linear
+                             filter point-drops most of the source when the shrink is this steep —
+                             17 device-independent units from a full-size mark — and the feather
+                             edges came out ragged. Fant area-averages instead, which is what keeps
+                             these readable at a glance, and readable is the whole job: this is the
+                             window whose job is to be recognised as RavensPort's. -->
+                        <Image Source="/Assets/logo.png" Width="17" Height="17" Margin="0,0,7,0"
+                               RenderOptions.BitmapScalingMode="HighQuality"/>
                         <TextBlock Text="RavensPort access request" FontSize="12"
                                    Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center"/>
                     </StackPanel>
@@ -78,7 +86,11 @@
 
                 <Border Width="72" Height="72" CornerRadius="14" Background="#111111"
                         BorderBrush="{StaticResource BorderBrush0}" BorderThickness="1">
-                    <Image Source="/Assets/ravensport-mark.png" Stretch="Uniform" Margin="2"/>
+                    <!-- The app's own full-size mark, not the 192px copy the callback page embeds:
+                         this tile is 68 units, which is already 136 real pixels at 200% scaling and
+                         more on a 4K display, so the small one had nothing left to give. -->
+                    <Image Source="/Assets/logo.png" Stretch="Uniform" Margin="2"
+                           RenderOptions.BitmapScalingMode="HighQuality"/>
                 </Border>
 
                 <Grid Grid.Column="1" VerticalAlignment="Center">
@@ -95,7 +107,8 @@
                      none at all. -->
                 <Border Grid.Column="2" Width="72" Height="72" CornerRadius="14" Background="#111111"
                         BorderBrush="{StaticResource BorderBrush0}" BorderThickness="1">
-                    <Image x:Name="VendorLogo" Source="/Assets/proton-pass-logo.png" Stretch="Uniform" Margin="6"/>
+                    <Image x:Name="VendorLogo" Source="/Assets/proton-pass-logo.png" Stretch="Uniform" Margin="6"
+                           RenderOptions.BitmapScalingMode="HighQuality"/>
                 </Border>
             </Grid>
 
